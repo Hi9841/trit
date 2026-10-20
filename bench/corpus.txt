@@ -1,0 +1,16 @@
+short-01|Send the report to Maria before lunch.
+short-02|Open a new issue and assign it to me.
+short-03|Thanks, that works for me.
+short-04|Can we move the meeting to Thursday at three?
+med-01|The build failed because the lock file still pins an old version of the windows crate.
+med-02|Please review the pull request when you have a minute and leave comments on the error handling.
+med-03|I tested it on two machines and the overlay opens in under a second on both of them.
+med-04|Restart the Kubernetes pod, then check the PostgreSQL logs for connection errors.
+med-05|The API returns a JSON object with the user name, the email address, and the creation date.
+med-06|We should cache the provider list so that the first prompt appears faster after startup.
+long-01|This morning I spent most of my time on the release. The installer now copies the license files, the update check runs in the background, and the settings panel remembers the last tab. Next week I want to look at the microphone recovery path, because two people reported that the app stops listening after the headset reconnects.
+long-02|Here is my summary of the design review. The team agreed to keep the speech model local, so nothing leaves the machine. We will add a custom dictionary for names and product terms, and we will measure accuracy on real recordings before we change the default model. The open question is whether the editing mode should use a small local language model or a cloud service.
+long-03|To reproduce the bug, open the settings panel, turn off auto paste, and dictate a long sentence into a text editor. The text is copied to the clipboard, but the history entry shows the wrong latency. I think the timer starts when the key is pressed instead of when it is released.
+long-04|Dear Daniel, thank you for the quick reply. I read the contract and I have two small changes. First, the payment date should be the fifteenth of each month. Second, the support period should start on the day we deliver the final version, not on the day we sign. Everything else looks good to me.
+tech-01|Run cargo clippy with all targets and treat every warning as an error.
+tech-02|The function returns an Option of a static string, and the caller unwraps it with a default value.
