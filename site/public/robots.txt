@@ -1,0 +1,12 @@
+# Every crawler may read every page, AI crawlers by name.
+User-agent: GPTBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: *
+Allow: /

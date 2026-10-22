@@ -6,10 +6,11 @@ import Footer from "../components/Footer.astro";
 import Cmd from "../components/Cmd.astro";
 import { render, sections } from "../lib/markdown";
 import { links } from "../lib/links";
-import { readRepo } from "../lib/repo";
+import { readRepo, updatedOf } from "../lib/repo";
 import { idle, plugs } from "../lib/sketch";
 
 const README = "trit/README.md";
+const updated = updatedOf(["trit/site/src/pages/docs.astro", README, "trit/Cargo.toml"]);
 
 // This page is the README. Its own contents list is replaced by the index on
 // the left, and its performance table by the Benchmarks page.
@@ -44,6 +45,7 @@ const version = /^version = "([^"]+)"/m.exec(readRepo("trit/Cargo.toml"))?.[1] ?
 <Base
   title="Docs · Trit"
   description="How to use Trit, speech to text on the CPU: the trit command line, the Rust crate, the C ABI, and bindings for Python, C#, Node and Bun. Models, languages, cleanup, precision and limits."
+  updated={updated}
 >
   <Header />
   <main>
@@ -111,7 +113,7 @@ const version = /^version = "([^"]+)"/m.exec(readRepo("trit/Cargo.toml"))?.[1] ?
       </figure>
     </div>
   </main>
-  <Footer />
+  <Footer updated={updated} />
 </Base>
 
 <script>

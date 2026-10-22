@@ -1,0 +1,283 @@
+---
+import Base from "../layouts/Base.astro";
+import Header from "../components/Header.astro";
+import PageHead from "../components/PageHead.astro";
+import Footer from "../components/Footer.astro";
+import { ROWS, findings, rivals, sharedOf, trit } from "../lib/compare";
+import { benchDate } from "../lib/data";
+import { links } from "../lib/links";
+import { updatedOf } from "../lib/repo";
+
+const updated = updatedOf([
+  "trit/site/src/pages/compare.astro",
+  "trit/site/src/lib/compare.ts",
+  "desktop/bench/benchmarks.json",
+]);
+
+const columns = [trit, ...rivals];
+const ms = (x: number) => `${Math.round(x)} ms`;
+---
+
+<Base
+  title="Trit vs whisper.cpp, faster-whisper and sherpa-onnx"
+  description="Trit against whisper.cpp, faster-whisper and sherpa-onnx: license, models, GPU, streaming, and measured time, errors and memory on the same clips and the same CPU."
+  updated={updated}
+>
+  <Header />
+  <main>
+    <PageHead label="Compare" title="Trit, or one of the others?">
+      <p>
+        whisper.cpp, faster-whisper and sherpa-onnx are the runtimes people pick for speech to text on a CPU. This page
+        puts Trit next to each: what it is, what it measured on the same clips and the same computer, and when the
+        other one is the better choice.
+      </p>
+      <p class="meta">
+        Measured {benchDate} on an AMD Ryzen 9 7950X3D, CPU only. All runtimes: <a href={links.benchmarks}
+          >Benchmarks</a
+        >.
+      </p>
+    </PageHead>
+
+    <section class="grid glance" aria-labelledby="glance">
+      <div class="title">
+        <h2 id="glance">At a glance</h2>
+        <p>From each project's own documentation.</p>
+      </div>
+      <div class="data-table">
+        <table>
+          <thead>
+            <tr>
+              <td></td>
+              {
+                columns.map((c) => (
+                  <th scope="col" class:list={{ us: c === trit }}>
+                    {c === trit ? c.name : <a href={c.url}>{c.name}</a>}
+                  </th>
+                ))
+              }
+            </tr>
+          </thead>
+          <tbody>
+            {
+              ROWS.map(([key, name]) => (
+                <tr>
+                  <th scope="row">{name}</th>
+                  {columns.map((c) => (
+                    <td class:list={{ us: c === trit }}>{c[key]}</td>
+                  ))}
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    {
+      rivals.map((rival) => {
+        const shared = sharedOf(rival);
+
+        return (
+          <section class="grid rival" aria-labelledby={rival.slug}>
+            <div class="title">
+              <h2 id={rival.slug}>Trit vs {rival.name}</h2>
+              <p>
+                <a href={rival.url}>{rival.name}</a>: {rival.license}, {rival.models}.
+              </p>
+            </div>
+            <div class="body">
+              {shared.map((s) => {
+                const found = findings(s, rival);
+
+                return (
+                  <div class="model">
+                    <h3>{found.model}</h3>
+                    <ul class="found">
+                      {found.lines.map((line) => (
+                        <li>{line}</li>
+                      ))}
+                    </ul>
+                    <div class="data-table">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th scope="col">Runtime</th>
+                            <th scope="col" class="num">
+                              Time per clip
+                            </th>
+                            <th scope="col" class="num">
+                              Errors, all clips
+                            </th>
+                            <th scope="col" class="num">
+                              MB after all clips
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {[s.trit, ...s.runs].map((r) => (
+                            <tr class:list={{ us: r.trit }}>
+                              <th scope="row">
+                                {r.runtime.replace(" (CTranslate2)", "")}
+                                <span>{r.trit ? `default: ${r.precision}` : r.precision}</span>
+                              </th>
+                              <td class="num">{ms(r.ms)}</td>
+                              <td class="num">{r.errors}</td>
+                              <td class="num">{r.run_mb}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+              <h3>Pick {rival.name} when</h3>
+              <ul class="pick">
+                {rival.pick.map((p) => (
+                  <li>{p}</li>
+                ))}
+              </ul>
+            </div>
+          </section>
+        );
+      })
+    }
+
+    <section class="grid rival" aria-labelledby="pick-trit">
+      <div class="title">
+        <h2 id="pick-trit">Pick Trit when</h2>
+      </div>
+      <div class="body">
+        <ul class="pick">
+          <li>You run on an x86-64 CPU and want the shortest time per clip, with no GPU.</li>
+          <li>You want Parakeet, Canary, Whisper and Moonshine from one engine, from the files as published.</li>
+          <li>Your program is Rust, C, Python, C#, Node or Bun, or an AI agent that reads TOON or JSON.</li>
+          <li>Your use is noncommercial, or you ask for a commercial license (<a href={links.pricing}>Pricing</a>).</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+  <Footer updated={updated} />
+</Base>
+
+<style>
+  .meta {
+    font-size: 15px;
+    color: var(--muted);
+  }
+  .meta a {
+    text-decoration: underline;
+    text-decoration-color: var(--rule);
+    text-underline-offset: 4px;
+  }
+  .glance {
+    margin-top: 128px;
+  }
+  .rival {
+    margin-top: 128px;
+    align-items: start;
+  }
+  .title {
+    grid-column: 1 / span 3;
+  }
+  h2 {
+    margin: 0 0 12px;
+    font-size: 24px;
+    font-weight: 500;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+  }
+  .title p {
+    margin: 0 0 8px;
+    font-size: 15px;
+    color: var(--muted);
+  }
+  .title a,
+  thead a,
+  .pick a {
+    text-decoration: underline;
+    text-decoration-color: var(--rule);
+    text-underline-offset: 4px;
+  }
+  .glance .data-table,
+  .body {
+    grid-column: 4 / -1;
+    min-width: 0;
+  }
+  .glance .data-table {
+    margin: 0;
+  }
+  .glance table {
+    min-width: 760px;
+    table-layout: fixed;
+  }
+  .glance td {
+    font-size: 14px;
+  }
+  .us {
+    font-weight: 500;
+    color: var(--ink);
+  }
+  thead .us {
+    color: var(--accent-text);
+  }
+  tbody th {
+    padding: 12px 16px 12px 0;
+    border-bottom: 1px solid var(--rule);
+    font-size: 15px;
+    font-weight: 500;
+    white-space: normal;
+    color: var(--ink);
+  }
+  tbody th span {
+    display: block;
+    font-size: 14px;
+    font-weight: 400;
+    color: var(--muted);
+  }
+  tr.us th {
+    color: var(--accent-text);
+  }
+  h3 {
+    margin: 0 0 12px;
+    font-size: 17px;
+    font-weight: 500;
+  }
+  .model + .model,
+  .model + h3 {
+    margin-top: 48px;
+  }
+  .found,
+  .pick {
+    max-width: var(--measure);
+    margin: 0;
+    padding-left: 20px;
+    font-size: 16px;
+    line-height: 1.55;
+  }
+  .found li + li,
+  .pick li + li {
+    margin-top: 6px;
+  }
+  .model .data-table {
+    margin: 20px 0 0;
+  }
+  .model table {
+    max-width: 640px;
+  }
+
+  @media (max-width: 900px) {
+    .title,
+    .glance .data-table,
+    .body {
+      grid-column: 1 / -1;
+    }
+    .title {
+      margin-bottom: 16px;
+    }
+    .glance,
+    .rival {
+      margin-top: 96px;
+    }
+  }
+</style>

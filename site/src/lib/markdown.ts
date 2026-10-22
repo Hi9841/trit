@@ -2,6 +2,7 @@
 // ids, links rewritten for the site, and code highlighted for both themes.
 import { Marked, type Token, type Tokens } from "marked";
 import { codeToHtml, createCssVariablesTheme } from "shiki";
+import { links } from "./links";
 import { blobUrl } from "./repo";
 
 // The ids GitHub gives headings, so "#c-and-c" in the README still works.
@@ -16,8 +17,8 @@ export function slug(text: string) {
 
 // Pages on this site that replace a file of the repository.
 const onSite = new Map([
-  ["docs/engine-comparison.md", "/benchmarks"],
-  ["trit/README.md", "/docs"],
+  ["docs/engine-comparison.md", links.benchmarks],
+  ["trit/README.md", links.docs],
 ]);
 
 // A link relative to `from` (a file of the repository) becomes a site page,

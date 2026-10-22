@@ -1,0 +1,206 @@
+---
+import Base from "../layouts/Base.astro";
+import Header from "../components/Header.astro";
+import PageHead from "../components/PageHead.astro";
+import Footer from "../components/Footer.astro";
+import { links } from "../lib/links";
+import { updatedOf } from "../lib/repo";
+
+const updated = updatedOf(["trit/site/src/pages/pricing.astro", "LICENSE", "trit/README.md"]);
+
+// The model licenses, from trit/README.md (License).
+const models = [
+  ["Parakeet, Canary", "CC-BY-4.0"],
+  ["Whisper, Moonshine", "MIT"],
+  ["S1-mini", "Apache-2.0 with a naming clause"],
+];
+---
+
+<Base
+  title="Pricing · Trit"
+  description="Trit is free for noncommercial use under the PolyForm Noncommercial License 1.0.0. For commercial use, ask for a license on X or in a GitHub issue."
+  updated={updated}
+>
+  <Header />
+  <main>
+    <PageHead label="Pricing" title="Free for noncommercial use.">
+      <p>
+        Trit is under the PolyForm Noncommercial License 1.0.0. There is no account, no key and no paid tier of the
+        engine: every model, binding and precision is in the free one.
+      </p>
+    </PageHead>
+
+    <section class="grid plans" aria-label="Plans">
+      <article class="plan">
+        <h2>Noncommercial</h2>
+        <p class="price">Free</p>
+        <p>Use, change and share Trit for any purpose that does not make money. The license names:</p>
+        <ul>
+          <li>Personal study, hobby projects, private use and testing.</li>
+          <li>Research and experiments for public knowledge.</li>
+          <li>Charities, schools, public research, health and safety organizations, and government bodies.</li>
+        </ul>
+        <a class="act" href={links.license}>Read the license</a>
+      </article>
+      <article class="plan">
+        <h2>Commercial</h2>
+        <p class="price">On request</p>
+        <p>
+          A product you sell, a paid service, or work for a company: ask for a commercial license. Say what you build
+          and how many people use it.
+        </p>
+        <ul>
+          <li>On X: <a href={links.x}>@hi9841s</a></li>
+          <li>On GitHub: <a href={links.issues}>open an issue</a></li>
+        </ul>
+        <a class="act" href={links.x}>Ask on X</a>
+      </article>
+    </section>
+
+    <section class="grid models" aria-labelledby="model-licenses">
+      <div class="title">
+        <h2 id="model-licenses">The models have their own licenses</h2>
+        <p>Trit's license covers the engine. Follow each model's license when you ship the model.</p>
+      </div>
+      <div class="data-table">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Models</th>
+              <th scope="col">License</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              models.map(([name, license]) => (
+                <tr>
+                  <th scope="row">{name}</th>
+                  <td>{license}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <Footer updated={updated} />
+</Base>
+
+<style>
+  .plans {
+    margin-top: 128px;
+    align-items: stretch;
+  }
+  .plan {
+    display: flex;
+    flex-direction: column;
+    padding-top: 24px;
+    border-top: 1px solid var(--ink);
+    font-size: 16px;
+    line-height: 1.55;
+  }
+  .plan:first-child {
+    grid-column: 1 / span 5;
+  }
+  .plan:last-child {
+    grid-column: 7 / span 5;
+  }
+  h2 {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 500;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+  }
+  .price {
+    margin: 16px 0 24px;
+    font-size: clamp(40px, 4vw, 56px);
+    font-weight: var(--display-weight);
+    line-height: 1;
+    letter-spacing: -0.05em;
+  }
+  .plan p {
+    margin-top: 0;
+  }
+  .plan ul {
+    margin: 0 0 32px;
+    padding-left: 20px;
+  }
+  .plan li + li {
+    margin-top: 6px;
+  }
+  .plan a:not(.act) {
+    text-decoration: underline;
+    text-decoration-color: var(--rule);
+    text-underline-offset: 4px;
+  }
+  .act {
+    align-self: start;
+    margin-top: auto;
+    padding: 14px 18px;
+    border: 1px solid var(--ink);
+    border-radius: 2px;
+    font-size: 15px;
+    font-weight: 500;
+    text-decoration: none;
+    transition:
+      transform 160ms var(--ease-out),
+      background-color 150ms ease,
+      color 150ms ease;
+  }
+  .act:active {
+    transform: scale(0.97);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .act:hover {
+      background: var(--ink);
+      color: var(--paper);
+    }
+  }
+  .models {
+    margin-top: 128px;
+    align-items: start;
+  }
+  .title {
+    grid-column: 1 / span 4;
+  }
+  .title h2 {
+    margin-bottom: 12px;
+  }
+  .title p {
+    margin: 0;
+    font-size: 15px;
+    color: var(--muted);
+  }
+  .models .data-table {
+    grid-column: 6 / -1;
+    margin: 0;
+  }
+  tbody th {
+    padding: 12px 16px 12px 0;
+    border-bottom: 1px solid var(--rule);
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--ink);
+  }
+
+  @media (max-width: 900px) {
+    .plan:first-child,
+    .plan:last-child,
+    .title,
+    .models .data-table {
+      grid-column: 1 / -1;
+    }
+    .plan + .plan {
+      margin-top: 64px;
+    }
+    .title {
+      margin-bottom: 16px;
+    }
+    .plans,
+    .models {
+      margin-top: 96px;
+    }
+  }
+</style>

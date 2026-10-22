@@ -7,27 +7,34 @@ import Stats from "../components/Stats.astro";
 import Footer from "../components/Footer.astro";
 import { links } from "../lib/links";
 import { megabytes, redux } from "../lib/data";
+import { stat, tagline, whatIs } from "../lib/facts";
+import { updatedOf } from "../lib/repo";
 import { crank, suitcase } from "../lib/sketch";
+
+const updated = updatedOf([
+  "trit/site/src/pages/index.astro",
+  "trit/site/src/lib/facts.ts",
+  "desktop/bench/benchmarks.json",
+  "trit/src/catalog.rs",
+]);
 ---
 
 <Base
-  title="Trit · speech to text on the CPU"
-  description="Trit runs Parakeet, Whisper, Canary and Moonshine checkpoints from Hugging Face on its own CPU kernels. No GPU, no Python, no PyTorch."
+  title={`Trit · ${tagline}`}
+  description={whatIs}
+  updated={updated}
 >
   <Header />
   <main>
     <section class="grid hero">
-      <p class="label">Speech-to-text engine · Rust · CPU only</p>
-      <h1 class="display xl">
-        <span class="line">Speech in,</span><span class="line">text out,</span><span class="line"
-          >no GPU.</span
-        >
-      </h1>
-      <div class="side">
-        <p class="lead">
-          Trit runs Parakeet, Whisper, Canary and Moonshine checkpoints straight from Hugging Face,
-          on its own kernels. No Python, no PyTorch, no ONNX Runtime.
-        </p>
+      <div class="words">
+        <p class="label">Speech-to-text engine · Rust · CPU only</p>
+        <h1 class="display xl">
+          <span class="line">Speech in,</span><span class="line">text out,</span><span class="line"
+            >no GPU.</span
+          >
+        </h1>
+        <p class="lead">{whatIs}</p>
         <Cmd command="trit transcribe take.wav" />
         <div class="more">
           <a href={links.docs}>Read the docs</a>
@@ -48,6 +55,9 @@ import { crank, suitcase } from "../lib/sketch";
         </p>
       </div>
       <Race />
+      <p class="stat">
+        {stat.text} <a href={links.benchmarks}>The results</a>, {stat.date}.
+      </p>
     </section>
 
     <section class="grid pack">
@@ -62,7 +72,7 @@ import { crank, suitcase } from "../lib/sketch";
       <div class="numbers"><Stats /></div>
     </section>
   </main>
-  <Footer />
+  <Footer updated={updated} />
 </Base>
 
 <script>
@@ -75,27 +85,38 @@ import { crank, suitcase } from "../lib/sketch";
 </script>
 
 <style>
+  /* Two columns of equal weight, centred on the same axis: the words on
+     five, the drawing on seven (its own margin keeps them apart). */
   .hero {
-    padding-top: 64px;
+    align-items: center;
+    padding-top: 72px;
+  }
+  .words {
+    grid-column: 1 / span 5;
   }
   .hero .label {
-    grid-column: 1 / span 6;
-    grid-row: 1;
-    margin-bottom: 24px;
+    margin-bottom: 28px;
   }
   .hero h1 {
-    grid-column: 1 / span 5;
-    grid-row: 2;
+    font-size: clamp(3rem, 6.6vw, 6.5rem);
+    line-height: 0.94;
+    letter-spacing: -0.05em;
   }
-  .side {
-    grid-column: 1 / span 4;
-    grid-row: 3;
-    margin-top: 56px;
+  .hero .lead {
+    max-width: 34ch;
+    margin: 36px 0 0;
+    font-size: 19px;
+    line-height: 1.55;
+    color: var(--muted);
+  }
+  .words :global(.cmd) {
+    max-width: 400px;
+    margin-top: 32px;
   }
   .more {
     display: flex;
     gap: 24px;
-    margin-top: 16px;
+    margin-top: 20px;
     font-size: 15px;
   }
   .more a {
@@ -109,12 +130,8 @@ import { crank, suitcase } from "../lib/sketch";
       text-decoration-color: var(--ink);
     }
   }
-  /* The one break from the grid: the drawing runs off the right edge. */
   .hero .art {
     grid-column: 6 / -1;
-    grid-row: 1 / span 3;
-    align-self: center;
-    margin-right: calc(var(--margin) * -1);
   }
 
   .proof {
@@ -133,6 +150,21 @@ import { crank, suitcase } from "../lib/sketch";
   .proof :global(.race) {
     grid-column: 7 / -1;
   }
+  /* The benchmark's finding, in a sentence that can be quoted. */
+  .stat {
+    grid-column: 7 / -1;
+    max-width: var(--measure);
+    margin: 32px 0 0;
+    font-size: 15px;
+    line-height: 1.55;
+    color: var(--muted);
+  }
+  .stat a {
+    color: var(--ink);
+    text-decoration: underline;
+    text-decoration-color: var(--rule);
+    text-underline-offset: 4px;
+  }
 
   .pack {
     margin-top: 160px;
@@ -146,23 +178,21 @@ import { crank, suitcase } from "../lib/sketch";
   }
 
   @media (max-width: 900px) {
-    .hero .label,
-    .hero h1,
-    .side,
+    .words,
     .hero .art,
     .intro,
     .proof :global(.race),
+    .stat,
     .pack .art,
     .numbers {
       grid-column: 1 / -1;
       grid-row: auto;
     }
-    .side {
-      margin-top: 48px;
+    .hero {
+      padding-top: 48px;
     }
     .hero .art {
-      margin-top: 48px;
-      margin-right: 0;
+      margin-top: 56px;
     }
     .proof :global(.race),
     .numbers {

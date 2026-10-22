@@ -7,6 +7,7 @@ text out. It can also clean a raw transcript with Superwhisper S1-mini.
 
 TDT, the dictation app in this repository, uses Trit for all of its speech.
 Trit is free for noncommercial use only (see [License](#license)).
+The website, with benchmarks and a comparison: <https://hi9841.github.io/tdt/>.
 
 **Agents:** read [AGENTS.md](AGENTS.md) first. It gives the steps to put Trit
 into a program, and the rules to change Trit.

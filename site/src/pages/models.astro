@@ -7,7 +7,7 @@ import Cmd from "../components/Cmd.astro";
 import { DEFAULT_MODEL, catalog, downloadCommand, familyOf, languagesOf, megabytes, tritCleanup, tritRunOf } from "../lib/data";
 import { render, sections } from "../lib/markdown";
 import { links } from "../lib/links";
-import { readRepo } from "../lib/repo";
+import { readRepo, updatedOf } from "../lib/repo";
 import { shelf } from "../lib/sketch";
 
 // Families in the order of the catalog, each with its models.
@@ -15,6 +15,13 @@ const families = [...new Set(catalog.map((m) => familyOf(m.kind)))].map((family)
   family,
   models: catalog.filter((m) => familyOf(m.kind) === family),
 }));
+
+const updated = updatedOf([
+  "trit/site/src/pages/models.astro",
+  "trit/src/catalog.rs",
+  "trit/README.md",
+  "desktop/bench/benchmarks.json",
+]);
 
 const largest = Math.max(...catalog.map((m) => m.mb));
 
@@ -26,6 +33,7 @@ const search = await render(readme.slice(readme.indexOf("Get one")), "trit/READM
 <Base
   title="Models · Trit"
   description="The Hugging Face checkpoints Trit runs: Parakeet, Canary, Whisper, Moonshine, and S1-mini for cleanup. Sizes, languages, speed, and the download command."
+  updated={updated}
 >
   <Header />
   <main>
@@ -90,7 +98,7 @@ const search = await render(readme.slice(readme.indexOf("Get one")), "trit/READM
       <div class="prose"><h2 id="where">Download, and where Trit looks</h2><Fragment set:html={search} /></div>
     </section>
   </main>
-  <Footer />
+  <Footer updated={updated} />
 </Base>
 
 <script>

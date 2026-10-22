@@ -1,4 +1,6 @@
 ---
+// A shell command in a terminal line, with a copy button. Without JavaScript
+// the button is hidden and the command is plain, selectable text.
 interface Props {
   command: string;
 }
@@ -7,32 +9,45 @@ const { command } = Astro.props;
 ---
 
 <div class="cmd">
+  <span class="prompt" aria-hidden="true">$</span>
   <code>{command}</code>
-  <button class="copy" type="button" data-copy={command}>Copy</button>
+  <button class="copy" type="button" data-copy={command} aria-label="Copy command">
+    <svg class="icon copy-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.5"></rect>
+      <path d="M10.5 3.5 A1.5 1.5 0 0 0 9 2 H3.5 A1.5 1.5 0 0 0 2 3.5 V9 A1.5 1.5 0 0 0 3.5 10.5"></path>
+    </svg>
+    <svg class="icon check-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3 8.5 L6.5 12 L13 4.5"></path>
+    </svg>
+  </button>
+  <span class="status" role="status"></span>
 </div>
 
 <script>
-  // The label swaps through a short blur instead of jumping.
-  for (const button of document.querySelectorAll<HTMLButtonElement>(".copy")) {
-    const swap = (text: string) => {
-      button.classList.add("swap");
-      setTimeout(() => {
-        button.textContent = text;
-        button.classList.remove("swap");
-      }, 120);
-    };
+  // Copied: the icon turns into a check for a moment. If the clipboard is
+  // closed to the page, the command is selected for Ctrl+C instead.
+  for (const box of document.querySelectorAll<HTMLElement>(".cmd")) {
+    const button = box.querySelector<HTMLButtonElement>(".copy")!;
+    const code = box.querySelector("code")!;
+    const status = box.querySelector(".status")!;
+    let timer = 0;
 
     button.addEventListener("click", async () => {
-      let copied = true;
+      clearTimeout(timer);
 
       try {
         await navigator.clipboard.writeText(button.dataset.copy ?? "");
+        box.classList.add("copied");
+        status.textContent = "Copied";
       } catch {
-        copied = false;
+        getSelection()?.selectAllChildren(code);
+        status.textContent = "Selected: press Ctrl+C";
       }
 
-      swap(copied ? "Copied" : "Select it");
-      setTimeout(() => swap("Copy"), 1600);
+      timer = window.setTimeout(() => {
+        box.classList.remove("copied");
+        status.textContent = "";
+      }, 1600);
     });
   }
 </script>
@@ -41,56 +56,113 @@ const { command } = Astro.props;
   .cmd {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 12px 0;
-    border-top: 1px solid var(--rule);
-    border-bottom: 1px solid var(--rule);
+    gap: 12px;
+    height: 48px;
+    padding: 0 6px 0 16px;
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    background: var(--tint);
     font-family: var(--mono);
-    font-size: 15px;
+    font-size: 14.5px;
+  }
+  .prompt {
+    flex: none;
+    color: var(--muted);
+    user-select: none;
   }
   code {
+    flex: 1;
     min-width: 0;
     overflow-x: auto;
     font: inherit;
+    color: var(--ink);
     white-space: nowrap;
     scrollbar-width: none;
   }
-  code::before {
-    content: "$ ";
-    color: var(--muted);
-  }
   .copy {
-    min-width: 72px;
-    padding: 16px 0 16px 16px;
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
     border: 0;
+    border-radius: 4px;
     background: none;
     color: var(--muted);
-    font: 500 14px/1 var(--sans);
-    text-align: right;
     cursor: pointer;
     transition:
       transform 160ms var(--ease-out),
       color 150ms ease,
-      opacity 120ms ease,
-      filter 120ms ease;
+      background-color 150ms ease;
   }
   .copy:active {
-    transform: scale(0.97);
+    transform: scale(0.94);
   }
-  .copy.swap {
+  .icon {
+    grid-area: 1 / 1;
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition:
+      opacity 180ms var(--ease-out),
+      transform 180ms var(--ease-out),
+      filter 180ms var(--ease-out);
+  }
+  .check-icon {
     opacity: 0;
+    transform: scale(0.6);
     filter: blur(2px);
+  }
+  .copied .copy {
+    color: var(--ink);
+  }
+  .copied .copy-icon {
+    opacity: 0;
+    transform: scale(0.6);
+    filter: blur(2px);
+  }
+  .copied .check-icon {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+  .status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  /* Without JavaScript the button would do nothing. */
+  :global(html:not(.js)) .copy {
+    display: none;
   }
   @media (hover: hover) and (pointer: fine) {
     .copy:hover {
+      background: var(--rule);
       color: var(--ink);
     }
   }
+  @media (prefers-reduced-motion: reduce) {
+    .icon {
+      transition: opacity 120ms ease;
+    }
+    .check-icon,
+    .copied .copy-icon {
+      transform: none;
+      filter: none;
+    }
+  }
   @media (forced-colors: active) {
+    .cmd,
     .copy {
-      padding-inline: 12px;
-      border: 1px solid ButtonText;
+      border: 1px solid CanvasText;
     }
   }
 </style>

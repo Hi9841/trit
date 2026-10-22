@@ -75,54 +75,54 @@ const drawable = (svg: string) => svg.replace(/class="ln/g, 'pathLength="1" clas
 
 const EM = "  ";
 
-// Sound goes into a machine marked CPU, Xiaohei turns the crank, text comes out.
-// Groups carry --d, the order in which they draw in.
-export const crank = drawable(`<svg viewBox="0 0 800 460" role="img" aria-label="Xiaohei, a small black creature on a stool, turns the crank of a machine marked CPU. A sound wave goes into a funnel on top, and a paper strip that says 'restart the pod, then' comes out of the side. Notes: your voice, 16 kHz; 1.58-bit weights; ${time.trit}; no GPU.">
+// Three steps, left to right: audio goes into a machine marked CPU, Xiaohei
+// turns the crank, text comes out with its time. Each step has a numbered
+// label on one line. Groups carry --d, the order in which they draw in.
+const step = (n: number, x: number, label: string) =>
+  `<path class="ln" d="M${x + 11} 103 a11 11 0 1 0 0.1 0"/>` +
+  `<text class="hand fade step-n" x="${x + 11}" y="121" text-anchor="middle">${n}</text>` +
+  `<text class="hand fade step" x="${x + 32}" y="121">${label}</text>`;
+
+export const crank = drawable(`<svg viewBox="0 84 800 362" role="img" aria-label="Three steps. 1: a sound wave, audio at 16 kHz, goes into a slot in a machine. 2: the machine, marked CPU and 1.58-bit, shows minus one, zero and plus one in its window while Xiaohei, a small black creature on a stool, turns its crank. 3: a paper strip that reads 'Restart the pod, then…' comes out of the other side, marked ${time.trit}.">
   <defs>${wobble("wob-crank", 4)}</defs>
   <g filter="url(#wob-crank)">
     <g style="--d:0">
-      <path class="ln" d="${wave(24, 330, 78, 30, 15)} Q386 80 398 112"/>
-      <path class="ln" d="M340 112 Q400 98 460 108 M340 112 L366 182 M460 108 L436 182"/>
+      ${step(1, 24, "audio, 16 kHz")}
+      <path class="ln" d="${wave(24, 278, 200, 30, 13)}"/>
+      <path class="ln" d="M300 180 L278 172 L278 228 L300 220"/>
     </g>
     <g style="--d:1">
-      <path class="ln paper" d="M306 184 L536 180 Q543 180 543 187 L545 372 Q545 379 538 379 L311 381 Q304 381 304 374 Z"/>
-      <path class="ln" d="M344 218 L502 216 L503 276 L345 278 Z"/>
-      <path class="ln" d="M380 314 L470 312 L471 348 L381 350 Z"/>
-      <path class="ln" d="M322 381 L322 394 L346 394 L346 381 M502 380 L502 393 L526 393 L526 380"/>
-      <path class="ln" d="M325 200 a3 3 0 1 0 0.1 0 M524 198 a3 3 0 1 0 0.1 0"/>
-      <path class="ln" d="M545 290 L545 330"/>
-      <text class="hand fade digits" x="424" y="256" text-anchor="middle">−1${EM}0${EM}+1</text>
-      <text class="hand fade" x="426" y="340" text-anchor="middle">CPU</text>
+      ${step(2, 300, "1.58-bit, CPU")}
+      <path class="ln paper" d="M302 146 L518 143 Q524 143 524 149 L526 354 Q526 360 520 360 L307 362 Q300 362 300 356 Z"/>
+      <path class="ln" d="M330 176 L496 174 L497 230 L331 232 Z"/>
+      <path class="ln" d="M372 272 L452 270 L453 306 L373 308 Z"/>
+      <path class="ln" d="M318 362 L318 374 L342 374 L342 362 M486 361 L486 373 L510 373 L510 361"/>
+      <text class="hand fade fit digits" x="414" y="212" text-anchor="middle">−1${EM}0${EM}+1</text>
+      <text class="hand fade" x="413" y="297" text-anchor="middle">CPU</text>
     </g>
     <g style="--d:2">
-      <path class="ln" d="M146 380 L228 377 L229 388 L147 391 Z M158 391 L152 430 M218 388 L224 428"/>
+      <path class="ln" d="M126 387 L214 385 L215 396 L127 398 Z M138 398 L132 436 M204 396 L210 434"/>
       <g class="worker">
-        <path class="ln" d="M226 268 C242 270 252 286 259 297"/>
-        <path class="ln" d="M226 302 C240 307 250 305 258 301"/>
-        ${xiaohei(186, 275, 1.4)}
+        <path class="ln" d="M210 290 C230 290 250 302 260 314"/>
+        <path class="ln" d="M210 320 C228 326 246 324 258 320"/>
+        ${xiaohei(170, 300, 1.2)}
       </g>
-      <path class="ln" d="M304 271 a11 11 0 1 0 0.1 0"/>
+      <path class="ln" d="M300 289 a11 11 0 1 0 0.1 0"/>
       <g class="crank">
-        <path class="ln acc" d="M304 282 L268 301"/>
-        <path class="ln acc" d="M261 298 a6 6 0 1 0 0.1 0"/>
+        <path class="ln acc" d="M300 300 L268 318"/>
+        <path class="ln acc" d="M262 313 a6 6 0 1 0 0.1 0"/>
       </g>
+    </g>
+    <g style="--d:3">
+      ${step(3, 590, "text")}
     </g>
     <g style="--d:3" class="tape">
-      <path class="ln" d="M549 296 C600 292 642 300 690 296 C722 293 744 306 746 322 C747 334 734 341 724 334"/>
-      <path class="ln" d="M549 324 C600 320 642 328 690 324 C708 322 718 328 724 334"/>
-      <text class="hand sm fade" x="560" y="316" transform="rotate(-1.2 560 316)">restart the pod, then…</text>
+      <path class="ln paper" d="M524 204 C594 201 674 207 776 203 L770 214 L777 225 L770 236 L776 247 C674 251 594 245 525 250 Z"/>
+      <text class="hand fade fit" x="536" y="234">Restart the pod, then…</text>
     </g>
-    <g style="--d:4">
-      <text class="hand fade" x="24" y="30">your voice, 16 kHz</text>
-      ${arrow(104, 40, 120, 58, 0.2)}
-      <text class="hand fade" x="590" y="196">1.58-bit weights</text>
-      ${arrow(612, 206, 512, 226, -0.2)}
-      <g class="result">
-        <text class="hand lg acc-t fade" x="660" y="408">${time.trit}</text>
-        ${arrow(690, 378, 700, 344, 0.15, "ln acc")}
-      </g>
-      <text class="hand fade" x="386" y="448">no GPU</text>
-      ${arrow(420, 428, 424, 404, 0.1)}
+    <g style="--d:4" class="result">
+      <text class="hand lg acc-t fade" x="640" y="318">${time.trit}</text>
+      ${arrow(684, 290, 676, 260, 0.15, "ln acc")}
     </g>
   </g></svg>`);
 

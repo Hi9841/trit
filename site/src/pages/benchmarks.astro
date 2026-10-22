@@ -17,10 +17,11 @@ import {
 } from "../lib/data";
 import { render, sections } from "../lib/markdown";
 import { links } from "../lib/links";
-import { readRepo } from "../lib/repo";
+import { readRepo, updatedOf } from "../lib/repo";
 import { measure } from "../lib/sketch";
 
 const REPORT = "docs/engine-comparison.md";
+const updated = updatedOf(["trit/site/src/pages/benchmarks.astro", REPORT, "desktop/bench/benchmarks.json"]);
 const report = sections(readRepo(REPORT));
 const part = (id: string) => report.find((s) => s.id === id);
 
@@ -79,6 +80,7 @@ const cells = (r: (typeof benches)[number]["runs"][number]) => [
 <Base
   title="Benchmarks · Trit"
   description="The same speech models on Trit, Transformers, ONNX Runtime, sherpa-onnx, faster-whisper, whisper.cpp and OpenAI Whisper: time per clip, word error rate and memory, on one CPU."
+  updated={updated}
 >
   <Header />
   <main>
@@ -284,7 +286,7 @@ const cells = (r: (typeof benches)[number]["runs"][number]) => [
       </div>
     </section>
   </main>
-  <Footer />
+  <Footer updated={updated} />
 </Base>
 
 <style>

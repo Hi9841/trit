@@ -1,12 +1,34 @@
 ---
 import { links } from "../lib/links";
+
+interface Props {
+  /** The day the page's sources last changed, YYYY-MM-DD. */
+  updated: string;
+}
+
+const { updated } = Astro.props;
+
+const day = new Date(`${updated}T12:00:00Z`).toLocaleDateString("en-GB", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+  timeZone: "UTC",
+});
 ---
 
 <footer class="grid">
-  <p>Trit is the speech engine of TDT, the dictation app. PolyForm Noncommercial 1.0.0: free for noncommercial use.</p>
+  <div class="about">
+    <p>Trit is the speech engine of TDT, the dictation app. PolyForm Noncommercial 1.0.0: free for noncommercial use.</p>
+    <p>Page updated <time datetime={updated}>{day}</time>.</p>
+  </div>
   <nav aria-label="Footer">
-    <a href={links.docs}>Docs</a>
+    <a href={links.models}>Models</a>
     <a href={links.benchmarks}>Benchmarks</a>
+    <a href={links.compare}>Compare</a>
+    <a href={links.docs}>Docs</a>
+    <a href={links.pricing}>Pricing</a>
+    <a href={links.faq}>FAQ</a>
+    <a href={links.llms}>llms.txt</a>
     <a href={links.repo}>GitHub</a>
   </nav>
 </footer>
@@ -25,15 +47,21 @@ import { links } from "../lib/links";
     margin-bottom: 32px;
     border-top: 1px solid var(--rule);
   }
-  p {
+  .about {
     grid-column: 1 / span 6;
+  }
+  p {
     margin: 0;
   }
+  p + p {
+    margin-top: 8px;
+  }
   nav {
-    grid-column: 8 / -1;
+    grid-column: 7 / -1;
     justify-self: end;
     display: flex;
-    gap: 24px;
+    flex-wrap: wrap;
+    gap: 8px 24px;
   }
   a {
     text-decoration: underline;
@@ -47,7 +75,7 @@ import { links } from "../lib/links";
     }
   }
   @media (max-width: 900px) {
-    p,
+    .about,
     nav {
       grid-column: 1 / -1;
       justify-self: start;

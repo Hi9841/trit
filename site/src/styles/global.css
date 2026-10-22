@@ -6,7 +6,7 @@
   --margin: clamp(20px, 5vw, 120px);
   /* At most 80 characters a line. ch is the width of "0"; in Geist, text with
      many narrow letters fits up to 1.5 characters a ch, so 52ch stays under 80. */
-  --measure: 52ch;
+  --measure: 50ch;
 
   --sans: "Geist Variable", ui-sans-serif, -apple-system, "Segoe UI", Arial, sans-serif;
   --mono: "Geist Mono Variable", ui-monospace, "SF Mono", Consolas, monospace;
@@ -236,6 +236,13 @@ figcaption {
 .art .hand.acc-t {
   fill: var(--accent-text);
 }
+/* Numbered steps of a process drawing: the number in a circle, a short label. */
+.art .hand.step {
+  font-size: 21px;
+}
+.art .hand.step-n {
+  font-size: 15px;
+}
 
 /* The drawing draws itself once. Only with JavaScript; without it, it is simply there. */
 .js .art.draw .ln {
@@ -271,6 +278,16 @@ figcaption {
   }
   .art .hand.lg {
     font-size: 40px;
+  }
+  .art .hand.step {
+    font-size: 28px;
+  }
+  /* Text inside a drawn frame grows less, so it stays inside. */
+  .art .hand.fit {
+    font-size: 25px;
+  }
+  .art .hand.step-n {
+    font-size: 18px;
   }
 }
 
@@ -669,7 +686,7 @@ figcaption {
 /* Home, crank: Xiaohei turns it, then the strip comes out with its time. */
 .art .crank {
   transform-box: view-box;
-  transform-origin: 304px 282px;
+  transform-origin: 300px 300px;
 }
 .art.act .crank {
   animation: rock 150ms var(--ease-in-out) infinite alternate;

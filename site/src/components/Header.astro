@@ -7,10 +7,11 @@ const page = (href: string) => (here === href ? "page" : undefined);
 ---
 
 <header class="grid top">
-  <a class="mark" href="/"><Fragment set:html={mark} />trit</a>
+  <a class="mark" href={links.home}><Fragment set:html={mark} />Trit</a>
   <nav class="nav" aria-label="Site">
     <a href={links.models} aria-current={page(links.models)}>Models</a>
     <a href={links.benchmarks} aria-current={page(links.benchmarks)}>Benchmarks</a>
+    <a href={links.compare} aria-current={page(links.compare)}>Compare</a>
     <a href={links.docs} aria-current={page(links.docs)}>Docs</a>
     <a href={links.repo}>GitHub</a>
     <button class="theme" type="button" aria-label="Dark theme" aria-pressed="false">
@@ -122,7 +123,8 @@ const page = (href: string) => (here === href ? "page" : undefined);
     .nav {
       gap: 20px;
     }
-    .nav a:nth-child(-n + 2) {
+    /* Models, Benchmarks and Compare stay in the footer. */
+    .nav a:nth-child(-n + 3) {
       display: none;
     }
   }

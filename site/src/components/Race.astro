@@ -184,11 +184,14 @@ const lanes = [
     font-family: var(--mono);
     font-size: 15px;
     font-variant-numeric: tabular-nums;
-    opacity: 0;
     transition: opacity 150ms ease;
   }
-  .lane.done .t {
-    opacity: 1;
+  /* The race plays only with JavaScript; without it, it shows the result. */
+  :global(html.js) .lane:not(.done) .t {
+    opacity: 0;
+  }
+  :global(html:not(.js)) .head {
+    display: none;
   }
   .track {
     height: 6px;
@@ -198,8 +201,10 @@ const lanes = [
   .fill {
     height: 100%;
     background: var(--ink);
-    transform: scaleX(0);
     transform-origin: left center;
+  }
+  :global(html.js) .fill {
+    transform: scaleX(0);
   }
   .trit .fill {
     background: var(--accent);
@@ -210,15 +215,13 @@ const lanes = [
     font-size: 15px;
     line-height: 1.5;
     color: var(--accent-text);
-    opacity: 0;
-    transform: translateY(6px);
     transition:
       opacity 250ms var(--ease-out),
       transform 250ms var(--ease-out);
   }
-  .lane.done .said {
-    opacity: 1;
-    transform: none;
+  :global(html.js) .lane:not(.done) .said {
+    opacity: 0;
+    transform: translateY(6px);
   }
   .note {
     max-width: var(--measure);

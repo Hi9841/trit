@@ -1,0 +1,152 @@
+---
+import Base from "../layouts/Base.astro";
+import Header from "../components/Header.astro";
+import PageHead from "../components/PageHead.astro";
+import Footer from "../components/Footer.astro";
+import { faq, plain } from "../lib/facts";
+import { slug } from "../lib/markdown";
+import { updatedOf } from "../lib/repo";
+
+const updated = updatedOf([
+  "trit/site/src/pages/faq.astro",
+  "trit/site/src/lib/facts.ts",
+  "desktop/bench/benchmarks.json",
+  "trit/src/catalog.rs",
+]);
+
+const schema = [
+  {
+    "@type": "FAQPage",
+    mainEntity: faq.map(({ q, a }) => ({
+      "@type": "Question",
+      name: q,
+      acceptedAnswer: { "@type": "Answer", text: plain(a) },
+    })),
+  },
+];
+---
+
+<Base
+  title="FAQ · Trit"
+  description="Ten questions about Trit, answered: price, GPU, install, models, languages, speed, accuracy, privacy, computers and programming languages."
+  updated={updated}
+  schema={schema}
+>
+  <Header />
+  <main>
+    <PageHead label="FAQ" title="Ten questions, answered.">
+      <p>What people ask before they use Trit, with the short answer and the page with the rest.</p>
+    </PageHead>
+
+    <section class="grid questions" aria-label="Questions">
+      <ol class="index">
+        {
+          faq.map(({ q }) => (
+            <li>
+              <a href={`#${slug(q)}`}>{q}</a>
+            </li>
+          ))
+        }
+      </ol>
+      <div class="answers">
+        {
+          faq.map(({ q, a, more }) => (
+            <section aria-labelledby={slug(q)}>
+              <h2 id={slug(q)}>{q}</h2>
+              <p>{a.split("`").map((part, k) => (k % 2 ? <code>{part}</code> : part))}</p>
+              {more && (
+                <p class="more">
+                  <a href={more.href}>{more.label}</a>
+                </p>
+              )}
+            </section>
+          ))
+        }
+      </div>
+    </section>
+  </main>
+  <Footer updated={updated} />
+</Base>
+
+<style>
+  .questions {
+    margin-top: 128px;
+    align-items: start;
+  }
+  .index {
+    grid-column: 1 / span 3;
+    position: sticky;
+    top: 24px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-left: 1px solid var(--rule);
+  }
+  .index a {
+    display: block;
+    padding: 4px 0 4px 16px;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--muted);
+    text-decoration: none;
+    transition: color 150ms ease;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .index a:hover {
+      color: var(--ink);
+    }
+  }
+  .answers {
+    grid-column: 4 / span 7;
+  }
+  .answers section {
+    padding-top: 24px;
+    border-top: 1px solid var(--rule);
+  }
+  .answers section + section {
+    margin-top: 56px;
+  }
+  h2 {
+    margin: 0 0 12px;
+    font-size: 24px;
+    font-weight: 500;
+    line-height: 1.25;
+    letter-spacing: -0.02em;
+    scroll-margin-top: 24px;
+  }
+  .answers p {
+    max-width: var(--measure);
+    margin: 0;
+    font-size: 17px;
+    line-height: 1.65;
+  }
+  .answers code {
+    padding: 0.05em 0.18em;
+    border-radius: 3px;
+    background: var(--tint);
+    font-family: var(--mono);
+    font-size: 0.86em;
+    white-space: nowrap;
+  }
+  .answers .more {
+    margin-top: 12px;
+    font-size: 15px;
+  }
+  .more a {
+    text-decoration: underline;
+    text-decoration-color: var(--rule);
+    text-underline-offset: 4px;
+  }
+
+  @media (max-width: 900px) {
+    .index {
+      display: none;
+    }
+    .answers {
+      grid-column: 1 / -1;
+    }
+    .questions {
+      margin-top: 96px;
+    }
+  }
+</style>

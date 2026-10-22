@@ -3,13 +3,65 @@ import "@fontsource-variable/geist";
 import "@fontsource-variable/geist-mono";
 import "@fontsource/patrick-hand";
 import "../styles/global.css";
+import { NAME, tagline, version, whatIs } from "../lib/facts";
+import { links, page as sitePage } from "../lib/links";
 
 interface Props {
   title: string;
   description: string;
+  /** The day the page's sources last changed, YYYY-MM-DD. */
+  updated: string;
+  /** More structured data for this page (FAQPage and so on). */
+  schema?: object[];
 }
 
-const { title, description } = Astro.props;
+const { title, description, updated, schema = [] } = Astro.props;
+
+// Absolute addresses when the build knows the site's address (SITE_URL).
+const absolute = (path: string) => (Astro.site ? new URL(path, Astro.site).href : undefined);
+const canonical = absolute(Astro.url.pathname);
+
+// Who makes Trit, and Trit itself, on every page; the page's own date.
+const organization = {
+  "@type": "Organization",
+  "@id": "#organization",
+  name: "Hi9841",
+  url: "https://github.com/Hi9841",
+  sameAs: [links.x, links.repo],
+};
+
+const product = {
+  "@type": ["Product", "SoftwareApplication"],
+  "@id": "#product",
+  name: NAME,
+  description: whatIs,
+  slogan: tagline,
+  brand: { "@id": "#organization" },
+  manufacturer: { "@id": "#organization" },
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "Windows, Linux, macOS",
+  softwareVersion: version,
+  license: "https://polyformproject.org/licenses/noncommercial/1.0.0/",
+  url: absolute(links.home) ?? links.repo,
+  codeRepository: links.repo,
+  offers: {
+    "@type": "Offer",
+    price: "0",
+    priceCurrency: "USD",
+    description: "Free for noncommercial use. Commercial licenses on request.",
+  },
+};
+
+const webPage = {
+  "@type": "WebPage",
+  name: title,
+  description,
+  url: canonical,
+  dateModified: updated,
+  about: { "@id": "#product" },
+};
+
+const graph = JSON.stringify({ "@context": "https://schema.org", "@graph": [organization, product, webPage, ...schema] });
 ---
 
 <!doctype html>
@@ -22,7 +74,12 @@ const { title, description } = Astro.props;
     <meta name="description" content={description} />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta property="og:site_name" content={NAME} />
+    {canonical && <link rel="canonical" href={canonical} />}
+    {canonical && <meta property="og:url" content={canonical} />}
+    <link rel="icon" href={sitePage("/favicon.svg")} type="image/svg+xml" />
+    <link rel="alternate" type="text/plain" title="Trit for language models" href={links.llms} />
+    <script type="application/ld+json" set:html={graph} />
     <!-- Before first paint: the saved theme, and a flag that JavaScript runs. -->
     <script is:inline>
       const saved = localStorage.getItem("theme");
