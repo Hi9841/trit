@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="484" viewBox="0 0 760 484" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<rect width="760" height="484" rx="12" fill="#ffffff" stroke="#e6e8ef"/>
+<text x="24" y="34" font-size="18" font-weight="600" fill="#1d2030">Median time per clip (LibriSpeech test-clean)</text>
+<text x="24" y="54" font-size="12" fill="#5d6275">Trit's default against the fastest other runtime at any setting, CPU, 2026-10-22</text>
+<text x="24" y="92" font-size="13" font-weight="600" fill="#1d2030">Parakeet Redux</text>
+<rect x="190" y="70" width="76.0" height="18" rx="3" fill="#5b6cf0"/>
+<text x="274.0" y="83" font-size="12" font-weight="600" fill="#1d2030">36 ms  Trit</text>
+<rect x="190" y="92" width="341.9" height="18" rx="3" fill="#a3a8b8"/>
+<text x="539.9" y="105" font-size="12" font-weight="400" fill="#5d6275">162 ms  Photon</text>
+<text x="24" y="156" font-size="13" font-weight="600" fill="#1d2030">Parakeet TDT v3</text>
+<rect x="190" y="134" width="82.3" height="18" rx="3" fill="#5b6cf0"/>
+<text x="280.3" y="147" font-size="12" font-weight="600" fill="#1d2030">39 ms  Trit</text>
+<rect x="190" y="156" width="274.4" height="18" rx="3" fill="#a3a8b8"/>
+<text x="472.4" y="169" font-size="12" font-weight="400" fill="#5d6275">130 ms  ONNX Runtime</text>
+<text x="24" y="220" font-size="13" font-weight="600" fill="#1d2030">Whisper base.en</text>
+<rect x="190" y="198" width="246.9" height="18" rx="3" fill="#5b6cf0"/>
+<text x="444.9" y="211" font-size="12" font-weight="600" fill="#1d2030">117 ms  Trit</text>
+<rect x="190" y="220" width="420.0" height="18" rx="3" fill="#a3a8b8"/>
+<text x="618.0" y="233" font-size="12" font-weight="400" fill="#5d6275">199 ms  whisper.cpp</text>
+<text x="24" y="284" font-size="13" font-weight="600" fill="#1d2030">Whisper tiny</text>
+<rect x="190" y="262" width="141.4" height="18" rx="3" fill="#5b6cf0"/>
+<text x="339.4" y="275" font-size="12" font-weight="600" fill="#1d2030">67 ms  Trit</text>
+<rect x="190" y="284" width="230.1" height="18" rx="3" fill="#a3a8b8"/>
+<text x="428.1" y="297" font-size="12" font-weight="400" fill="#5d6275">109 ms  whisper.cpp</text>
+<text x="24" y="348" font-size="13" font-weight="600" fill="#1d2030">Moonshine tiny</text>
+<rect x="190" y="326" width="78.1" height="18" rx="3" fill="#5b6cf0"/>
+<text x="276.1" y="339" font-size="12" font-weight="600" fill="#1d2030">37 ms  Trit</text>
+<rect x="190" y="348" width="204.7" height="18" rx="3" fill="#a3a8b8"/>
+<text x="402.7" y="361" font-size="12" font-weight="400" fill="#5d6275">97 ms  sherpa-onnx</text>
+<text x="24" y="412" font-size="13" font-weight="600" fill="#1d2030">Moonshine base</text>
+<rect x="190" y="390" width="130.9" height="18" rx="3" fill="#5b6cf0"/>
+<text x="328.9" y="403" font-size="12" font-weight="600" fill="#1d2030">62 ms  Trit</text>
+<rect x="190" y="412" width="282.8" height="18" rx="3" fill="#a3a8b8"/>
+<text x="480.8" y="425" font-size="12" font-weight="400" fill="#5d6275">134 ms  sherpa-onnx</text>
+<text x="24" y="472" font-size="11" fill="#5d6275">Shorter is better.</text>
+</svg>
