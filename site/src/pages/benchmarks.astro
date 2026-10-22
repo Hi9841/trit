@@ -1,0 +1,510 @@
+---
+import Base from "../layouts/Base.astro";
+import Header from "../components/Header.astro";
+import PageHead from "../components/PageHead.astro";
+import Footer from "../components/Footer.astro";
+import {
+  benchDate,
+  benches,
+  cleanup,
+  cleanupMetrics,
+  lead,
+  medalTable,
+  ordinal,
+  place,
+  speechMetrics,
+  type Metric,
+} from "../lib/data";
+import { render, sections } from "../lib/markdown";
+import { links } from "../lib/links";
+import { readRepo } from "../lib/repo";
+import { measure } from "../lib/sketch";
+
+const REPORT = "docs/engine-comparison.md";
+const report = sections(readRepo(REPORT));
+const part = (id: string) => report.find((s) => s.id === id);
+
+// The report's summary: its first paragraph and table, and the numbered notes.
+const errors = await render(part("1-summary")?.body ?? "", REPORT);
+
+// The cleanup section's text; its table is drawn here, with places.
+const cleanupText = await render(
+  (part("cleanup-model-s1-mini")?.body ?? "")
+    .split("\n")
+    .filter((line) => !line.startsWith("|") && !line.startsWith("<!--"))
+    .join("\n"),
+  REPORT,
+);
+
+const method = await render(part("3-how-the-numbers-were-measured")?.body ?? "", REPORT);
+const reproduce = await render(part("6-reproduce")?.body ?? "", REPORT);
+
+const leads = benches.map(lead);
+const medals = medalTable();
+const winner = medals[0];
+const times = (x: number) => `${x.toFixed(1)}×`;
+const ms = (x: number) => `${Math.round(x)} ms`;
+const mb = (x: number) => `${x.toLocaleString("en-US")} MB`;
+
+/** The class of a place: p1, p2, p3, or p4 for 4th and worse. */
+const tier = (n: number) => `p${Math.min(n, 4)}`;
+
+const MEDAL_COLUMNS = new Set(["Speed", "WER, all clips", "Memory after all clips", "Formatted WER"]);
+
+/** The runtime with the most first places in one model's medal columns. */
+function modelWinner<T extends { runtime: string; trit: boolean; default: boolean }>(rows: T[], metrics: Metric<T>[]) {
+  const golds = new Map<string, number>();
+
+  for (const metric of metrics.filter((m) => MEDAL_COLUMNS.has(m.name))) {
+    const firsts = new Set(
+      rows.flatMap((r) => ((!r.trit || r.default) && place(rows, metric, r) === 1 ? [r.runtime] : [])),
+    );
+
+    for (const runtime of firsts) golds.set(runtime, (golds.get(runtime) ?? 0) + 1);
+  }
+
+  return [...golds].sort((a, b) => b[1] - a[1])[0] ?? ["", 0];
+}
+
+const cells = (r: (typeof benches)[number]["runs"][number]) => [
+  `${Math.round(r.speed)}×`,
+  `${r.clean.toFixed(2)} %`,
+  `${r.other.toFixed(2)} %`,
+  `${r.all.toFixed(2)} %`,
+  mb(r.load_mb),
+  mb(r.run_mb),
+];
+---
+
+<Base
+  title="Benchmarks · Trit"
+  description="The same speech models on Trit, Transformers, ONNX Runtime, sherpa-onnx, faster-whisper, whisper.cpp and OpenAI Whisper: time per clip, word error rate and memory, on one CPU."
+>
+  <Header />
+  <main>
+    <PageHead label="Benchmarks" title="Same model, different runtime." art={measure} act="measure">
+      <p>
+        Each model runs on every CPU runtime that supports it, so the runtime is the only difference. Same clips,
+        same computer, same scorer.
+      </p>
+      <p class="meta">AMD Ryzen 9 7950X3D · Windows 11 · CPU only · {benchDate}</p>
+      <a class="raw" href={links.rawResults}>Download the raw results</a>
+    </PageHead>
+
+    <section class="grid verdict">
+      <p>
+        Trit is the fastest runtime for all {benches.length} speech models, from {times(Math.min(...leads))} to {
+          times(Math.max(...leads))
+        } ahead of the next one, with the fewest errors over all clips, or a tie, for every model.
+      </p>
+    </section>
+
+    <section class="grid overall" aria-labelledby="overall">
+      <div class="title">
+        <h2 id="overall">Overall winner: {winner.runtime}</h2>
+        <p>
+          {winner.gold} first places of {medals.reduce((n, m) => n + m.gold, 0)}. A place counts per model in speed, word
+          error rate over all clips, and memory after all clips (S1-mini: speed and formatted WER); each runtime
+          counts with its best setting, Trit with its default.
+        </p>
+      </div>
+      <div class="data-table">
+        <table class="medals">
+          <thead>
+            <tr>
+              <th scope="col">Runtime</th>
+              <th scope="col" class="num"><span class="place p1">1st</span></th>
+              <th scope="col" class="num"><span class="place p2">2nd</span></th>
+              <th scope="col" class="num"><span class="place p3">3rd</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              medals.map((m, i) => (
+                <tr class:list={{ trit: m.trit }}>
+                  <th scope="row">
+                    {i === 0 ? <span class="crown">Winner</span> : null}
+                    {m.runtime}
+                  </th>
+                  <td class="num">{m.gold}</td>
+                  <td class="num">{m.silver}</td>
+                  <td class="num">{m.bronze}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid legend-row">
+      <p class="legend">
+        Place per column among the other runtimes and Trit's default (a tie shares the place):
+        <span class="place p1">1st</span>
+        <span class="place p2">2nd</span>
+        <span class="place p3">3rd</span>
+        <span class="place p4">4th or worse</span>. Trit's other settings show where they would stand.
+      </p>
+    </section>
+
+    {
+      benches.map((b, i) => {
+        const slowest = Math.max(...b.runs.map((r) => r.ms));
+        const [best, golds] = modelWinner(b.runs, speechMetrics);
+
+        return (
+          <section class="grid model" aria-labelledby={`m-${i}`}>
+            <div class="title">
+              <h2 id={`m-${i}`}>{b.name}</h2>
+              <p>Trit is {times(leads[i])} faster than the next runtime.</p>
+              <p class="won">
+                Winner: <strong class:list={{ tritname: best === "Trit" }}>{best}</strong>, first in {golds} of 3
+              </p>
+            </div>
+            <div class="data-table">
+              <table>
+                <colgroup>
+                  <col class="c-runtime" />
+                  <col class="c-time" />
+                  <col span="6" class="c-num" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th scope="col">Runtime</th>
+                    <th scope="col">Time per clip</th>
+                    <th scope="col" class="num">Speed</th>
+                    <th scope="col" class="num">Clean WER</th>
+                    <th scope="col" class="num">Other WER</th>
+                    <th scope="col" class="num">WER, all clips</th>
+                    <th scope="col" class="num">MB after load</th>
+                    <th scope="col" class="num">MB after all clips</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {b.runs.map((r) => (
+                    <tr class:list={{ trit: r.trit, default: r.default }}>
+                      <th scope="row">
+                        {r.runtime}
+                        {r.default ? <span class="tag">default</span> : null}
+                        <span>{r.precision}</span>
+                      </th>
+                      <td class="time">
+                        <span class="bar" style={`--w:${(r.ms / slowest).toFixed(3)}`} aria-hidden="true" />
+                        <span class="ms">{ms(r.ms)}</span>
+                      </td>
+                      {cells(r).map((text, c) => {
+                        const n = place(b.runs, speechMetrics[c], r);
+                        return (
+                          <td class="num">
+                            <span class={`place ${tier(n)}`} title={`${ordinal(n)} place`}>
+                              {text}
+                              <sup>{ordinal(n)}</sup>
+                            </span>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        );
+      })
+    }
+
+    <section class="grid model" aria-labelledby="m-cleanup">
+      <div class="title">
+        <h2 id="m-cleanup">Transcript cleanup (S1-mini)</h2>
+        <Fragment set:html={cleanupText} />
+      </div>
+      <div class="data-table">
+        <table>
+          <colgroup>
+            <col class="c-runtime" />
+            <col class="c-time" />
+            <col span="3" class="c-num" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col">Runtime</th>
+              <th scope="col">Time per transcript</th>
+              <th scope="col" class="num">Speed</th>
+              <th scope="col" class="num">Formatted WER</th>
+              <th scope="col" class="num">Exact</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              cleanup.map((r) => {
+                const slowest = Math.max(...cleanup.map((x) => x.ms));
+                const texts = [`${(1000 / r.ms).toFixed(1)}/s`, `${r.wer.toFixed(2)} %`, `${r.exact} / ${r.cases}`];
+                return (
+                  <tr class:list={{ trit: r.trit, default: r.default }}>
+                    <th scope="row">
+                      {r.runtime}
+                      {r.default ? <span class="tag">default</span> : null}
+                      <span>{r.precision}</span>
+                    </th>
+                    <td class="time">
+                      <span class="bar" style={`--w:${(r.ms / slowest).toFixed(3)}`} aria-hidden="true" />
+                      <span class="ms">{ms(r.ms)}</span>
+                    </td>
+                    {texts.map((text, c) => {
+                      const n = place(cleanup, cleanupMetrics[c], r);
+                      return (
+                        <td class="num">
+                          <span class={`place ${tier(n)}`} title={`${ordinal(n)} place`}>
+                            {text}
+                            <sup>{ordinal(n)}</sup>
+                          </span>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid report">
+      <div class="prose">
+        <h2 id="errors">Errors over all 456 clips</h2>
+        <Fragment set:html={errors} />
+        <h2 id="method">How the numbers were measured</h2>
+        <Fragment set:html={method} />
+        <h2 id="reproduce">Reproduce</h2>
+        <Fragment set:html={reproduce} />
+        <p>
+          Raw results: <a href={links.rawResults}>runtimes-results.jsonl</a>.
+        </p>
+      </div>
+    </section>
+  </main>
+  <Footer />
+</Base>
+
+<style>
+  .meta {
+    font-size: 15px;
+    color: var(--muted);
+  }
+  .raw {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 14px 18px;
+    border: 1px solid var(--ink);
+    border-radius: 2px;
+    font-size: 15px;
+    font-weight: 500;
+    text-decoration: none;
+    transition:
+      transform 160ms var(--ease-out),
+      background-color 150ms ease,
+      color 150ms ease;
+  }
+  .raw:active {
+    transform: scale(0.97);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .raw:hover {
+      background: var(--ink);
+      color: var(--paper);
+    }
+  }
+  .verdict {
+    margin-top: 128px;
+  }
+  .verdict p {
+    grid-column: 1 / span 8;
+    margin: 0;
+    font-size: clamp(24px, 2.4vw, 32px);
+    line-height: 1.3;
+    letter-spacing: -0.015em;
+  }
+  .overall {
+    margin-top: 96px;
+  }
+  .medals {
+    min-width: 0;
+  }
+  .crown {
+    display: inline-block;
+    margin-right: 10px;
+    padding: 1px 8px;
+    border-radius: 2px;
+    background: var(--accent);
+    color: var(--paper);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .legend-row {
+    margin-top: 64px;
+  }
+  .legend {
+    grid-column: 4 / -1;
+    margin: 0;
+    font-size: 15px;
+    line-height: 2;
+    color: var(--muted);
+  }
+  .model {
+    margin-top: 96px;
+  }
+  .title {
+    grid-column: 1 / span 3;
+  }
+  h2 {
+    margin: 0 0 12px;
+    font-size: 24px;
+    font-weight: 500;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+  }
+  .title p,
+  .title :global(p) {
+    margin: 0 0 8px;
+    font-size: 15px;
+    color: var(--muted);
+  }
+  .won strong {
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .won .tritname {
+    color: var(--accent-text);
+  }
+  .data-table {
+    grid-column: 4 / -1;
+    margin: 0;
+  }
+  /* The same columns in every model's table, so they line up down the page. */
+  table {
+    table-layout: fixed;
+    min-width: 900px;
+  }
+  .c-runtime {
+    width: 22%;
+  }
+  .c-time {
+    width: 18%;
+  }
+  .c-num {
+    width: 10%;
+  }
+  td.num {
+    white-space: nowrap;
+  }
+  tbody th {
+    padding: 12px 16px 12px 0;
+    border-bottom: 1px solid var(--rule);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 0;
+    text-align: left;
+    text-transform: none;
+    color: var(--ink);
+    white-space: normal;
+  }
+  tbody th span:not(.tag):not(.crown) {
+    display: block;
+    font-weight: 400;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .tag {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 0 6px;
+    border-radius: 2px;
+    background: var(--accent);
+    color: var(--paper);
+    font-size: 12px;
+    font-weight: 600;
+    vertical-align: 1px;
+  }
+
+  /* A place: the value on its medal colour, with the place in words for
+     readers who do not see the colour. */
+  .place {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .place sup {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .p1 {
+    background: var(--gold-bg);
+    color: var(--gold);
+    font-weight: 600;
+  }
+  .p2 {
+    background: var(--silver-bg);
+    color: var(--silver);
+  }
+  .p3 {
+    background: var(--bronze-bg);
+    color: var(--bronze);
+  }
+  .p4 {
+    background: var(--worse-bg);
+    color: var(--worse);
+  }
+  .default td,
+  .default th {
+    background: var(--tint);
+  }
+  .default .place {
+    box-shadow: 0 0 0 1.5px var(--accent);
+  }
+
+  .bar {
+    display: block;
+    height: 8px;
+    margin: 6px 0 8px;
+    background: var(--muted);
+    opacity: 0.55;
+    transform: scaleX(var(--w));
+    transform-origin: left center;
+  }
+  .trit .bar {
+    background: var(--accent);
+    opacity: 1;
+  }
+  .ms {
+    font-variant-numeric: tabular-nums;
+  }
+  .trit th,
+  .trit .ms {
+    color: var(--accent-text);
+  }
+  .report {
+    margin-top: 64px;
+  }
+  .report .prose {
+    grid-column: 4 / -1;
+  }
+  @media (max-width: 900px) {
+    .verdict p,
+    .title,
+    .legend,
+    .data-table,
+    .report .prose {
+      grid-column: 1 / -1;
+    }
+    .title {
+      margin-bottom: 16px;
+    }
+  }
+</style>

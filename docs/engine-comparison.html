@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Same model, different runtime: Trit and the main speech runtimes</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f4f2;
+    --surface-1: #fcfcfb;
+    --border: #e2e1dc;
+    --grid: #ebeae6;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #7a7974;
+    --series-1: #2a78d6;
+    --other: #a3a29c;
+    --other-strong: #6f6e69;
+    --r1-bg: #fbe7a1; --r1-fg: #6b4e00; --r1-edge: #d9b23c;
+    --r2-bg: #e4e6ea; --r2-fg: #3b4149; --r2-edge: #a9aeb6;
+    --r3-bg: #f3d6bd; --r3-fg: #6e3c12; --r3-edge: #c98b55;
+    --r4-bg: #f7dede; --r4-fg: #7b2626; --r4-edge: #dba0a0;
+    --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --mono: "Cascadia Mono", "SF Mono", Consolas, ui-monospace, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface-0: #121211;
+      --surface-1: #1a1a19;
+      --border: #2e2e2c;
+      --grid: #262624;
+      --text-primary: #f0efec;
+      --text-secondary: #c3c2b7;
+      --text-muted: #8f8e88;
+      --series-1: #3987e5;
+      --other: #5f5e5a;
+      --other-strong: #9d9c96;
+      --r1-bg: #4a3b0f; --r1-fg: #f6d878; --r1-edge: #8a6d1d;
+      --r2-bg: #34383e; --r2-fg: #dde0e4; --r2-edge: #6a7079;
+      --r3-bg: #4a2f1a; --r3-fg: #eab68b; --r3-edge: #8d5a33;
+      --r4-bg: #3f2323; --r4-fg: #eba3a3; --r4-edge: #7e4040;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-0); color: var(--text-primary); font: 15px/1.55 var(--font); }
+  main { max-width: 1120px; margin: 0 auto; padding: 48px 24px 80px; }
+  header { margin-bottom: 28px; }
+  .eyebrow { font: 600 12px/1 var(--font); letter-spacing: .08em; text-transform: uppercase; color: var(--series-1); }
+  h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.15; margin: 10px 0 12px; letter-spacing: -.01em; }
+  h2 { font-size: 18px; margin: 0 0 4px; }
+  h3.section { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); margin: 36px 0 12px; }
+  .lede { color: var(--text-secondary); max-width: 780px; margin: 0; }
+  .meta { color: var(--text-muted); font-size: 13px; margin-top: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 28px 0 8px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .tile .label { color: var(--text-secondary); font-size: 13px; }
+  .tile .value { font-size: 30px; font-weight: 650; letter-spacing: -.02em; margin: 2px 0; font-variant-numeric: tabular-nums; }
+  .tile .note { color: var(--text-muted); font-size: 13px; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px 12px; margin-bottom: 14px; }
+  .card .sub { color: var(--text-secondary); font-size: 13px; margin: 0 0 12px; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--text-secondary); margin: 0 0 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  svg text { font-family: var(--font); }
+  .axis-label { fill: var(--text-muted); font-size: 12px; }
+  .tick { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .point-label { font-size: 12px; fill: var(--text-secondary); }
+  .point-label.hero { fill: var(--text-primary); font-weight: 650; }
+  .model h2 { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+  .model h2 small { font-size: 13px; font-weight: 400; color: var(--text-muted); }
+  .rows { display: grid; grid-template-columns: minmax(190px, 1.3fr) minmax(150px, 1.8fr) repeat(6, minmax(70px, .6fr));
+          font-size: 13px; font-variant-numeric: tabular-nums; }
+  .rows > div { padding: 7px 8px; border-bottom: 1px solid var(--grid); display: flex; align-items: center; }
+  .rows > .h { color: var(--text-secondary); font-weight: 600; font-size: 12px; }
+  .rows > .n { justify-content: flex-end; }
+  .rows > .who { display: block; }
+  .rows .who small { display: block; color: var(--text-muted); font-size: 12px; }
+  .rows .hero { font-weight: 650; }
+  .barcell { gap: 8px; }
+  .barcell span { white-space: nowrap; }
+  .bar { display: block; height: 12px; border-radius: 0 4px 4px 0; background: var(--other); min-width: 2px; }
+  .bar.gpu { background: transparent; border: 2px solid var(--other-strong); border-left-width: 0; }
+  .bar.hero { background: var(--series-1); }
+  .win { color: var(--series-1); font-weight: 650; }
+  .rank { display: inline-flex; align-items: baseline; gap: 4px; padding: 1px 6px; border-radius: 6px; border: 1px solid transparent; }
+  .rank sup { font-size: 10px; font-weight: 600; opacity: .85; }
+  .r1 { background: var(--r1-bg); color: var(--r1-fg); border-color: var(--r1-edge); font-weight: 650; }
+  .r2 { background: var(--r2-bg); color: var(--r2-fg); border-color: var(--r2-edge); }
+  .r3 { background: var(--r3-bg); color: var(--r3-fg); border-color: var(--r3-edge); }
+  .r4 { background: var(--r4-bg); color: var(--r4-fg); border-color: var(--r4-edge); }
+  .rows > .trit-row { background: color-mix(in srgb, var(--series-1) 5%, transparent); }
+  .rows > .who.trit-row { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--series-1) 45%, transparent); color: var(--series-1); }
+  .rows > .hero-row { background: color-mix(in srgb, var(--series-1) 13%, transparent); }
+  .rows > .who.hero-row { box-shadow: inset 4px 0 0 var(--series-1); color: var(--series-1); }
+  .rows > .hero-row .rank { box-shadow: 0 0 0 2px var(--series-1); font-weight: 650; }
+  .rows .who .tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 5px; font-size: 11px; font-weight: 600;
+                    background: var(--series-1); color: #fff; vertical-align: 1px; }
+  .standing { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 12px; font-size: 12px; color: var(--text-secondary); align-items: center; }
+  .legend-ranks { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0 20px; font-size: 13px; color: var(--text-secondary); }
+  .rows.text { grid-template-columns: minmax(190px, 1.3fr) minmax(170px, 2.2fr) repeat(3, minmax(70px, .6fr)); }
+  @media (max-width: 760px) { .rows, .rows.text { grid-template-columns: 1.4fr 1.6fr repeat(2, .7fr); } .rows .wide { display: none; } }
+  .tip { position: fixed; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+         border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; box-shadow: 0 6px 20px rgba(0,0,0,.12); opacity: 0;
+         transition: opacity .12s; max-width: 300px; z-index: 10; }
+  .tip b { font-weight: 650; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 8px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th { color: var(--text-secondary); font-weight: 600; background: var(--surface-1); }
+  th:nth-child(-n+3), td:nth-child(-n+3) { text-align: left; }
+  tr.hero td { font-weight: 650; }
+  tr.hero td:first-child { box-shadow: inset 3px 0 0 var(--series-1); }
+  tr.first td { border-top: 2px solid var(--border); }
+  .table-wrap { overflow-x: auto; }
+  .best { color: var(--series-1); }
+  ul.notes { color: var(--text-secondary); padding-left: 20px; margin: 8px 0 0; }
+  ul.notes li { margin: 4px 0; }
+  code, pre { font-family: var(--mono); font-size: 13px; }
+  pre { background: var(--surface-0); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; margin: 8px 0 12px; }
+  .langs { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .langs h3 { font-size: 14px; margin: 8px 0 0; }
+  footer { color: var(--text-muted); font-size: 12px; margin-top: 32px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Speech runtime benchmark</div>
+    <h1>Same model, different runtime</h1>
+    <p class="lede">Each model here runs on every CPU runtime that supports it, so the runtime is the only difference. Trit, TDT's own
+      engine, runs every model at each precision: auto (its default), int8, f16, and f32. For Whisper and Moonshine, Trit's default is
+      beam search with 5 beams; every runtime that has beam search runs it with 5 beams too, and greedy rows of every runtime
+      (Trit included) stay for comparison. The other runtimes are Photon, ONNX Runtime, sherpa-onnx, faster-whisper, whisper.cpp,
+      Transformers, OpenAI Whisper, and llama.cpp. Same 456 English clips, same computer, same scorer.</p>
+    <p class="meta" id="meta"></p>
+    <div class="legend-ranks">Place per column among the other runtimes and Trit's default (a tie shares the place; Trit's other
+      settings show where they would stand):
+      <span class="rank r1">1st</span><span class="rank r2">2nd</span><span class="rank r3">3rd</span><span class="rank r4">4th or worse</span>
+      <span>· Trit rows are blue; the <b style="color:var(--series-1)">Trit default</b> row (what Trit runs when the caller sets
+      nothing) has a blue ring on each score</span></div>
+  </header>
+
+  <section id="models"></section>
+
+  <footer id="footer"></footer>
+</main>
+<div class="tip" id="tip"></div>
+
+<script>
+const RESULTS = [{"engine":"hf-parakeet-redux","model":"parakeet-redux","model_name":"Parakeet Redux 0.6B, 1.58-bit (TDT's model)","runtime":"Transformers (PyTorch), weights expanded","precision":"fp32","device":"cpu","threads":16,"load_s":19.88,"load_mb":5390,"peak_mb":5896,"rss_mb":5796,"sets":[{"set":"clean","clips":200,"errors":82,"words":4009,"wer":2.05,"median_ms":330.8,"audio_s":1459.31,"busy_s":76.961,"rtfx":19.0},{"set":"other","clips":200,"errors":177,"words":3815,"wer":4.64,"median_ms":302.8,"audio_s":1336.16,"busy_s":68.88,"rtfx":19.4},{"set":"tech","clips":40,"errors":34,"words":473,"wer":7.19,"median_ms":274.9,"audio_s":168.77,"busy_s":11.03,"rtfx":15.3},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":300.0,"audio_s":130.19,"busy_s":6.325,"rtfx":20.6}],"date":"2026-10-22"},{"engine":"photon-redux","model":"parakeet-redux","model_name":"Parakeet Redux 0.6B, 1.58-bit (TDT's model)","runtime":"Photon (Kestrel, PyTorch)","precision":"dense fallback","device":"cpu","threads":16,"load_s":5.8,"load_mb":2357,"peak_mb":3050,"rss_mb":2960,"sets":[{"set":"clean","clips":200,"errors":83,"words":4009,"wer":2.07,"median_ms":162.4,"audio_s":1459.31,"busy_s":39.243,"rtfx":37.2},{"set":"other","clips":200,"errors":177,"words":3815,"wer":4.64,"median_ms":152.5,"audio_s":1336.16,"busy_s":36.308,"rtfx":36.8},{"set":"tech","clips":40,"errors":34,"words":473,"wer":7.19,"median_ms":128.3,"audio_s":168.77,"busy_s":5.211,"rtfx":32.4},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":135.1,"audio_s":130.19,"busy_s":3.333,"rtfx":39.1}],"date":"2026-10-22"},{"engine":"onnx-parakeet-v3","model":"parakeet-v3","model_name":"Parakeet TDT 0.6B v3","runtime":"ONNX Runtime","precision":"fp32","device":"cpu","threads":16,"load_s":4.98,"load_mb":2265,"peak_mb":2844,"rss_mb":2820,"sets":[{"set":"clean","clips":200,"errors":60,"words":4009,"wer":1.5,"median_ms":162.9,"audio_s":1459.31,"busy_s":40.339,"rtfx":36.2},{"set":"other","clips":200,"errors":123,"words":3815,"wer":3.22,"median_ms":156.1,"audio_s":1336.16,"busy_s":37.396,"rtfx":35.7},{"set":"tech","clips":40,"errors":20,"words":473,"wer":4.23,"median_ms":144.0,"audio_s":168.77,"busy_s":5.752,"rtfx":29.3},{"set":"tts16","clips":16,"errors":5,"words":386,"wer":1.3,"median_ms":138.0,"audio_s":130.19,"busy_s":3.683,"rtfx":35.3}],"date":"2026-10-22"},{"engine":"hf-parakeet-v3","model":"parakeet-v3","model_name":"Parakeet TDT 0.6B v3","runtime":"Transformers (PyTorch)","precision":"fp32","device":"cpu","threads":16,"load_s":10.05,"load_mb":3150,"peak_mb":5543,"rss_mb":3750,"sets":[{"set":"clean","clips":200,"errors":60,"words":4009,"wer":1.5,"median_ms":300.0,"audio_s":1459.31,"busy_s":71.156,"rtfx":20.5},{"set":"other","clips":200,"errors":126,"words":3815,"wer":3.3,"median_ms":299.1,"audio_s":1336.16,"busy_s":68.428,"rtfx":19.5},{"set":"tech","clips":40,"errors":20,"words":473,"wer":4.23,"median_ms":255.4,"audio_s":168.77,"busy_s":10.3,"rtfx":16.4},{"set":"tts16","clips":16,"errors":5,"words":386,"wer":1.3,"median_ms":289.3,"audio_s":130.19,"busy_s":5.873,"rtfx":22.2}],"date":"2026-10-22"},{"engine":"onnx-parakeet-v3-int8","model":"parakeet-v3","model_name":"Parakeet TDT 0.6B v3","runtime":"ONNX Runtime","precision":"int8","device":"cpu","threads":16,"load_s":2.69,"load_mb":774,"peak_mb":1177,"rss_mb":1151,"sets":[{"set":"clean","clips":200,"errors":70,"words":4009,"wer":1.75,"median_ms":129.9,"audio_s":1459.31,"busy_s":31.309,"rtfx":46.6},{"set":"other","clips":200,"errors":175,"words":3815,"wer":4.59,"median_ms":123.8,"audio_s":1336.16,"busy_s":28.92,"rtfx":46.2},{"set":"tech","clips":40,"errors":27,"words":473,"wer":5.71,"median_ms":102.4,"audio_s":168.77,"busy_s":4.107,"rtfx":41.1},{"set":"tts16","clips":16,"errors":8,"words":386,"wer":2.07,"median_ms":115.5,"audio_s":130.19,"busy_s":2.761,"rtfx":47.1}],"date":"2026-10-22"},{"engine":"sherpa-parakeet-v3-int8","model":"parakeet-v3","model_name":"Parakeet TDT 0.6B v3","runtime":"sherpa-onnx","precision":"int8","device":"cpu","threads":16,"load_s":1.68,"load_mb":741,"peak_mb":1115,"rss_mb":1110,"sets":[{"set":"clean","clips":200,"errors":67,"words":4009,"wer":1.67,"median_ms":193.6,"audio_s":1459.31,"busy_s":46.841,"rtfx":31.2},{"set":"other","clips":200,"errors":183,"words":3815,"wer":4.8,"median_ms":184.0,"audio_s":1336.16,"busy_s":44.263,"rtfx":30.2},{"set":"tech","clips":40,"errors":33,"words":473,"wer":6.98,"median_ms":155.2,"audio_s":168.77,"busy_s":6.26,"rtfx":27.0},{"set":"tts16","clips":16,"errors":10,"words":386,"wer":2.59,"median_ms":176.4,"audio_s":130.19,"busy_s":4.209,"rtfx":30.9}],"date":"2026-10-22"},{"engine":"fw-base.en","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"faster-whisper (CTranslate2)","precision":"int8, greedy","device":"cpu","threads":16,"load_s":1.92,"load_mb":172,"peak_mb":343,"rss_mb":194,"sets":[{"set":"clean","clips":200,"errors":148,"words":4009,"wer":3.69,"median_ms":306.0,"audio_s":1459.31,"busy_s":64.343,"rtfx":22.7},{"set":"other","clips":200,"errors":376,"words":3815,"wer":9.86,"median_ms":300.4,"audio_s":1336.16,"busy_s":62.451,"rtfx":21.4},{"set":"tech","clips":40,"errors":30,"words":473,"wer":6.34,"median_ms":292.0,"audio_s":168.77,"busy_s":11.629,"rtfx":14.5},{"set":"tts16","clips":16,"errors":10,"words":386,"wer":2.59,"median_ms":308.6,"audio_s":130.19,"busy_s":5.326,"rtfx":24.4}],"date":"2026-10-22"},{"engine":"cpp-base.en","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"whisper.cpp","precision":"f16, greedy","device":"cpu","threads":16,"load_s":0.8,"load_mb":265,"peak_mb":370,"rss_mb":364,"sets":[{"set":"clean","clips":200,"errors":134,"words":4009,"wer":3.34,"median_ms":198.8,"audio_s":1459.31,"busy_s":41.608,"rtfx":35.1},{"set":"other","clips":200,"errors":348,"words":3815,"wer":9.12,"median_ms":206.5,"audio_s":1336.16,"busy_s":45.753,"rtfx":29.2},{"set":"tech","clips":40,"errors":31,"words":473,"wer":6.55,"median_ms":196.9,"audio_s":168.77,"busy_s":7.871,"rtfx":21.4},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":207.0,"audio_s":130.19,"busy_s":3.607,"rtfx":36.1}],"date":"2026-10-22"},{"engine":"hf-base.en","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"Transformers (PyTorch)","precision":"fp32, greedy","device":"cpu","threads":16,"load_s":6.0,"load_mb":919,"peak_mb":1023,"rss_mb":1007,"sets":[{"set":"clean","clips":200,"errors":139,"words":4009,"wer":3.47,"median_ms":466.0,"audio_s":1459.31,"busy_s":103.87,"rtfx":14.0},{"set":"other","clips":200,"errors":340,"words":3815,"wer":8.91,"median_ms":438.0,"audio_s":1336.16,"busy_s":101.362,"rtfx":13.2},{"set":"tech","clips":40,"errors":31,"words":473,"wer":6.55,"median_ms":383.8,"audio_s":168.77,"busy_s":14.908,"rtfx":11.3},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":423.1,"audio_s":130.19,"busy_s":9.032,"rtfx":14.4}],"date":"2026-10-22"},{"engine":"oai-base.en","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"OpenAI Whisper (PyTorch)","precision":"fp32, greedy","device":"cpu","threads":16,"load_s":2.22,"load_mb":946,"peak_mb":1051,"rss_mb":1019,"sets":[{"set":"clean","clips":200,"errors":153,"words":4009,"wer":3.82,"median_ms":375.1,"audio_s":1459.31,"busy_s":86.216,"rtfx":16.9},{"set":"other","clips":200,"errors":363,"words":3815,"wer":9.52,"median_ms":357.8,"audio_s":1336.16,"busy_s":83.476,"rtfx":16.0},{"set":"tech","clips":40,"errors":30,"words":473,"wer":6.34,"median_ms":313.8,"audio_s":168.77,"busy_s":12.334,"rtfx":13.7},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":346.0,"audio_s":130.19,"busy_s":7.497,"rtfx":17.4}],"date":"2026-10-22"},{"engine":"fw-tiny","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"faster-whisper (CTranslate2)","precision":"int8, greedy","device":"cpu","threads":16,"load_s":0.79,"load_mb":137,"peak_mb":254,"rss_mb":156,"sets":[{"set":"clean","clips":200,"errors":280,"words":4009,"wer":6.98,"median_ms":161.9,"audio_s":1459.31,"busy_s":33.685,"rtfx":43.3},{"set":"other","clips":200,"errors":589,"words":3815,"wer":15.44,"median_ms":165.4,"audio_s":1336.16,"busy_s":34.926,"rtfx":38.3},{"set":"tech","clips":40,"errors":40,"words":473,"wer":8.46,"median_ms":154.9,"audio_s":168.77,"busy_s":6.192,"rtfx":27.3},{"set":"tts16","clips":16,"errors":8,"words":386,"wer":2.07,"median_ms":210.1,"audio_s":130.19,"busy_s":3.131,"rtfx":41.6}],"date":"2026-10-22"},{"engine":"cpp-tiny","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"whisper.cpp","precision":"f16, greedy","device":"cpu","threads":16,"load_s":0.63,"load_mb":185,"peak_mb":263,"rss_mb":256,"sets":[{"set":"clean","clips":200,"errors":282,"words":4009,"wer":7.03,"median_ms":108.9,"audio_s":1459.31,"busy_s":22.848,"rtfx":63.9},{"set":"other","clips":200,"errors":575,"words":3815,"wer":15.07,"median_ms":106.3,"audio_s":1336.16,"busy_s":22.395,"rtfx":59.7},{"set":"tech","clips":40,"errors":45,"words":473,"wer":9.51,"median_ms":105.4,"audio_s":168.77,"busy_s":4.228,"rtfx":39.9},{"set":"tts16","clips":16,"errors":8,"words":386,"wer":2.07,"median_ms":110.7,"audio_s":130.19,"busy_s":1.967,"rtfx":66.2}],"date":"2026-10-22"},{"engine":"hf-tiny","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"Transformers (PyTorch)","precision":"fp32, greedy","device":"cpu","threads":16,"load_s":5.45,"load_mb":780,"peak_mb":890,"rss_mb":870,"sets":[{"set":"clean","clips":200,"errors":275,"words":4009,"wer":6.86,"median_ms":313.9,"audio_s":1459.31,"busy_s":75.032,"rtfx":19.4},{"set":"other","clips":200,"errors":568,"words":3815,"wer":14.89,"median_ms":302.0,"audio_s":1336.16,"busy_s":71.903,"rtfx":18.6},{"set":"tech","clips":40,"errors":45,"words":473,"wer":9.51,"median_ms":263.0,"audio_s":168.77,"busy_s":10.244,"rtfx":16.5},{"set":"tts16","clips":16,"errors":8,"words":386,"wer":2.07,"median_ms":306.3,"audio_s":130.19,"busy_s":6.682,"rtfx":19.5}],"date":"2026-10-22"},{"engine":"oai-tiny","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"OpenAI Whisper (PyTorch)","precision":"fp32, greedy","device":"cpu","threads":16,"load_s":1.86,"load_mb":747,"peak_mb":867,"rss_mb":850,"sets":[{"set":"clean","clips":200,"errors":288,"words":4009,"wer":7.18,"median_ms":227.2,"audio_s":1459.31,"busy_s":52.993,"rtfx":27.5},{"set":"other","clips":200,"errors":577,"words":3815,"wer":15.12,"median_ms":220.2,"audio_s":1336.16,"busy_s":53.064,"rtfx":25.2},{"set":"tech","clips":40,"errors":40,"words":473,"wer":8.46,"median_ms":196.2,"audio_s":168.77,"busy_s":7.844,"rtfx":21.5},{"set":"tts16","clips":16,"errors":8,"words":386,"wer":2.07,"median_ms":214.6,"audio_s":130.19,"busy_s":4.709,"rtfx":27.6}],"date":"2026-10-22"},{"engine":"hf-moonshine-tiny","model":"moonshine-tiny","model_name":"Moonshine tiny","runtime":"Transformers (PyTorch)","precision":"fp32, greedy","device":"cpu","threads":16,"load_s":6.15,"load_mb":714,"peak_mb":998,"rss_mb":994,"sets":[{"set":"clean","clips":200,"errors":162,"words":4009,"wer":4.04,"median_ms":173.7,"audio_s":1459.31,"busy_s":42.297,"rtfx":34.5},{"set":"other","clips":200,"errors":426,"words":3815,"wer":11.17,"median_ms":166.0,"audio_s":1336.16,"busy_s":39.589,"rtfx":33.8},{"set":"tech","clips":40,"errors":56,"words":473,"wer":11.84,"median_ms":126.8,"audio_s":168.77,"busy_s":5.2,"rtfx":32.5},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":148.2,"audio_s":130.19,"busy_s":3.726,"rtfx":34.9}],"date":"2026-10-22"},{"engine":"sherpa-moonshine-tiny","model":"moonshine-tiny","model_name":"Moonshine tiny","runtime":"sherpa-onnx","precision":"int8, greedy (no beam search)","device":"cpu","threads":16,"load_s":0.61,"load_mb":197,"peak_mb":570,"rss_mb":564,"sets":[{"set":"clean","clips":200,"errors":147,"words":4009,"wer":3.67,"median_ms":97.3,"audio_s":1459.31,"busy_s":23.136,"rtfx":63.1},{"set":"other","clips":200,"errors":431,"words":3815,"wer":11.3,"median_ms":93.2,"audio_s":1336.16,"busy_s":21.669,"rtfx":61.7},{"set":"tech","clips":40,"errors":47,"words":473,"wer":9.94,"median_ms":79.7,"audio_s":168.77,"busy_s":3.199,"rtfx":52.8},{"set":"tts16","clips":16,"errors":10,"words":386,"wer":2.59,"median_ms":86.0,"audio_s":130.19,"busy_s":2.056,"rtfx":63.3}],"date":"2026-10-22"},{"engine":"hf-moonshine-base","model":"moonshine-base","model_name":"Moonshine base","runtime":"Transformers (PyTorch)","precision":"fp32, greedy","device":"cpu","threads":16,"load_s":6.11,"load_mb":849,"peak_mb":1147,"rss_mb":1144,"sets":[{"set":"clean","clips":200,"errors":114,"words":4009,"wer":2.84,"median_ms":287.2,"audio_s":1459.31,"busy_s":71.889,"rtfx":20.3},{"set":"other","clips":200,"errors":323,"words":3815,"wer":8.47,"median_ms":291.0,"audio_s":1336.16,"busy_s":69.25,"rtfx":19.3},{"set":"tech","clips":40,"errors":35,"words":473,"wer":7.4,"median_ms":226.8,"audio_s":168.77,"busy_s":8.873,"rtfx":19.0},{"set":"tts16","clips":16,"errors":7,"words":386,"wer":1.81,"median_ms":262.4,"audio_s":130.19,"busy_s":6.501,"rtfx":20.0}],"date":"2026-10-22"},{"engine":"sherpa-moonshine-base","model":"moonshine-base","model_name":"Moonshine base","runtime":"sherpa-onnx","precision":"int8, greedy (no beam search)","device":"cpu","threads":16,"load_s":0.89,"load_mb":316,"peak_mb":759,"rss_mb":755,"sets":[{"set":"clean","clips":200,"errors":126,"words":4009,"wer":3.14,"median_ms":134.0,"audio_s":1459.31,"busy_s":33.332,"rtfx":43.8},{"set":"other","clips":200,"errors":313,"words":3815,"wer":8.2,"median_ms":122.9,"audio_s":1336.16,"busy_s":30.423,"rtfx":43.9},{"set":"tech","clips":40,"errors":32,"words":473,"wer":6.77,"median_ms":110.7,"audio_s":168.77,"busy_s":4.483,"rtfx":37.6},{"set":"tts16","clips":16,"errors":8,"words":386,"wer":2.07,"median_ms":128.1,"audio_s":130.19,"busy_s":3.153,"rtfx":41.3}],"date":"2026-10-22"},{"engine":"trit","model":"parakeet-redux","model_name":"Parakeet Redux 0.6B, 1.58-bit (TDT's model)","runtime":"Trit","precision":"auto (ternary + f16)","device":"cpu","threads":16,"load_s":0.13,"load_mb":357,"peak_mb":734,"rss_mb":627,"sets":[{"set":"clean","clips":200,"errors":81,"words":4009,"wer":2.02,"median_ms":35.6,"audio_s":1459.31,"busy_s":9.232,"rtfx":158.1},{"set":"other","clips":200,"errors":172,"words":3815,"wer":4.51,"median_ms":33.1,"audio_s":1336.16,"busy_s":8.307,"rtfx":160.9},{"set":"tech","clips":40,"errors":34,"words":473,"wer":7.19,"median_ms":25.5,"audio_s":168.77,"busy_s":1.041,"rtfx":162.2},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":29.4,"audio_s":130.19,"busy_s":0.831,"rtfx":156.6}],"date":"2026-10-22"},{"engine":"trit-int8","model":"parakeet-redux","model_name":"Parakeet Redux 0.6B, 1.58-bit (TDT's model)","runtime":"Trit","precision":"int8","device":"cpu","threads":16,"load_s":0.13,"load_mb":358,"peak_mb":736,"rss_mb":735,"sets":[{"set":"clean","clips":200,"errors":81,"words":4009,"wer":2.02,"median_ms":35.3,"audio_s":1459.31,"busy_s":9.259,"rtfx":157.6},{"set":"other","clips":200,"errors":172,"words":3815,"wer":4.51,"median_ms":33.2,"audio_s":1336.16,"busy_s":8.213,"rtfx":162.7},{"set":"tech","clips":40,"errors":34,"words":473,"wer":7.19,"median_ms":25.6,"audio_s":168.77,"busy_s":1.033,"rtfx":163.3},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":29.1,"audio_s":130.19,"busy_s":0.825,"rtfx":157.8}],"date":"2026-10-22"},{"engine":"trit-f16","model":"parakeet-redux","model_name":"Parakeet Redux 0.6B, 1.58-bit (TDT's model)","runtime":"Trit","precision":"f16","device":"cpu","threads":16,"load_s":0.13,"load_mb":358,"peak_mb":746,"rss_mb":726,"sets":[{"set":"clean","clips":200,"errors":81,"words":4009,"wer":2.02,"median_ms":35.2,"audio_s":1459.31,"busy_s":9.101,"rtfx":160.4},{"set":"other","clips":200,"errors":172,"words":3815,"wer":4.51,"median_ms":32.1,"audio_s":1336.16,"busy_s":8.19,"rtfx":163.2},{"set":"tech","clips":40,"errors":34,"words":473,"wer":7.19,"median_ms":25.8,"audio_s":168.77,"busy_s":1.041,"rtfx":162.1},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":29.0,"audio_s":130.19,"busy_s":0.83,"rtfx":156.9}],"date":"2026-10-22"},{"engine":"trit-f32","model":"parakeet-redux","model_name":"Parakeet Redux 0.6B, 1.58-bit (TDT's model)","runtime":"Trit","precision":"f32","device":"cpu","threads":16,"load_s":0.13,"load_mb":357,"peak_mb":742,"rss_mb":737,"sets":[{"set":"clean","clips":200,"errors":81,"words":4009,"wer":2.02,"median_ms":35.0,"audio_s":1459.31,"busy_s":9.101,"rtfx":160.4},{"set":"other","clips":200,"errors":172,"words":3815,"wer":4.51,"median_ms":33.2,"audio_s":1336.16,"busy_s":8.191,"rtfx":163.1},{"set":"tech","clips":40,"errors":34,"words":473,"wer":7.19,"median_ms":25.4,"audio_s":168.77,"busy_s":1.04,"rtfx":162.2},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":29.2,"audio_s":130.19,"busy_s":0.829,"rtfx":157.1}],"date":"2026-10-22"},{"engine":"trit-parakeet-v3","model":"parakeet-v3","model_name":"Parakeet TDT 0.6B v3","runtime":"Trit","precision":"auto (int8)","device":"cpu","threads":16,"load_s":0.46,"load_mb":822,"peak_mb":1211,"rss_mb":1187,"sets":[{"set":"clean","clips":200,"errors":58,"words":4009,"wer":1.45,"median_ms":38.9,"audio_s":1459.31,"busy_s":10.016,"rtfx":145.7},{"set":"other","clips":200,"errors":124,"words":3815,"wer":3.25,"median_ms":37.1,"audio_s":1336.16,"busy_s":9.054,"rtfx":147.6},{"set":"tech","clips":40,"errors":20,"words":473,"wer":4.23,"median_ms":29.8,"audio_s":168.77,"busy_s":1.202,"rtfx":140.4},{"set":"tts16","clips":16,"errors":5,"words":386,"wer":1.3,"median_ms":33.2,"audio_s":130.19,"busy_s":0.91,"rtfx":143.1}],"date":"2026-10-22"},{"engine":"trit-parakeet-v3-int8","model":"parakeet-v3","model_name":"Parakeet TDT 0.6B v3","runtime":"Trit","precision":"int8","device":"cpu","threads":16,"load_s":0.46,"load_mb":825,"peak_mb":1225,"rss_mb":1222,"sets":[{"set":"clean","clips":200,"errors":58,"words":4009,"wer":1.45,"median_ms":39.0,"audio_s":1459.31,"busy_s":9.976,"rtfx":146.3},{"set":"other","clips":200,"errors":124,"words":3815,"wer":3.25,"median_ms":36.6,"audio_s":1336.16,"busy_s":9.043,"rtfx":147.8},{"set":"tech","clips":40,"errors":20,"words":473,"wer":4.23,"median_ms":29.9,"audio_s":168.77,"busy_s":1.204,"rtfx":140.2},{"set":"tts16","clips":16,"errors":5,"words":386,"wer":1.3,"median_ms":33.0,"audio_s":130.19,"busy_s":0.901,"rtfx":144.5}],"date":"2026-10-22"},{"engine":"trit-parakeet-v3-f16","model":"parakeet-v3","model_name":"Parakeet TDT 0.6B v3","runtime":"Trit","precision":"f16","device":"cpu","threads":16,"load_s":0.49,"load_mb":1372,"peak_mb":1764,"rss_mb":1711,"sets":[{"set":"clean","clips":200,"errors":60,"words":4009,"wer":1.5,"median_ms":131.2,"audio_s":1459.31,"busy_s":32.879,"rtfx":44.4},{"set":"other","clips":200,"errors":127,"words":3815,"wer":3.33,"median_ms":119.9,"audio_s":1336.16,"busy_s":30.188,"rtfx":44.3},{"set":"tech","clips":40,"errors":20,"words":473,"wer":4.23,"median_ms":98.3,"audio_s":168.77,"busy_s":3.972,"rtfx":42.5},{"set":"tts16","clips":16,"errors":5,"words":386,"wer":1.3,"median_ms":109.2,"audio_s":130.19,"busy_s":2.928,"rtfx":44.5}],"date":"2026-10-22"},{"engine":"trit-parakeet-v3-f32","model":"parakeet-v3","model_name":"Parakeet TDT 0.6B v3","runtime":"Trit","precision":"f32","device":"cpu","threads":16,"load_s":0.49,"load_mb":2502,"peak_mb":2872,"rss_mb":2822,"sets":[{"set":"clean","clips":200,"errors":60,"words":4009,"wer":1.5,"median_ms":144.2,"audio_s":1459.31,"busy_s":36.088,"rtfx":40.4},{"set":"other","clips":200,"errors":127,"words":3815,"wer":3.33,"median_ms":136.7,"audio_s":1336.16,"busy_s":33.914,"rtfx":39.4},{"set":"tech","clips":40,"errors":20,"words":473,"wer":4.23,"median_ms":112.6,"audio_s":168.77,"busy_s":4.569,"rtfx":36.9},{"set":"tts16","clips":16,"errors":5,"words":386,"wer":1.3,"median_ms":124.1,"audio_s":130.19,"busy_s":3.173,"rtfx":41.0}],"date":"2026-10-22"},{"engine":"trit-whisper-base.en","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"Trit","precision":"auto (f16), beam 5","device":"cpu","threads":16,"load_s":0.12,"load_mb":169,"peak_mb":342,"rss_mb":293,"sets":[{"set":"clean","clips":200,"errors":124,"words":4009,"wer":3.09,"median_ms":117.2,"audio_s":1459.31,"busy_s":26.249,"rtfx":55.6},{"set":"other","clips":200,"errors":301,"words":3815,"wer":7.89,"median_ms":111.5,"audio_s":1336.16,"busy_s":24.964,"rtfx":53.5},{"set":"tech","clips":40,"errors":34,"words":473,"wer":7.19,"median_ms":102.6,"audio_s":168.77,"busy_s":4.123,"rtfx":40.9},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":108.3,"audio_s":130.19,"busy_s":2.152,"rtfx":60.5}],"date":"2026-10-22"},{"engine":"trit-whisper-base.en-int8","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"Trit","precision":"int8, beam 5","device":"cpu","threads":16,"load_s":0.11,"load_mb":153,"peak_mb":320,"rss_mb":271,"sets":[{"set":"clean","clips":200,"errors":127,"words":4009,"wer":3.17,"median_ms":108.3,"audio_s":1459.31,"busy_s":24.2,"rtfx":60.3},{"set":"other","clips":200,"errors":308,"words":3815,"wer":8.07,"median_ms":105.9,"audio_s":1336.16,"busy_s":23.926,"rtfx":55.8},{"set":"tech","clips":40,"errors":34,"words":473,"wer":7.19,"median_ms":98.8,"audio_s":168.77,"busy_s":3.957,"rtfx":42.7},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":107.1,"audio_s":130.19,"busy_s":2.143,"rtfx":60.8}],"date":"2026-10-22"},{"engine":"trit-whisper-base.en-f16","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"Trit","precision":"f16, beam 5","device":"cpu","threads":16,"load_s":0.14,"load_mb":201,"peak_mb":369,"rss_mb":321,"sets":[{"set":"clean","clips":200,"errors":127,"words":4009,"wer":3.17,"median_ms":162.4,"audio_s":1459.31,"busy_s":36.206,"rtfx":40.3},{"set":"other","clips":200,"errors":312,"words":3815,"wer":8.18,"median_ms":166.3,"audio_s":1336.16,"busy_s":36.068,"rtfx":37.0},{"set":"tech","clips":40,"errors":31,"words":473,"wer":6.55,"median_ms":147.9,"audio_s":168.77,"busy_s":5.851,"rtfx":28.8},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":157.9,"audio_s":130.19,"busy_s":3.048,"rtfx":42.7}],"date":"2026-10-22"},{"engine":"trit-whisper-base.en-f32","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"Trit","precision":"f32, beam 5","device":"cpu","threads":16,"load_s":0.09,"load_mb":338,"peak_mb":491,"rss_mb":449,"sets":[{"set":"clean","clips":200,"errors":127,"words":4009,"wer":3.17,"median_ms":193.1,"audio_s":1459.31,"busy_s":43.25,"rtfx":33.7},{"set":"other","clips":200,"errors":312,"words":3815,"wer":8.18,"median_ms":185.5,"audio_s":1336.16,"busy_s":41.92,"rtfx":31.9},{"set":"tech","clips":40,"errors":31,"words":473,"wer":6.55,"median_ms":169.6,"audio_s":168.77,"busy_s":6.72,"rtfx":25.1},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":198.6,"audio_s":130.19,"busy_s":3.895,"rtfx":33.4}],"date":"2026-10-22"},{"engine":"trit-whisper-tiny","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"Trit","precision":"auto (f16), beam 5","device":"cpu","threads":16,"load_s":0.09,"load_mb":122,"peak_mb":264,"rss_mb":229,"sets":[{"set":"clean","clips":200,"errors":231,"words":4009,"wer":5.76,"median_ms":66.9,"audio_s":1459.31,"busy_s":15.243,"rtfx":95.7},{"set":"other","clips":200,"errors":487,"words":3815,"wer":12.77,"median_ms":63.7,"audio_s":1336.16,"busy_s":14.593,"rtfx":91.6},{"set":"tech","clips":40,"errors":36,"words":473,"wer":7.61,"median_ms":57.1,"audio_s":168.77,"busy_s":2.314,"rtfx":72.9},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":62.3,"audio_s":130.19,"busy_s":1.317,"rtfx":98.8}],"date":"2026-10-22"},{"engine":"trit-whisper-tiny-int8","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"Trit","precision":"int8, beam 5","device":"cpu","threads":16,"load_s":0.08,"load_mb":103,"peak_mb":246,"rss_mb":208,"sets":[{"set":"clean","clips":200,"errors":234,"words":4009,"wer":5.84,"median_ms":65.6,"audio_s":1459.31,"busy_s":14.934,"rtfx":97.7},{"set":"other","clips":200,"errors":484,"words":3815,"wer":12.69,"median_ms":63.0,"audio_s":1336.16,"busy_s":14.175,"rtfx":94.3},{"set":"tech","clips":40,"errors":36,"words":473,"wer":7.61,"median_ms":57.2,"audio_s":168.77,"busy_s":2.282,"rtfx":74.0},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":61.9,"audio_s":130.19,"busy_s":1.239,"rtfx":105.0}],"date":"2026-10-22"},{"engine":"trit-whisper-tiny-f16","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"Trit","precision":"f16, beam 5","device":"cpu","threads":16,"load_s":0.09,"load_mb":132,"peak_mb":255,"rss_mb":228,"sets":[{"set":"clean","clips":200,"errors":238,"words":4009,"wer":5.94,"median_ms":81.8,"audio_s":1459.31,"busy_s":18.729,"rtfx":77.9},{"set":"other","clips":200,"errors":488,"words":3815,"wer":12.79,"median_ms":82.7,"audio_s":1336.16,"busy_s":18.445,"rtfx":72.4},{"set":"tech","clips":40,"errors":36,"words":473,"wer":7.61,"median_ms":75.5,"audio_s":168.77,"busy_s":3.065,"rtfx":55.1},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":79.9,"audio_s":130.19,"busy_s":1.588,"rtfx":82.0}],"date":"2026-10-22"},{"engine":"trit-whisper-tiny-f32","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"Trit","precision":"f32, beam 5","device":"cpu","threads":16,"load_s":0.07,"load_mb":204,"peak_mb":312,"rss_mb":298,"sets":[{"set":"clean","clips":200,"errors":238,"words":4009,"wer":5.94,"median_ms":99.4,"audio_s":1459.31,"busy_s":22.555,"rtfx":64.7},{"set":"other","clips":200,"errors":488,"words":3815,"wer":12.79,"median_ms":91.8,"audio_s":1336.16,"busy_s":20.398,"rtfx":65.5},{"set":"tech","clips":40,"errors":36,"words":473,"wer":7.61,"median_ms":84.4,"audio_s":168.77,"busy_s":3.342,"rtfx":50.5},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":95.2,"audio_s":130.19,"busy_s":1.76,"rtfx":74.0}],"date":"2026-10-22"},{"engine":"trit-moonshine-tiny","model":"moonshine-tiny","model_name":"Moonshine tiny","runtime":"Trit","precision":"auto (f16), beam 5","device":"cpu","threads":16,"load_s":0.15,"load_mb":113,"peak_mb":244,"rss_mb":239,"sets":[{"set":"clean","clips":200,"errors":133,"words":4009,"wer":3.32,"median_ms":36.6,"audio_s":1459.31,"busy_s":9.59,"rtfx":152.2},{"set":"other","clips":200,"errors":374,"words":3815,"wer":9.8,"median_ms":36.1,"audio_s":1336.16,"busy_s":8.708,"rtfx":153.4},{"set":"tech","clips":40,"errors":40,"words":473,"wer":8.46,"median_ms":25.7,"audio_s":168.77,"busy_s":1.043,"rtfx":161.8},{"set":"tts16","clips":16,"errors":10,"words":386,"wer":2.59,"median_ms":31.3,"audio_s":130.19,"busy_s":0.848,"rtfx":153.5}],"date":"2026-10-22"},{"engine":"trit-moonshine-tiny-int8","model":"moonshine-tiny","model_name":"Moonshine tiny","runtime":"Trit","precision":"int8, beam 5","device":"cpu","threads":16,"load_s":0.06,"load_mb":99,"peak_mb":221,"rss_mb":210,"sets":[{"set":"clean","clips":200,"errors":135,"words":4009,"wer":3.37,"median_ms":34.4,"audio_s":1459.31,"busy_s":8.896,"rtfx":164.0},{"set":"other","clips":200,"errors":385,"words":3815,"wer":10.09,"median_ms":33.9,"audio_s":1336.16,"busy_s":8.343,"rtfx":160.2},{"set":"tech","clips":40,"errors":38,"words":473,"wer":8.03,"median_ms":24.7,"audio_s":168.77,"busy_s":1.002,"rtfx":168.4},{"set":"tts16","clips":16,"errors":10,"words":386,"wer":2.59,"median_ms":30.3,"audio_s":130.19,"busy_s":0.809,"rtfx":160.9}],"date":"2026-10-22"},{"engine":"trit-moonshine-tiny-f16","model":"moonshine-tiny","model_name":"Moonshine tiny","runtime":"Trit","precision":"f16, beam 5","device":"cpu","threads":16,"load_s":0.15,"load_mb":113,"peak_mb":245,"rss_mb":239,"sets":[{"set":"clean","clips":200,"errors":133,"words":4009,"wer":3.32,"median_ms":36.0,"audio_s":1459.31,"busy_s":9.475,"rtfx":154.0},{"set":"other","clips":200,"errors":374,"words":3815,"wer":9.8,"median_ms":36.0,"audio_s":1336.16,"busy_s":8.899,"rtfx":150.1},{"set":"tech","clips":40,"errors":40,"words":473,"wer":8.46,"median_ms":25.9,"audio_s":168.77,"busy_s":1.05,"rtfx":160.7},{"set":"tts16","clips":16,"errors":10,"words":386,"wer":2.59,"median_ms":31.5,"audio_s":130.19,"busy_s":0.849,"rtfx":153.3}],"date":"2026-10-22"},{"engine":"trit-moonshine-tiny-f32","model":"moonshine-tiny","model_name":"Moonshine tiny","runtime":"Trit","precision":"f32, beam 5","device":"cpu","threads":16,"load_s":0.05,"load_mb":167,"peak_mb":309,"rss_mb":289,"sets":[{"set":"clean","clips":200,"errors":133,"words":4009,"wer":3.32,"median_ms":37.3,"audio_s":1459.31,"busy_s":10.033,"rtfx":145.4},{"set":"other","clips":200,"errors":374,"words":3815,"wer":9.8,"median_ms":36.8,"audio_s":1336.16,"busy_s":9.26,"rtfx":144.3},{"set":"tech","clips":40,"errors":40,"words":473,"wer":8.46,"median_ms":27.1,"audio_s":168.77,"busy_s":1.098,"rtfx":153.6},{"set":"tts16","clips":16,"errors":10,"words":386,"wer":2.59,"median_ms":33.5,"audio_s":130.19,"busy_s":0.906,"rtfx":143.8}],"date":"2026-10-22"},{"engine":"trit-moonshine-base","model":"moonshine-base","model_name":"Moonshine base","runtime":"Trit","precision":"auto (f16), beam 5","device":"cpu","threads":16,"load_s":0.27,"load_mb":173,"peak_mb":363,"rss_mb":271,"sets":[{"set":"clean","clips":200,"errors":105,"words":4009,"wer":2.62,"median_ms":62.0,"audio_s":1459.31,"busy_s":16.643,"rtfx":87.7},{"set":"other","clips":200,"errors":274,"words":3815,"wer":7.18,"median_ms":57.7,"audio_s":1336.16,"busy_s":14.988,"rtfx":89.2},{"set":"tech","clips":40,"errors":32,"words":473,"wer":6.77,"median_ms":43.4,"audio_s":168.77,"busy_s":1.723,"rtfx":98.0},{"set":"tts16","clips":16,"errors":4,"words":386,"wer":1.04,"median_ms":57.1,"audio_s":130.19,"busy_s":1.474,"rtfx":88.4}],"date":"2026-10-22"},{"engine":"trit-moonshine-base-int8","model":"moonshine-base","model_name":"Moonshine base","runtime":"Trit","precision":"int8, beam 5","device":"cpu","threads":16,"load_s":0.11,"load_mb":137,"peak_mb":334,"rss_mb":278,"sets":[{"set":"clean","clips":200,"errors":103,"words":4009,"wer":2.57,"median_ms":57.6,"audio_s":1459.31,"busy_s":15.542,"rtfx":93.9},{"set":"other","clips":200,"errors":272,"words":3815,"wer":7.13,"median_ms":60.6,"audio_s":1336.16,"busy_s":15.407,"rtfx":86.7},{"set":"tech","clips":40,"errors":32,"words":473,"wer":6.77,"median_ms":41.9,"audio_s":168.77,"busy_s":1.691,"rtfx":99.8},{"set":"tts16","clips":16,"errors":4,"words":386,"wer":1.04,"median_ms":52.3,"audio_s":130.19,"busy_s":1.472,"rtfx":88.4}],"date":"2026-10-22"},{"engine":"trit-moonshine-base-f16","model":"moonshine-base","model_name":"Moonshine base","runtime":"Trit","precision":"f16, beam 5","device":"cpu","threads":16,"load_s":0.3,"load_mb":181,"peak_mb":362,"rss_mb":280,"sets":[{"set":"clean","clips":200,"errors":105,"words":4009,"wer":2.62,"median_ms":74.6,"audio_s":1459.31,"busy_s":20.56,"rtfx":71.0},{"set":"other","clips":200,"errors":274,"words":3815,"wer":7.18,"median_ms":67.7,"audio_s":1336.16,"busy_s":17.584,"rtfx":76.0},{"set":"tech","clips":40,"errors":32,"words":473,"wer":6.77,"median_ms":50.8,"audio_s":168.77,"busy_s":2.012,"rtfx":83.9},{"set":"tts16","clips":16,"errors":4,"words":386,"wer":1.04,"median_ms":65.1,"audio_s":130.19,"busy_s":1.721,"rtfx":75.6}],"date":"2026-10-22"},{"engine":"trit-moonshine-base-f32","model":"moonshine-base","model_name":"Moonshine base","runtime":"Trit","precision":"f32, beam 5","device":"cpu","threads":16,"load_s":0.1,"load_mb":296,"peak_mb":472,"rss_mb":379,"sets":[{"set":"clean","clips":200,"errors":105,"words":4009,"wer":2.62,"median_ms":89.3,"audio_s":1459.31,"busy_s":24.443,"rtfx":59.7},{"set":"other","clips":200,"errors":274,"words":3815,"wer":7.18,"median_ms":93.4,"audio_s":1336.16,"busy_s":23.827,"rtfx":56.1},{"set":"tech","clips":40,"errors":32,"words":473,"wer":6.77,"median_ms":66.5,"audio_s":168.77,"busy_s":2.674,"rtfx":63.1},{"set":"tts16","clips":16,"errors":4,"words":386,"wer":1.04,"median_ms":85.2,"audio_s":130.19,"busy_s":2.156,"rtfx":60.4}],"date":"2026-10-22"},{"engine":"trit-whisper-base.en-greedy","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"Trit","precision":"auto (f16), greedy","device":"cpu","threads":16,"load_s":0.13,"load_mb":175,"peak_mb":280,"rss_mb":268,"sets":[{"set":"clean","clips":200,"errors":139,"words":4009,"wer":3.47,"median_ms":88.0,"audio_s":1459.31,"busy_s":18.806,"rtfx":77.6},{"set":"other","clips":200,"errors":343,"words":3815,"wer":8.99,"median_ms":92.9,"audio_s":1336.16,"busy_s":19.906,"rtfx":67.1},{"set":"tech","clips":40,"errors":31,"words":473,"wer":6.55,"median_ms":86.6,"audio_s":168.77,"busy_s":3.563,"rtfx":47.4},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":92.2,"audio_s":130.19,"busy_s":1.64,"rtfx":79.4}],"date":"2026-10-22"},{"engine":"trit-whisper-tiny-greedy","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"Trit","precision":"auto (f16), greedy","device":"cpu","threads":16,"load_s":0.09,"load_mb":123,"peak_mb":222,"rss_mb":213,"sets":[{"set":"clean","clips":200,"errors":271,"words":4009,"wer":6.76,"median_ms":47.9,"audio_s":1459.31,"busy_s":10.17,"rtfx":143.5},{"set":"other","clips":200,"errors":568,"words":3815,"wer":14.89,"median_ms":46.0,"audio_s":1336.16,"busy_s":9.607,"rtfx":139.1},{"set":"tech","clips":40,"errors":48,"words":473,"wer":10.15,"median_ms":43.2,"audio_s":168.77,"busy_s":1.749,"rtfx":96.5},{"set":"tts16","clips":16,"errors":8,"words":386,"wer":2.07,"median_ms":45.6,"audio_s":130.19,"busy_s":0.815,"rtfx":159.7}],"date":"2026-10-22"},{"engine":"trit-moonshine-tiny-greedy","model":"moonshine-tiny","model_name":"Moonshine tiny","runtime":"Trit","precision":"auto (f16), greedy","device":"cpu","threads":16,"load_s":0.15,"load_mb":113,"peak_mb":225,"rss_mb":219,"sets":[{"set":"clean","clips":200,"errors":162,"words":4009,"wer":4.04,"median_ms":17.0,"audio_s":1459.31,"busy_s":4.524,"rtfx":322.5},{"set":"other","clips":200,"errors":426,"words":3815,"wer":11.17,"median_ms":15.5,"audio_s":1336.16,"busy_s":3.911,"rtfx":341.6},{"set":"tech","clips":40,"errors":56,"words":473,"wer":11.84,"median_ms":11.5,"audio_s":168.77,"busy_s":0.463,"rtfx":364.2},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":13.5,"audio_s":130.19,"busy_s":0.398,"rtfx":327.2}],"date":"2026-10-22"},{"engine":"trit-moonshine-base-greedy","model":"moonshine-base","model_name":"Moonshine base","runtime":"Trit","precision":"auto (f16), greedy","device":"cpu","threads":16,"load_s":0.27,"load_mb":173,"peak_mb":323,"rss_mb":286,"sets":[{"set":"clean","clips":200,"errors":113,"words":4009,"wer":2.82,"median_ms":31.6,"audio_s":1459.31,"busy_s":8.54,"rtfx":170.9},{"set":"other","clips":200,"errors":320,"words":3815,"wer":8.39,"median_ms":29.8,"audio_s":1336.16,"busy_s":7.763,"rtfx":172.1},{"set":"tech","clips":40,"errors":33,"words":473,"wer":6.98,"median_ms":23.8,"audio_s":168.77,"busy_s":0.962,"rtfx":175.5},{"set":"tts16","clips":16,"errors":7,"words":386,"wer":1.81,"median_ms":29.8,"audio_s":130.19,"busy_s":0.827,"rtfx":157.3}],"date":"2026-10-22"},{"engine":"fw-base.en-beam5","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"faster-whisper (CTranslate2)","precision":"int8, beam 5","device":"cpu","threads":16,"load_s":1.96,"load_mb":173,"peak_mb":343,"rss_mb":195,"sets":[{"set":"clean","clips":200,"errors":145,"words":4009,"wer":3.62,"median_ms":313.4,"audio_s":1459.31,"busy_s":66.556,"rtfx":21.9},{"set":"other","clips":200,"errors":346,"words":3815,"wer":9.07,"median_ms":307.2,"audio_s":1336.16,"busy_s":65.036,"rtfx":20.5},{"set":"tech","clips":40,"errors":31,"words":473,"wer":6.55,"median_ms":296.3,"audio_s":168.77,"busy_s":11.871,"rtfx":14.2},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":314.7,"audio_s":130.19,"busy_s":5.515,"rtfx":23.6}],"date":"2026-10-22"},{"engine":"cpp-base.en-beam5","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"whisper.cpp","precision":"f16, beam 5","device":"cpu","threads":16,"load_s":0.78,"load_mb":266,"peak_mb":400,"rss_mb":395,"sets":[{"set":"clean","clips":200,"errors":133,"words":4009,"wer":3.32,"median_ms":265.3,"audio_s":1459.31,"busy_s":57.468,"rtfx":25.4},{"set":"other","clips":200,"errors":334,"words":3815,"wer":8.75,"median_ms":256.8,"audio_s":1336.16,"busy_s":56.088,"rtfx":23.8},{"set":"tech","clips":40,"errors":29,"words":473,"wer":6.13,"median_ms":236.9,"audio_s":168.77,"busy_s":9.375,"rtfx":18.0},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":253.5,"audio_s":130.19,"busy_s":4.816,"rtfx":27.0}],"date":"2026-10-22"},{"engine":"hf-base.en-beam5","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"Transformers (PyTorch)","precision":"fp32, beam 5","device":"cpu","threads":16,"load_s":15.71,"load_mb":919,"peak_mb":1258,"rss_mb":1227,"sets":[{"set":"clean","clips":200,"errors":127,"words":4009,"wer":3.17,"median_ms":899.7,"audio_s":1459.31,"busy_s":206.095,"rtfx":7.1},{"set":"other","clips":200,"errors":312,"words":3815,"wer":8.18,"median_ms":882.4,"audio_s":1336.16,"busy_s":200.524,"rtfx":6.7},{"set":"tech","clips":40,"errors":31,"words":473,"wer":6.55,"median_ms":772.2,"audio_s":168.77,"busy_s":30.564,"rtfx":5.5},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":830.8,"audio_s":130.19,"busy_s":17.601,"rtfx":7.4}],"date":"2026-10-22"},{"engine":"oai-base.en-beam5","model":"whisper-base.en","model_name":"Whisper base.en","runtime":"OpenAI Whisper (PyTorch)","precision":"fp32, beam 5","device":"cpu","threads":16,"load_s":2.1,"load_mb":946,"peak_mb":1125,"rss_mb":1118,"sets":[{"set":"clean","clips":200,"errors":209,"words":4009,"wer":5.21,"median_ms":548.3,"audio_s":1459.31,"busy_s":128.28,"rtfx":11.4},{"set":"other","clips":200,"errors":345,"words":3815,"wer":9.04,"median_ms":533.2,"audio_s":1336.16,"busy_s":126.379,"rtfx":10.6},{"set":"tech","clips":40,"errors":34,"words":473,"wer":7.19,"median_ms":510.5,"audio_s":168.77,"busy_s":20.157,"rtfx":8.4},{"set":"tts16","clips":16,"errors":8,"words":386,"wer":2.07,"median_ms":576.1,"audio_s":130.19,"busy_s":12.299,"rtfx":10.6}],"date":"2026-10-22"},{"engine":"fw-tiny-beam5","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"faster-whisper (CTranslate2)","precision":"int8, beam 5","device":"cpu","threads":16,"load_s":0.8,"load_mb":137,"peak_mb":258,"rss_mb":157,"sets":[{"set":"clean","clips":200,"errors":240,"words":4009,"wer":5.99,"median_ms":204.5,"audio_s":1459.31,"busy_s":43.389,"rtfx":33.6},{"set":"other","clips":200,"errors":505,"words":3815,"wer":13.24,"median_ms":188.8,"audio_s":1336.16,"busy_s":39.811,"rtfx":33.6},{"set":"tech","clips":40,"errors":41,"words":473,"wer":8.67,"median_ms":172.0,"audio_s":168.77,"busy_s":6.862,"rtfx":24.6},{"set":"tts16","clips":16,"errors":5,"words":386,"wer":1.3,"median_ms":200.9,"audio_s":130.19,"busy_s":3.594,"rtfx":36.2}],"date":"2026-10-22"},{"engine":"cpp-tiny-beam5","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"whisper.cpp","precision":"f16, beam 5","device":"cpu","threads":16,"load_s":0.62,"load_mb":186,"peak_mb":287,"rss_mb":282,"sets":[{"set":"clean","clips":200,"errors":252,"words":4009,"wer":6.29,"median_ms":169.2,"audio_s":1459.31,"busy_s":37.534,"rtfx":38.9},{"set":"other","clips":200,"errors":520,"words":3815,"wer":13.63,"median_ms":158.8,"audio_s":1336.16,"busy_s":35.445,"rtfx":37.7},{"set":"tech","clips":40,"errors":41,"words":473,"wer":8.67,"median_ms":145.8,"audio_s":168.77,"busy_s":5.84,"rtfx":28.9},{"set":"tts16","clips":16,"errors":9,"words":386,"wer":2.33,"median_ms":156.5,"audio_s":130.19,"busy_s":3.247,"rtfx":40.1}],"date":"2026-10-22"},{"engine":"hf-tiny-beam5","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"Transformers (PyTorch)","precision":"fp32, beam 5","device":"cpu","threads":16,"load_s":5.53,"load_mb":781,"peak_mb":1068,"rss_mb":1031,"sets":[{"set":"clean","clips":200,"errors":242,"words":4009,"wer":6.04,"median_ms":632.2,"audio_s":1459.31,"busy_s":148.387,"rtfx":9.8},{"set":"other","clips":200,"errors":488,"words":3815,"wer":12.79,"median_ms":599.5,"audio_s":1336.16,"busy_s":141.664,"rtfx":9.4},{"set":"tech","clips":40,"errors":36,"words":473,"wer":7.61,"median_ms":517.7,"audio_s":168.77,"busy_s":20.751,"rtfx":8.1},{"set":"tts16","clips":16,"errors":6,"words":386,"wer":1.55,"median_ms":598.2,"audio_s":130.19,"busy_s":12.713,"rtfx":10.2}],"date":"2026-10-22"},{"engine":"oai-tiny-beam5","model":"whisper-tiny","model_name":"Whisper tiny","runtime":"OpenAI Whisper (PyTorch)","precision":"fp32, beam 5","device":"cpu","threads":16,"load_s":1.83,"load_mb":749,"peak_mb":928,"rss_mb":921,"sets":[{"set":"clean","clips":200,"errors":252,"words":4009,"wer":6.29,"median_ms":308.3,"audio_s":1459.31,"busy_s":73.336,"rtfx":19.9},{"set":"other","clips":200,"errors":504,"words":3815,"wer":13.21,"median_ms":286.7,"audio_s":1336.16,"busy_s":67.574,"rtfx":19.8},{"set":"tech","clips":40,"errors":37,"words":473,"wer":7.82,"median_ms":245.8,"audio_s":168.77,"busy_s":9.772,"rtfx":17.3},{"set":"tts16","clips":16,"errors":7,"words":386,"wer":1.81,"median_ms":280.9,"audio_s":130.19,"busy_s":6.123,"rtfx":21.3}],"date":"2026-10-22"},{"engine":"hf-moonshine-tiny-beam5","model":"moonshine-tiny","model_name":"Moonshine tiny","runtime":"Transformers (PyTorch)","precision":"fp32, beam 5","device":"cpu","threads":16,"load_s":6.29,"load_mb":714,"peak_mb":1118,"rss_mb":1085,"sets":[{"set":"clean","clips":200,"errors":133,"words":4009,"wer":3.32,"median_ms":216.0,"audio_s":1459.31,"busy_s":58.498,"rtfx":24.9},{"set":"other","clips":200,"errors":374,"words":3815,"wer":9.8,"median_ms":227.8,"audio_s":1336.16,"busy_s":56.243,"rtfx":23.8},{"set":"tech","clips":40,"errors":40,"words":473,"wer":8.46,"median_ms":183.8,"audio_s":168.77,"busy_s":7.439,"rtfx":22.7},{"set":"tts16","clips":16,"errors":10,"words":386,"wer":2.59,"median_ms":212.0,"audio_s":130.19,"busy_s":5.892,"rtfx":22.1}],"date":"2026-10-22"},{"engine":"hf-moonshine-base-beam5","model":"moonshine-base","model_name":"Moonshine base","runtime":"Transformers (PyTorch)","precision":"fp32, beam 5","device":"cpu","threads":16,"load_s":6.18,"load_mb":847,"peak_mb":1384,"rss_mb":1363,"sets":[{"set":"clean","clips":200,"errors":106,"words":4009,"wer":2.64,"median_ms":426.2,"audio_s":1459.31,"busy_s":130.886,"rtfx":11.1},{"set":"other","clips":200,"errors":274,"words":3815,"wer":7.18,"median_ms":436.2,"audio_s":1336.16,"busy_s":124.662,"rtfx":10.7},{"set":"tech","clips":40,"errors":32,"words":473,"wer":6.77,"median_ms":296.1,"audio_s":168.77,"busy_s":11.893,"rtfx":14.2},{"set":"tts16","clips":16,"errors":4,"words":386,"wer":1.04,"median_ms":387.3,"audio_s":130.19,"busy_s":10.427,"rtfx":12.5}],"date":"2026-10-22"}];
+const CLEANUP = [{"engine":"trit","runtime":"Trit","precision":"auto (int8)","cases":62,"wer":4.7,"errors":42,"words":894,"exact":37,"median_ms":202.9,"date":"2026-10-22"},{"engine":"trit-int8","runtime":"Trit","precision":"int8","cases":62,"wer":4.7,"errors":42,"words":894,"exact":37,"median_ms":198.2,"date":"2026-10-22"},{"engine":"trit-f16","runtime":"Trit","precision":"f16","cases":62,"wer":4.81,"errors":43,"words":894,"exact":36,"median_ms":401.5,"date":"2026-10-22"},{"engine":"trit-f32","runtime":"Trit","precision":"f32","cases":62,"wer":4.81,"errors":43,"words":894,"exact":36,"median_ms":735.0,"date":"2026-10-22"},{"engine":"hf","runtime":"Transformers (PyTorch)","precision":"fp32","cases":62,"wer":4.81,"errors":43,"words":894,"exact":36,"median_ms":1590.9,"date":"2026-10-22"},{"engine":"llamacpp-f16","runtime":"llama.cpp","precision":"f16 GGUF","cases":62,"wer":4.81,"errors":43,"words":894,"exact":36,"median_ms":361.9,"date":"2026-10-22"},{"engine":"llamacpp-q4","runtime":"llama.cpp","precision":"q4_k_m GGUF","cases":62,"wer":4.92,"errors":44,"words":894,"exact":38,"median_ms":147.8,"date":"2026-10-22"}];
+const SVGNS = "http://www.w3.org/2000/svg";
+const LIBRI = ["clean", "other"];
+
+const set = (r, name) => r.sets.find((s) => s.set === name);
+const libriWer = (r) => {
+  const e = LIBRI.reduce((a, n) => a + set(r, n).errors, 0);
+  const w = LIBRI.reduce((a, n) => a + set(r, n).words, 0);
+  return 100 * e / w;
+};
+const libriMs = (r) => (set(r, "clean").median_ms + set(r, "other").median_ms) / 2;
+const isHero = (r) => r.runtime === "Trit";
+const runtimeShort = (r) => r.runtime.replace(/ \(.*\)$/, "");
+const label = (r) => `${r.model_name} on ${r.runtime}, ${r.precision}${r.device === "gpu" ? ", GPU" : ""}`;
+const short = (r) => isHero(r) ? `Trit ${r.precision}` :
+  `${r.model_name.replace(/^(Whisper|Parakeet TDT|Distil-Whisper) /, "").replace(/ \(.*\)$/, "").replace(/, 1\.58-bit/, "")}, ${runtimeShort(r)}${r.device === "gpu" ? " GPU" : ""}`;
+const fmt = (v, dp) => v.toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+
+function el(name, attrs = {}, parent) {
+  const node = document.createElementNS(SVGNS, name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+const tip = document.getElementById("tip");
+function hover(node, html) {
+  node.addEventListener("pointerenter", () => { tip.innerHTML = html; tip.style.opacity = 1; });
+  node.addEventListener("pointermove", (e) => {
+    tip.style.left = `${Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8)}px`;
+    tip.style.top = `${e.clientY + 14}px`;
+  });
+  node.addEventListener("pointerleave", () => { tip.style.opacity = 0; });
+}
+
+const detail = (r) => `<b>${label(r)}</b><br>LibriSpeech WER ${libriWer(r).toFixed(2)} %<br>` +
+  `median ${set(r, "clean").median_ms.toFixed(0)} ms per clean clip, ${set(r, "clean").rtfx.toFixed(0)}x realtime<br>` +
+  `memory ${r.rss_mb.toLocaleString()} MB, load ${r.load_s.toFixed(2)} s`;
+
+function tiles() {
+  const trit = RESULTS.find(isHero);
+  if (!trit) return;
+  const sameModel = RESULTS.filter((r) => r.model === trit.model && !isHero(r));
+  const cpu = RESULTS.filter((r) => !isHero(r) && r.device === "cpu");
+  const peers = cpu.filter((r) => libriWer(r) <= libriWer(trit));
+  const peer = peers.length ? peers.reduce((a, b) => (libriMs(a) < libriMs(b) ? a : b)) : null;
+  const fastest = cpu.length ? cpu.reduce((a, b) => (libriMs(a) < libriMs(b) ? a : b)) : null;
+  const ms = set(trit, "clean").median_ms;
+  const tile = (l, v, n) => `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div><div class="note">${n}</div></div>`;
+  const out = [tile("Trit, time per clip", `${ms.toFixed(0)} ms`, `${set(trit, "clean").rtfx.toFixed(0)}x realtime on 8 CPU cores. LibriSpeech WER ${libriWer(trit).toFixed(2)} %.`)];
+  for (const other of sameModel) {
+    out.push(tile(`Same weights on ${runtimeShort(other)}${other.device === "gpu" ? " GPU" : ""}`,
+      `${(set(other, "clean").median_ms / ms).toFixed(1)}x slower`,
+      `${set(other, "clean").median_ms.toFixed(0)} ms per clip, ${other.rss_mb.toLocaleString()} MB against Trit's ${trit.rss_mb} MB.`));
+  }
+  if (peer) out.push(tile("Fastest other CPU runtime as accurate as Trit", `${(libriMs(peer) / libriMs(trit)).toFixed(1)}x slower`, `${label(peer)}, WER ${libriWer(peer).toFixed(2)} %.`));
+  if (fastest) out.push(tile("Fastest other CPU runtime", `${libriMs(fastest).toFixed(0)} ms`, `${label(fastest)}, WER ${libriWer(fastest).toFixed(2)} %.`));
+  document.getElementById("tiles").innerHTML = out.join("");
+}
+
+/** Trit as it runs when the caller sets nothing: auto precision, the model's own decoding. */
+const isDefault = (r) => isHero(r) && r.precision.startsWith("auto") && !r.precision.includes("greedy");
+const ordinal = (n) => `${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"}`;
+const totalWer = (r) => {
+  const e = r.sets.reduce((a, s) => a + s.errors, 0);
+  const w = r.sets.reduce((a, s) => a + s.words, 0);
+  return 100 * e / w;
+};
+
+/** The place of `value` among `values`: 1 + the number of better values (a tie shares the place). */
+function place(values, value, lowerIsBetter) {
+  return 1 + values.filter((v) => (lowerIsBetter ? v < value : v > value)).length;
+}
+
+/** A value with its place pill. */
+function ranked(value, values, lowerIsBetter, dp, unit = "", cls = "") {
+  const n = place(values, value, lowerIsBetter);
+  return `<div class="n ${cls}"><span class="rank r${Math.min(n, 4)}" title="${ordinal(n)} of ${values.length} (the other runtimes and Trit's default)">` +
+    `${fmt(value, dp)}${unit}<sup>${ordinal(n)}</sup></span></div>`;
+}
+
+/** The rows that compete for places: every other runtime and Trit's default. */
+const competing = (rows) => rows.filter((r) => !isHero(r) || isDefault(r));
+
+/** Where Trit's default row places on each column, for the card header. */
+function standing(columns, rows) {
+  const trit = rows.find(isDefault);
+  if (!trit) return "";
+  const chips = columns.map(([name, f, lower]) => {
+    const n = place(competing(rows).map(f), f(trit), lower);
+    return `<span class="rank r${Math.min(n, 4)}">${name} ${ordinal(n)}</span>`;
+  });
+  return `<div class="standing"><b style="color:var(--series-1)">Trit default</b> (${trit.precision}): ${chips.join("")}</div>`;
+}
+
+function models() {
+  const groups = [...new Set(RESULTS.map((r) => r.model))];
+  document.getElementById("models").innerHTML = groups.map((model) => {
+    const rows = RESULTS.filter((r) => r.model === model).sort((a, b) => set(a, "clean").median_ms - set(b, "clean").median_ms);
+    const max = Math.max(...rows.map((r) => set(r, "clean").median_ms));
+    // [name, value, lower is better, decimals, unit, class]
+    const columns = [
+      ["Speed", (r) => set(r, "clean").rtfx, false],
+      ["Clean WER", (r) => set(r, "clean").wer, true],
+      ["Other WER", (r) => set(r, "other").wer, true],
+      ["All clips WER", totalWer, true],
+      ["MB after load", (r) => r.load_mb, true],
+      ["MB after all clips", (r) => r.rss_mb, true],
+    ];
+    const values = columns.map(([, f]) => competing(rows).map(f));
+    const body = rows.map((r) => {
+      const ms = set(r, "clean").median_ms, hero = isHero(r), def = isDefault(r);
+      const row = def ? "hero-row" : hero ? "trit-row" : "";
+      return `<div class="who ${hero ? "hero" : ""} ${row}">${hero ? "Trit" : r.runtime}${def ? '<span class="tag">default</span>' : ""}` +
+        `<small>${r.precision}, ${r.device === "gpu" ? "GPU" : "CPU"}</small></div>` +
+        `<div class="barcell ${row}"><i class="bar ${hero ? "hero" : r.device === "gpu" ? "gpu" : ""}" style="width:${(70 * ms / max).toFixed(1)}%"></i><span>${ms.toFixed(0)} ms</span></div>` +
+        ranked(set(r, "clean").rtfx, values[0], false, 0, "x", row) +
+        ranked(set(r, "clean").wer, values[1], true, 2, "", row) +
+        ranked(set(r, "other").wer, values[2], true, 2, "", `wide ${row}`) +
+        ranked(totalWer(r), values[3], true, 2, "", `wide ${row}`) +
+        ranked(r.load_mb, values[4], true, 0, "", `wide ${row}`) +
+        ranked(r.rss_mb, values[5], true, 0, "", `wide ${row}`);
+    }).join("");
+    return `<div class="card model"><h2>${rows[0].model_name}<small>${rows.length} runtime settings, fastest first</small></h2>` +
+      standing(columns, rows) +
+      `<div class="rows"><div class="h">Runtime</div><div class="h">Time per test-clean clip</div><div class="h n">Speed</div>` +
+      `<div class="h n">Clean WER</div><div class="h n wide">Other WER</div><div class="h n wide">All 456 clips WER</div>` +
+      `<div class="h n wide">MB after load</div><div class="h n wide">MB after all clips</div>${body}</div></div>`;
+  }).join("") + cleanupCard();
+}
+
+/** S1-mini: the same 62 raw transcripts on each runtime; WER counts casing and punctuation. */
+function cleanupCard() {
+  if (!CLEANUP.length) return "";
+  const rows = [...CLEANUP].sort((a, b) => a.median_ms - b.median_ms);
+  const max = Math.max(...rows.map((r) => r.median_ms));
+  const columns = [
+    ["Speed", (r) => 1000 / r.median_ms, false],
+    ["Formatted WER", (r) => r.wer, true],
+    ["Exact", (r) => r.exact, false],
+  ];
+  const values = columns.map(([, f]) => competing(rows).map(f));
+  const body = rows.map((r) => {
+    const hero = isHero(r), def = isDefault(r), row = def ? "hero-row" : hero ? "trit-row" : "";
+    return `<div class="who ${hero ? "hero" : ""} ${row}">${hero ? "Trit" : r.runtime}${def ? '<span class="tag">default</span>' : ""}<small>${r.precision}, CPU</small></div>` +
+      `<div class="barcell ${row}"><i class="bar ${hero ? "hero" : ""}" style="width:${(70 * r.median_ms / max).toFixed(1)}%"></i><span>${r.median_ms.toFixed(0)} ms</span></div>` +
+      ranked(1000 / r.median_ms, values[0], false, 1, "/s", row) +
+      ranked(r.wer, values[1], true, 2, "", row) +
+      ranked(r.exact, values[2], false, 0, `/${r.cases}`, row);
+  }).join("");
+  return `<div class="card model"><h2>Superwhisper S1-mini (cleanup)<small>${rows.length} runtime settings, ${rows[0].cases} transcripts, fastest first</small></h2>` +
+    standing(columns, rows) +
+    `<div class="rows text"><div class="h">Runtime</div><div class="h">Time per transcript</div><div class="h n">Speed</div>` +
+    `<div class="h n">Formatted WER</div><div class="h n">Exact</div>${body}</div></div>`;
+}
+
+function scatter() {
+  const svg = document.getElementById("scatter");
+  const W = 1060, H = 460, m = { l: 56, r: 24, t: 16, b: 48 };
+  const xs = RESULTS.map(libriMs), ys = RESULTS.map(libriWer);
+  const x0 = Math.log10(Math.min(...xs) / 1.4), x1 = Math.log10(Math.max(...xs) * 1.6);
+  const yMax = Math.ceil(Math.max(...ys) + 0.5);
+  const X = (v) => m.l + (Math.log10(v) - x0) / (x1 - x0) * (W - m.l - m.r);
+  const Y = (v) => m.t + (1 - v / yMax) * (H - m.t - m.b);
+  for (let v = 0; v <= yMax; v += yMax > 8 ? 2 : 1) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: "var(--grid)" }, svg);
+    el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end", class: "tick" }, svg).textContent = `${v} %`;
+  }
+  for (const v of [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]) {
+    if (Math.log10(v) < x0 || Math.log10(v) > x1) continue;
+    el("line", { x1: X(v), x2: X(v), y1: m.t, y2: H - m.b, stroke: "var(--grid)" }, svg);
+    el("text", { x: X(v), y: H - m.b + 18, "text-anchor": "middle", class: "tick" }, svg).textContent = v >= 1000 ? `${v / 1000} s` : `${v} ms`;
+  }
+  el("text", { x: (m.l + W - m.r) / 2, y: H - 8, "text-anchor": "middle", class: "axis-label" }, svg).textContent = "Median time per clip (log scale), faster to the left";
+  el("text", { x: 14, y: (m.t + H - m.b) / 2, "text-anchor": "middle", class: "axis-label", transform: `rotate(-90 14 ${(m.t + H - m.b) / 2})` }, svg).textContent = "Word error rate, lower is better";
+  const placed = [];
+  // Trit first for label priority, drawn last so it sits on top.
+  const byPriority = [...RESULTS].sort((a, b) => isHero(b) - isHero(a));
+  const labels = new Map();
+  for (const r of byPriority) {
+    const cx = X(libriMs(r)), cy = Y(libriWer(r)), text = short(r);
+    const w = text.length * 6.3 + 4, box = { x: cx + 10, y: cy - 7, w, h: 14 };
+    const clash = placed.some((p) => box.x < p.x + p.w && p.x < box.x + box.w && box.y < p.y + p.h && p.y < box.y + box.h);
+    if ((isHero(r) || !clash) && box.x + w < W) { placed.push(box); labels.set(r, text); }
+  }
+  for (const r of [...RESULTS].sort((a, b) => isHero(a) - isHero(b))) {
+    const cx = X(libriMs(r)), cy = Y(libriWer(r)), hero = isHero(r), gpu = r.device === "gpu";
+    const g = el("g", {}, svg);
+    el("circle", { cx, cy, r: 14, fill: "transparent" }, g);
+    el("circle", { cx, cy, r: hero ? 8 : 5.5, fill: gpu ? "var(--surface-1)" : hero ? "var(--series-1)" : "var(--other)",
+      stroke: gpu ? "var(--other-strong)" : "var(--surface-1)", "stroke-width": 2 }, g);
+    if (labels.has(r)) el("text", { x: cx + 10, y: cy + 4, class: `point-label${hero ? " hero" : ""}` }, g).textContent = labels.get(r);
+    hover(g, detail(r));
+  }
+}
+
+function table() {
+  const cols = [
+    ["Model", (r) => r.model_name], ["Runtime", (r) => isHero(r) ? "Trit" : r.runtime], ["Precision", (r) => `${r.precision}, ${r.device.toUpperCase()}`],
+    ["Clean WER", (r) => set(r, "clean").wer, 2], ["Other WER", (r) => set(r, "other").wer, 2],
+    ["Dev terms WER", (r) => set(r, "tech").wer, 2], ["Dictation WER", (r) => set(r, "tts16").wer, 2],
+    ["Median ms", (r) => set(r, "clean").median_ms, 0], ["Speed", (r) => set(r, "clean").rtfx, 0, "max", "x"],
+    ["Memory MB", (r) => r.rss_mb, 0], ["Load s", (r) => r.load_s, 2],
+  ];
+  const best = cols.map(([, f, dp, dir]) => dp === undefined ? null : (dir === "max" ? Math.max : Math.min)(...RESULTS.map(f)));
+  let previous = null;
+  document.getElementById("table").innerHTML = `<thead><tr>${cols.map(([h]) => `<th>${h}</th>`).join("")}</tr></thead><tbody>` +
+    RESULTS.map((r) => {
+      const first = r.model !== previous && previous !== null;
+      previous = r.model;
+      return `<tr class="${isHero(r) ? "hero" : ""} ${first ? "first" : ""}">` + cols.map(([, f, dp, , unit], i) => {
+        const v = f(r);
+        return dp === undefined ? `<td>${v}</td>` : `<td class="${v === best[i] ? "best" : ""}">${fmt(v, dp)}${unit || ""}</td>`;
+      }).join("") + "</tr>";
+    }).join("") + "</tbody>";
+}
+
+const first = RESULTS[0];
+document.getElementById("meta").textContent = first
+  ? `${first.date} · AMD Ryzen 9 7950X3D, 32 GB RAM, Windows 11, CPU only, English · ${new Set(RESULTS.map((r) => r.model)).size} speech models on ${new Set(RESULTS.map((r) => r.runtime)).size} runtimes, ${RESULTS.length} pairs, 456 clips each; S1-mini on ${CLEANUP.length}`
+  : "No results yet.";
+document.getElementById("footer").textContent = "Made by desktop/bench/runtimes.py and runtimes_report.py. Raw results: desktop/bench/runtimes-results.jsonl.";
+if (RESULTS.length) { models(); }
+</script>
+</body>
+</html>

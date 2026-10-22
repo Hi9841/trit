@@ -1,0 +1,38 @@
+[package]
+name = "trit"
+version = "0.1.0"
+edition = "2021"
+description = "Speech to text on the CPU for the 1.58-bit Parakeet Redux model, with no Python and no inference library"
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/Hi9841/tdt"
+readme = "README.md"
+keywords = ["speech-to-text", "asr", "parakeet", "ternary", "offline"]
+categories = ["multimedia::audio", "science"]
+
+[workspace]
+members = [".", "ffi"]
+
+[[bin]]
+name = "trit"
+path = "src/main.rs"
+
+[dependencies]
+parking_lot = "0.12"
+serde_json = "1.0"
+# zlib, for the compression ratio of Whisper's temperature fallback (as OpenAI computes it).
+miniz_oxide = "0.8"
+mimalloc = { version = "0.1", default-features = false }
+# mi_collect: give the memory freed while loading back to the system.
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+strip = "symbols"

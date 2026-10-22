@@ -1,0 +1,59 @@
+---
+// The first screen of an inner page: what it is on the left, a drawing on the right.
+interface Props {
+  label: string;
+  title: string;
+  art: string;
+  act: "walk" | "measure" | "plug";
+}
+
+const { label, title, art, act } = Astro.props;
+---
+
+<section class="grid head">
+  <div class="words">
+    <p class="label">{label}</p>
+    <h1 class="display l">{title}</h1>
+    <div class="lead"><slot /></div>
+  </div>
+  <figure class="art" data-act={act}><Fragment set:html={art} /></figure>
+</section>
+
+<style>
+  /* One composition: the drawing stands on the same line as the last rule
+     of the words column. */
+  .head {
+    align-items: end;
+    padding-top: 64px;
+  }
+  .words {
+    grid-column: 1 / span 5;
+  }
+  .label {
+    margin-bottom: 24px;
+  }
+  .lead {
+    margin: 32px 0 0;
+  }
+  .lead :global(p) {
+    margin: 0 0 16px;
+  }
+  .art {
+    grid-column: 6 / -1;
+    /* The drawings keep about 4% of their width as margin under the floor;
+       this puts the floor itself on the words' last rule. */
+    margin-bottom: -4%;
+    margin-right: calc(var(--margin) * -1);
+  }
+  @media (max-width: 900px) {
+    .words,
+    .art {
+      grid-column: 1 / -1;
+    }
+    .art {
+      margin-top: 48px;
+      margin-right: 0;
+      margin-bottom: 0;
+    }
+  }
+</style>

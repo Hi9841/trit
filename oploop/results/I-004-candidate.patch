@@ -1,0 +1,114 @@
+--- /tmp/kept/trit/src/models/beam.rs	2026-10-22 10:44:38.438127100 +0300
++++ trit/src/models/beam.rs	2026-10-22 10:33:59.922745500 +0300
+@@ -138,10 +138,26 @@
+                 ended.truncate(width);
+             }
+         }
+-        let mut states: Vec<S> = kept
+-            .iter()
+-            .map(|(b, _, _)| live[*b].state.clone())
+-            .collect();
++        // A beam's state and tokens move to its last child; only the other
++        // children copy them (the caches grow with each token).
++        let (mut parents, mut tokens): (Vec<_>, Vec<_>) =
++            live.into_iter().map(|l| (Some(l.state), l.tokens)).unzip();
++        let mut children = vec![0; parents.len()];
++        for &(b, _, _) in &kept {
++            children[b] += 1;
++        }
++        let mut lines = Vec::with_capacity(kept.len());
++        let mut states = Vec::with_capacity(kept.len());
++        for &(b, _, _) in &kept {
++            children[b] -= 1;
++            if children[b] == 0 {
++                lines.push(std::mem::take(&mut tokens[b]));
++                states.push(parents[b].take().expect("a state moves once"));
++            } else {
++                lines.push(tokens[b].clone());
++                states.push(parents[b].clone().expect("a state moves last"));
++            }
++        }
+         let fed: Vec<usize> = kept.iter().map(|(_, token, _)| *token).collect();
+         let logits = if kept.is_empty() {
+             Vec::new()
+@@ -150,10 +166,10 @@
+         };
+         live = kept
+             .iter()
++            .zip(lines)
+             .zip(states)
+             .zip(logits)
+-            .map(|((&(b, token, score), state), logits)| {
+-                let mut tokens = live[b].tokens.clone();
++            .map(|(((&(_, token, score), mut tokens), state), logits)| {
+                 tokens.push(token);
+                 Live {
+                     tokens,
+@@ -209,26 +225,59 @@
+     thread_local! {
+         static EXPS: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+     }
+-    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
++    let max = lanes(logits, f32::NEG_INFINITY, |m, v| if v > m { v } else { m })
++        .into_iter()
++        .fold(f32::NEG_INFINITY, f32::max);
+     EXPS.with(|exps| {
+         let mut exps = exps.borrow_mut();
+         exps.clear();
+         exps.extend(logits.iter().map(|x| x - max));
+         activation::exp(&mut exps);
+-        (max, exps.iter().sum::<f32>().ln())
++        (max, lanes(&exps, 0.0, |s, v| s + v).iter().sum::<f32>().ln())
+     })
+ }
+ 
+-/// The `count` largest values with their indices, largest first.
++/// Values per lane: one reduction of the slice as `LANES` independent ones
++/// (the rest into the first lanes), so the compiler can vectorize it. A
++/// plain fold is one chain, one value at a time.
++const LANES: usize = 16;
++
++fn lanes(values: &[f32], start: f32, op: impl Fn(f32, f32) -> f32) -> [f32; LANES] {
++    let mut acc = [start; LANES];
++    let chunks = values.chunks_exact(LANES);
++    for (a, &v) in acc.iter_mut().zip(chunks.remainder()) {
++        *a = op(*a, v);
++    }
++    for chunk in chunks {
++        for (a, &v) in acc.iter_mut().zip(chunk) {
++            *a = op(*a, v);
++        }
++    }
++    acc
++}
++
++/// The `count` largest values with their indices, largest first (the first
++/// index first among equal values). A block of `LANES` values is skipped in
++/// one test when none of them beats the last of the best.
+ fn top(values: &[f32], count: usize) -> Vec<(usize, f32)> {
+     let mut best: Vec<(usize, f32)> = Vec::with_capacity(count + 1);
+-    for (i, &v) in values.iter().enumerate() {
+-        if v == f32::NEG_INFINITY || (best.len() == count && v <= best[count - 1].1) {
++    // A value must be above this to enter: the last of the best when full.
++    let mut floor = f32::NEG_INFINITY;
++    for (block, chunk) in values.chunks(LANES).enumerate() {
++        if !chunk.iter().fold(false, |any, &v| any | (v > floor)) {
+             continue;
+         }
+-        let at = best.partition_point(|(_, b)| *b >= v);
+-        best.insert(at, (i, v));
+-        best.truncate(count);
++        for (k, &v) in chunk.iter().enumerate() {
++            if v <= floor {
++                continue;
++            }
++            let at = best.partition_point(|(_, b)| *b >= v);
++            best.insert(at, (block * LANES + k, v));
++            best.truncate(count);
++            if best.len() == count {
++                floor = best[count - 1].1;
++            }
++        }
+     }
+     best
+ }

@@ -1,0 +1,878 @@
+/* Tokens, grid, type and line art. Component styles live in their components. */
+
+:root {
+  --cols: 12;
+  --gutter: 24px;
+  --margin: clamp(20px, 5vw, 120px);
+  /* At most 80 characters a line. ch is the width of "0"; in Geist, text with
+     many narrow letters fits up to 1.5 characters a ch, so 52ch stays under 80. */
+  --measure: 52ch;
+
+  --sans: "Geist Variable", ui-sans-serif, -apple-system, "Segoe UI", Arial, sans-serif;
+  --mono: "Geist Mono Variable", ui-monospace, "SF Mono", Consolas, monospace;
+  --hand: "Patrick Hand", "Comic Neue", cursive;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+}
+
+/* Light: white paper, so the drawings sit on blank paper as drawn. */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+  --paper: #ffffff;
+  --ink: #14110d;
+  --muted: #66615a;
+  --rule: rgba(20, 17, 13, 0.14);
+  --accent: #e8590c;
+  --accent-text: #c2410c;
+  --xh: #14110d;
+  --xh-line: transparent;
+  --tint: rgba(20, 17, 13, 0.045);
+  --display-weight: 300;
+  /* Places in the benchmark tables: 1st, 2nd, 3rd, and 4th or worse. */
+  --gold: #7a5a00;
+  --gold-bg: rgba(212, 162, 23, 0.2);
+  --silver: #474c55;
+  --silver-bg: rgba(140, 147, 158, 0.2);
+  --bronze: #7c4314;
+  --bronze-bg: rgba(193, 120, 64, 0.2);
+  --worse: #8a2c2c;
+  --worse-bg: rgba(200, 80, 80, 0.1);
+}
+
+/* Dark: a written palette, not an inversion. Xiaohei stays black, with a chalk outline. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #131210;
+  --ink: #ece8e1;
+  --muted: #a39d93;
+  --rule: rgba(236, 232, 225, 0.16);
+  --accent: #f07a2e;
+  --accent-text: #ff9a57;
+  --xh: #000000;
+  --xh-line: #ece8e1;
+  --tint: rgba(236, 232, 225, 0.06);
+  --display-weight: 250;
+  --gold: #f6d878;
+  --gold-bg: rgba(212, 162, 23, 0.2);
+  --silver: #d6d9de;
+  --silver-bg: rgba(170, 176, 186, 0.18);
+  --bronze: #e6ad80;
+  --bronze-bg: rgba(193, 120, 64, 0.2);
+  --worse: #e79a9a;
+  --worse-bg: rgba(200, 80, 80, 0.14);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --paper: #131210;
+    --ink: #ece8e1;
+    --muted: #a39d93;
+    --rule: rgba(236, 232, 225, 0.16);
+    --accent: #f07a2e;
+    --accent-text: #ff9a57;
+    --xh: #000000;
+    --xh-line: #ece8e1;
+    --tint: rgba(236, 232, 225, 0.06);
+    --display-weight: 250;
+    --gold: #f6d878;
+    --gold-bg: rgba(212, 162, 23, 0.2);
+    --silver: #d6d9de;
+    --silver-bg: rgba(170, 176, 186, 0.18);
+    --bronze: #e6ad80;
+    --bronze-bg: rgba(193, 120, 64, 0.2);
+    --worse: #e79a9a;
+    --worse-bg: rgba(200, 80, 80, 0.14);
+  }
+}
+
+@media (max-width: 900px) {
+  :root {
+    --cols: 6;
+    --gutter: 16px;
+  }
+}
+@media (max-width: 600px) {
+  :root {
+    --cols: 4;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+}
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 18px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+a {
+  color: inherit;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+/* A theme switch is instant: nothing eases between palettes. */
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition: none !important;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+  column-gap: var(--gutter);
+  padding-inline: var(--margin);
+  max-width: 1680px;
+  margin-inline: auto;
+}
+
+/* ---------- type ---------- */
+h1,
+h2 {
+  text-wrap: balance;
+}
+p {
+  text-wrap: pretty;
+}
+p,
+li,
+figcaption {
+  max-width: var(--measure);
+}
+.display {
+  margin: 0;
+  font-weight: var(--display-weight);
+  line-height: 0.92;
+  letter-spacing: -0.055em;
+}
+.display .line {
+  display: block;
+}
+.display.xl {
+  font-size: clamp(3.25rem, 8.2vw, 7.75rem);
+}
+.display.l {
+  font-size: clamp(2.75rem, 5.4vw, 5.25rem);
+}
+.label {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.lead {
+  margin: 0 0 32px;
+  max-width: 40ch;
+  font-size: 20px;
+  line-height: 1.5;
+}
+figure {
+  margin: 0;
+}
+figcaption {
+  margin-top: 16px;
+  max-width: 48ch;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+/* ---------- line art (drawn with set:html, so it is styled here) ---------- */
+.art svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.art .ln {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.art .ln.paper {
+  fill: var(--paper);
+}
+.art .ln.acc {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+.art .xh {
+  fill: var(--xh);
+  stroke: var(--xh-line);
+  stroke-width: 1.6;
+}
+.art .eye {
+  fill: #ffffff;
+}
+.art .hand {
+  font-family: var(--hand);
+  font-size: 23px;
+  fill: var(--ink);
+}
+.art .hand.sm {
+  font-size: 16px;
+}
+.art .hand.lg {
+  font-size: 34px;
+}
+.art .hand.acc-t {
+  fill: var(--accent-text);
+}
+
+/* The drawing draws itself once. Only with JavaScript; without it, it is simply there. */
+.js .art.draw .ln {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  transition: stroke-dashoffset 1100ms var(--ease-out);
+  transition-delay: calc(var(--d, 0) * 80ms + 200ms);
+}
+.js .art.draw .fade {
+  opacity: 0;
+  transition: opacity 400ms var(--ease-out);
+  transition-delay: calc(var(--d, 0) * 80ms + 700ms);
+}
+.js .art.draw.go .ln {
+  stroke-dashoffset: 0;
+}
+.js .art.draw.go .fade {
+  opacity: 1;
+}
+
+@media (max-width: 600px) {
+  .art {
+    margin-inline: calc(var(--margin) * -1) !important;
+  }
+  .art figcaption {
+    padding-inline: var(--margin);
+  }
+  .art .hand {
+    font-size: 30px;
+  }
+  .art .hand.sm {
+    font-size: 26px;
+  }
+  .art .hand.lg {
+    font-size: 40px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .js .art.draw .ln {
+    stroke-dashoffset: 0;
+    transition: none;
+  }
+  .js .art.draw .fade {
+    opacity: 1;
+    transition: none;
+  }
+}
+
+.art .ln.dash {
+  stroke-dasharray: 4 7;
+}
+
+/* ---------- inner pages ---------- */
+
+/* Text rendered from the repository's Markdown (set:html, so styled here).
+   Text keeps the measure; tables and code may use the whole column. */
+.prose {
+  font-size: 17px;
+  line-height: 1.65;
+}
+.prose > * {
+  max-width: var(--measure);
+}
+.prose > .table,
+.prose > .codeblock {
+  max-width: none;
+}
+
+/* Sections start on a hairline, so a long page scans by its headings. */
+.prose h2 {
+  margin: 80px 0 20px;
+  padding-top: 24px;
+  border-top: 1px solid var(--rule);
+  font-size: clamp(28px, 2.6vw, 36px);
+  font-weight: 400;
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  scroll-margin-top: 24px;
+}
+.prose h3 {
+  margin: 40px 0 12px;
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  scroll-margin-top: 24px;
+}
+.prose p,
+.prose ul,
+.prose ol {
+  margin: 0 0 16px;
+}
+.prose ul,
+.prose ol {
+  padding-left: 24px;
+}
+.prose li {
+  margin-bottom: 6px;
+}
+.prose li::marker {
+  color: var(--muted);
+}
+.prose a {
+  text-decoration: underline;
+  text-decoration-color: var(--rule);
+  text-underline-offset: 4px;
+  transition: text-decoration-color 150ms ease;
+}
+@media (hover: hover) and (pointer: fine) {
+  .prose a:hover {
+    text-decoration-color: currentColor;
+  }
+}
+.prose strong {
+  font-weight: 600;
+}
+
+/* Inline code: a light tint in running text, plain in tables. */
+.prose code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+}
+.prose :is(p, li, li > div) > code {
+  padding: 0.05em 0.15em;
+  border-radius: 3px;
+  background: var(--tint);
+  overflow-wrap: normal;
+}
+.prose code.whole {
+  white-space: nowrap;
+}
+
+/* A list whose items open with a bold lead word ("Input:", "Threads:")
+   reads as a table: the lead word in its own cell, kept in view beside long
+   text, on hairlines across the whole column; the text keeps its measure. */
+.prose ul:has(> li.term) {
+  max-width: none;
+  padding: 0;
+  list-style: none;
+}
+.prose li.term {
+  display: grid;
+  grid-template-columns: 9rem minmax(0, calc(var(--measure) - 2ch));
+  column-gap: 1.5rem;
+  max-width: none;
+  margin: 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--rule);
+}
+.prose li.term:last-child {
+  border-bottom: 1px solid var(--rule);
+}
+.prose li.term > strong {
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.65;
+}
+@media (max-width: 600px) {
+  .prose li.term {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 2px;
+  }
+  .prose li.term > strong {
+    position: static;
+  }
+}
+
+/* Code blocks: a header with the language and the copy button, then the code. */
+.prose .codeblock {
+  margin: 24px 0 32px;
+  border-radius: 3px;
+  background: var(--tint);
+}
+.code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 0 6px 0 20px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.code-copy {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 2px;
+  background: none;
+  color: var(--muted);
+  font: 500 13px/1 var(--sans);
+  cursor: pointer;
+  transition:
+    color 150ms ease,
+    transform 160ms var(--ease-out),
+    opacity 120ms ease,
+    filter 120ms ease;
+}
+.code-copy:active {
+  transform: scale(0.97);
+}
+.code-copy.swap {
+  opacity: 0;
+  filter: blur(2px);
+}
+@media (hover: hover) and (pointer: fine) {
+  .code-copy:hover {
+    color: var(--ink);
+  }
+}
+@media (forced-colors: active) {
+  .code-copy {
+    border: 1px solid ButtonText;
+  }
+}
+/* A long line scrolls; until it is scrolled to its end, the right edge fades
+   (src/lib/codecopy.ts sets .overflows). */
+.prose pre {
+  margin: 0;
+  padding: 16px 20px 18px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+  background: none !important;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.prose pre code {
+  font-size: inherit;
+}
+/* The fade would clip a focus ring on the code, so the block's frame shows it. */
+.prose pre:focus-visible {
+  outline: none;
+}
+.codeblock:has(pre:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.codeblock.overflows:not(.at-end) pre {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+}
+.shiki {
+  --code-foreground: var(--ink);
+  --code-background: transparent;
+  --code-token-constant: var(--ink);
+  --code-token-string: var(--ink);
+  --code-token-comment: var(--muted);
+  --code-token-keyword: var(--ink);
+  --code-token-parameter: var(--ink);
+  --code-token-function: var(--ink);
+  --code-token-string-expression: var(--ink);
+  --code-token-punctuation: var(--ink);
+  --code-token-link: var(--ink);
+  --code-ansi-black: var(--ink);
+}
+
+/* Tables: hairlines, numbers right; code wraps only between words. */
+.prose .table,
+.data-table {
+  margin: 24px 0 32px;
+  overflow-x: auto;
+}
+.prose table,
+.data-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+  line-height: 1.5;
+}
+.prose th,
+.data-table th {
+  padding: 10px 20px 10px 0;
+  border-bottom: 1px solid var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.prose td,
+.data-table td {
+  max-width: 44ch;
+  padding: 12px 20px 12px 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+.prose td code {
+  font-size: 0.95em;
+}
+.prose .right,
+.data-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 600px) {
+  .prose {
+    font-size: 16px;
+  }
+  .prose pre {
+    padding: 14px 16px 16px;
+    font-size: 13px;
+  }
+  .code-head {
+    padding-left: 16px;
+  }
+
+  /* Phones: each row is a block, its first cell on top, the others under
+     their column's name. */
+  .prose .table {
+    overflow: visible;
+  }
+  .prose table,
+  .prose tbody,
+  .prose tr,
+  .prose td {
+    display: block;
+  }
+  .prose thead {
+    display: none;
+  }
+  .prose tr {
+    padding: 14px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .prose tr:first-child {
+    border-top: 1px solid var(--ink);
+  }
+  .prose td {
+    max-width: none;
+    padding: 0;
+    border: 0;
+  }
+  .prose td + td {
+    margin-top: 4px;
+  }
+  /* Wide tables: the cells after the first run on one line, with their names. */
+  .prose .wide td + td {
+    display: inline;
+    color: var(--ink);
+  }
+  .prose .wide td + td + td::before {
+    content: " · " attr(data-label) ": ";
+  }
+  .prose td:first-child {
+    font-weight: 500;
+  }
+  .prose .wide td + td::before {
+    content: attr(data-label) ": ";
+    color: var(--muted);
+  }
+  .prose .right {
+    text-align: left;
+  }
+}
+
+/* ---------- Drawing actions (played by src/lib/motion.ts) ----------
+   `.visible`: on screen. `.act`: the action plays. `.done`: its last frame.
+   Every start state hides behind `.js`, so without JavaScript each drawing
+   shows its last frame. */
+
+.art[data-act] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Xiaohei blinks now and then, only while on screen. */
+.art .eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.art.visible .eyes {
+  animation: blink 5.6s ease-in-out var(--blink, 2s) infinite;
+}
+@keyframes blink {
+  0%,
+  92%,
+  97%,
+  100% {
+    transform: scaleY(1);
+  }
+  94.5% {
+    transform: scaleY(0.12);
+  }
+}
+
+/* Walking: two leg frames and a small rise on the passing frame. */
+.art .step-b {
+  opacity: 0;
+}
+.art.act .walking {
+  animation: walk-rise 320ms steps(1) infinite;
+}
+.art.act .step-a {
+  animation: frame-a 320ms steps(1) infinite;
+}
+.art.act .step-b {
+  animation: frame-b 320ms steps(1) infinite;
+}
+@keyframes walk-rise {
+  50% {
+    transform: translateY(-3px);
+  }
+}
+@keyframes frame-a {
+  50% {
+    opacity: 0;
+  }
+}
+@keyframes frame-b {
+  0% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.art.act .speed,
+.art.act .strain {
+  animation: flicker 240ms steps(1) infinite;
+}
+@keyframes flicker {
+  50% {
+    opacity: 0.2;
+  }
+}
+
+/* Home, crank: Xiaohei turns it, then the strip comes out with its time. */
+.art .crank {
+  transform-box: view-box;
+  transform-origin: 304px 282px;
+}
+.art.act .crank {
+  animation: rock 150ms var(--ease-in-out) infinite alternate;
+}
+.art.act .worker {
+  animation: lean 150ms var(--ease-in-out) infinite alternate;
+}
+@keyframes rock {
+  from {
+    transform: rotate(-18deg);
+  }
+  to {
+    transform: rotate(18deg);
+  }
+}
+@keyframes lean {
+  to {
+    transform: translate(2px, -3px);
+  }
+}
+.js .art[data-act="crank"] .tape {
+  clip-path: inset(0 100% 0 0);
+  transition: clip-path 150ms var(--ease-out);
+}
+.js .art[data-act="crank"].done .tape {
+  clip-path: inset(0 0 0 0);
+  transition-duration: 520ms;
+}
+.js .art[data-act="crank"] .result {
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+.js .art[data-act="crank"].done .result {
+  opacity: 1;
+  transition: opacity 300ms ease 300ms;
+}
+
+/* Home, suitcase: the case strains while Xiaohei leaves. */
+.art .case {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+}
+.art.act .case {
+  animation: strain 300ms var(--ease-in-out) infinite alternate;
+}
+@keyframes strain {
+  to {
+    transform: scale(1.015, 0.99);
+  }
+}
+
+/* Benchmarks: each bar grows for its runtime's time (8× slower; --t1 to
+   --t3 come from the drawing); Xiaohei pulls the tape for as long as the
+   slowest. */
+.js .art[data-act="measure"] .bar,
+.js .art[data-act="measure"] .tape {
+  clip-path: inset(0 100% 0 0);
+}
+.js .art[data-act="measure"] .lab {
+  opacity: 0;
+}
+.js .art[data-act="measure"] .walker {
+  transform: translateX(-540px);
+}
+.js .art[data-act="measure"]:is(.act, .done) :is(.bar, .tape) {
+  clip-path: inset(0 0 0 0);
+}
+.js .art[data-act="measure"]:is(.act, .done) .lab {
+  opacity: 1;
+}
+.js .art[data-act="measure"]:is(.act, .done) .walker {
+  transform: none;
+}
+.js .art[data-act="measure"].act .bar-1 {
+  transition: clip-path var(--t1) linear;
+}
+.js .art[data-act="measure"].act .bar-2 {
+  transition: clip-path var(--t2) linear;
+}
+.js .art[data-act="measure"].act :is(.bar-3, .tape) {
+  transition: clip-path var(--t3) linear;
+}
+.js .art[data-act="measure"].act .walker {
+  transition: transform var(--t3) linear;
+}
+.js .art[data-act="measure"].act .lab-1 {
+  transition: opacity 150ms ease var(--t1);
+}
+.js .art[data-act="measure"].act .lab-2 {
+  transition: opacity 150ms ease var(--t2);
+}
+.js .art[data-act="measure"].act .lab-3 {
+  transition: opacity 150ms ease var(--t3);
+}
+
+/* Docs: Xiaohei pushes the Node plug in; it clicks and the cable goes live. */
+.js .art[data-act="plug"] .pusher {
+  transform: translateX(72px);
+}
+.js .art[data-act="plug"]:is(.act, .done) .pusher {
+  transform: none;
+}
+.js .art[data-act="plug"].act .pusher {
+  transition: transform 640ms var(--ease-out);
+}
+.js .art[data-act="plug"]:not(.done) .cable {
+  stroke: var(--ink);
+}
+.js .art[data-act="plug"] .cable {
+  transition: stroke 300ms ease;
+}
+.js .art[data-act="plug"]:not(.done) .lab {
+  opacity: 0;
+}
+.js .art[data-act="plug"] .lab {
+  transition: opacity 300ms ease 150ms;
+}
+.art[data-act="plug"] .spark {
+  opacity: 0;
+}
+.art[data-act="plug"].done .spark {
+  animation: spark 700ms var(--ease-out);
+}
+@keyframes spark {
+  20% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .art .eyes,
+  .art .walking,
+  .art .step-a,
+  .art .step-b,
+  .art .speed,
+  .art .strain,
+  .art .crank,
+  .art .worker,
+  .art .case,
+  .art .spark {
+    animation: none !important;
+  }
+  .js .art[data-act] * {
+    transition: none !important;
+  }
+}
+
+/* Docs, last drawing: Xiaohei asleep. He breathes and the z's drift up, only
+   while it is on screen; with reduced motion he simply sleeps. */
+.art .shut {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+.art .zz {
+  font-size: 26px;
+}
+.art .z2 {
+  font-size: 32px;
+}
+.art .z3 {
+  font-size: 40px;
+}
+.art .torso {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+}
+.art.visible .torso {
+  animation: breathe 3.2s var(--ease-in-out) infinite;
+}
+.art.visible .zz {
+  animation: drift 4.8s var(--ease-out) infinite;
+}
+.art.visible .z2 {
+  animation-delay: 1.6s;
+}
+.art.visible .z3 {
+  animation-delay: 3.2s;
+}
+@keyframes breathe {
+  50% {
+    transform: scale(1.04, 1.06);
+  }
+}
+@keyframes drift {
+  0% {
+    opacity: 0;
+    transform: translate(-8px, 14px);
+  }
+  /* 28px of rise, fading out at the top. */
+  25%,
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(6px, -14px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .art .torso,
+  .art .zz {
+    animation: none !important;
+  }
+}

@@ -1,0 +1,61 @@
+--- baseline/tree/trit/src/models/beam.rs	2026-10-22 02:13:25.000000000 +0300
++++ ../trit/src/models/beam.rs	2026-10-22 03:17:15.617870800 +0300
+@@ -72,19 +72,21 @@
+         // (score, beam, token), best first.
+         let mut candidates: Vec<(f32, usize, usize)> = Vec::new();
+         for (b, beam) in live.iter_mut().enumerate() {
+-            let (scores, offered) = match rules {
++            // log softmax(x) = (x - max) - log sum exp(x - max); the order of
++            // the logits is the order of their log probabilities.
++            let (offered, (max, log_sum)) = match rules {
+                 Rules::OpenAi => {
+                     mask(&mut beam.logits, &beam.tokens);
+-                    (log_softmax(&beam.logits), width + 1)
++                    (width + 1, log_sum_exp(&beam.logits))
+                 }
+                 Rules::Transformers => {
+-                    let mut scores = log_softmax(&beam.logits);
+-                    mask(&mut scores, &beam.tokens);
+-                    (scores, 2 * width)
++                    let normalizer = log_sum_exp(&beam.logits);
++                    mask(&mut beam.logits, &beam.tokens);
++                    (2 * width, normalizer)
+                 }
+             };
+-            for (token, lp) in top(&scores, offered) {
+-                candidates.push((beam.score + lp, b, token));
++            for (token, logit) in top(&beam.logits, offered) {
++                candidates.push((beam.score + ((logit - max) - log_sum), b, token));
+             }
+         }
+         candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+@@ -200,15 +202,21 @@
+         })
+ }
+ 
+-/// `log softmax(logits)`; masked logits (minus infinity) stay minus infinity.
+-fn log_softmax(logits: &[f32]) -> Vec<f32> {
++/// The maximum of `logits` and `log sum exp(logits - max)`, so that
++/// `log softmax(x) = (x - max) - log_sum`. The exponentials go to a buffer
++/// that each thread reuses: no vector the size of the vocabulary per call.
++fn log_sum_exp(logits: &[f32]) -> (f32, f32) {
++    thread_local! {
++        static EXPS: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
++    }
+     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+-    let mut shifted: Vec<f32> = logits.iter().map(|x| x - max).collect();
+-    let mut exps = shifted.clone();
+-    activation::exp(&mut exps);
+-    let log_sum = exps.iter().sum::<f32>().ln();
+-    shifted.iter_mut().for_each(|x| *x -= log_sum);
+-    shifted
++    EXPS.with(|exps| {
++        let mut exps = exps.borrow_mut();
++        exps.clear();
++        exps.extend(logits.iter().map(|x| x - max));
++        activation::exp(&mut exps);
++        (max, exps.iter().sum::<f32>().ln())
++    })
+ }
+ 
+ /// The `count` largest values with their indices, largest first.

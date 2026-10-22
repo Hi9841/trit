@@ -1,0 +1,277 @@
+---
+import Base from "../layouts/Base.astro";
+import Header from "../components/Header.astro";
+import PageHead from "../components/PageHead.astro";
+import Footer from "../components/Footer.astro";
+import Cmd from "../components/Cmd.astro";
+import { DEFAULT_MODEL, catalog, downloadCommand, familyOf, languagesOf, megabytes, tritCleanup, tritRunOf } from "../lib/data";
+import { render, sections } from "../lib/markdown";
+import { links } from "../lib/links";
+import { readRepo } from "../lib/repo";
+import { shelf } from "../lib/sketch";
+
+// Families in the order of the catalog, each with its models.
+const families = [...new Set(catalog.map((m) => familyOf(m.kind)))].map((family) => ({
+  family,
+  models: catalog.filter((m) => familyOf(m.kind) === family),
+}));
+
+const largest = Math.max(...catalog.map((m) => m.mb));
+
+// From the README's Models section: everything after the table (where Trit looks for a model).
+const readme = sections(readRepo("trit/README.md")).find((s) => s.id === "models")?.body ?? "";
+const search = await render(readme.slice(readme.indexOf("Get one")), "trit/README.md");
+---
+
+<Base
+  title="Models · Trit"
+  description="The Hugging Face checkpoints Trit runs: Parakeet, Canary, Whisper, Moonshine, and S1-mini for cleanup. Sizes, languages, speed, and the download command."
+>
+  <Header />
+  <main>
+    <PageHead label={`Models · ${catalog.length} checkpoints`} title="Models, as published." art={shelf} act="walk">
+      <p>
+        Trit reads <code>config.json</code> and <code>model.safetensors</code> of a Hugging Face folder and picks the
+        network from <code>model_type</code>. These checkpoints have been run. Others of the same families load the
+        same way. This command lists them, with what is on your computer:
+      </p>
+      <Cmd command="trit models" />
+    </PageHead>
+
+    <section class="grid catalog" aria-label="Catalog">
+      {
+        families.map(({ family, models }) => (
+          <div class="family">
+            <h2>{family}</h2>
+            <ul>
+              {models.map((m) => {
+                const run = tritRunOf(m.name);
+                const fact = run
+                  ? `${Math.round(run.ms)} ms a clip · ${run.clean.toFixed(2)} % clean WER`
+                  : m.kind === "cleanup" && tritCleanup
+                    ? `${Math.round(tritCleanup.ms)} ms a case · ${tritCleanup.wer.toFixed(2)} % formatted WER`
+                    : "Not in the benchmark yet";
+
+                return (
+                  <li class:list={["model", { default: m.name === DEFAULT_MODEL }]}>
+                    <div class="name">
+                      <span class="id">{m.name}</span>
+                      {m.name === DEFAULT_MODEL && <span class="tag">default</span>}
+                      <a class="repo" href={`https://huggingface.co/${m.repo}`} rel="noopener">
+                        {m.repo}
+                      </a>
+                    </div>
+                    <div class="facts">
+                      <span>{languagesOf(m.languages)}</span>
+                      <span>{fact}</span>
+                    </div>
+                    <div class="size">
+                      <span class="mb">{megabytes(m.mb)}</span>
+                      <span class="bar" style={`--w:${(m.mb / largest).toFixed(3)}`} aria-hidden="true" />
+                    </div>
+                    <button class="get" type="button" data-copy={downloadCommand(m)}>
+                      Copy download
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))
+      }
+      <p class="foot">
+        Times are Trit's median on 200 LibriSpeech clips (S1-mini: on {tritCleanup?.cases} cleanup cases), Ryzen 9 7950X3D. All
+        runtimes side by side on{" "}
+        <a href={links.benchmarks}>Benchmarks</a>.
+      </p>
+    </section>
+
+    <section class="grid more">
+      <div class="prose"><h2 id="where">Download, and where Trit looks</h2><Fragment set:html={search} /></div>
+    </section>
+  </main>
+  <Footer />
+</Base>
+
+<script>
+  // Copies the download command; the label confirms through a short blur.
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".get")) {
+    button.addEventListener("click", async () => {
+      let copied = true;
+
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy ?? "");
+      } catch {
+        copied = false;
+      }
+
+      button.classList.add("swap");
+      setTimeout(() => {
+        button.textContent = copied ? "Copied" : "Select it";
+        button.classList.remove("swap");
+      }, 120);
+      setTimeout(() => {
+        button.textContent = "Copy download";
+      }, 1600);
+    });
+  }
+</script>
+
+<style>
+  .catalog {
+    margin-top: 128px;
+  }
+  .family {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
+    margin-bottom: 64px;
+  }
+  h2 {
+    grid-column: 1 / span 3;
+    margin: 0;
+    padding-top: 20px;
+    font-size: 28px;
+    font-weight: var(--display-weight);
+    letter-spacing: -0.03em;
+  }
+  ul {
+    grid-column: 4 / -1;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .model {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 4fr) minmax(0, 3fr) auto;
+    gap: 8px 24px;
+    align-items: center;
+    max-width: none;
+    padding: 20px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .model:last-child {
+    border-bottom: 1px solid var(--rule);
+  }
+  .name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+  }
+  .id {
+    font-family: var(--mono);
+    font-size: 16px;
+  }
+  .tag {
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent-text);
+  }
+  .repo {
+    flex-basis: 100%;
+    font-size: 14px;
+    color: var(--muted);
+    text-decoration: none;
+  }
+  .facts {
+    display: grid;
+    font-size: 15px;
+    line-height: 1.45;
+  }
+  .facts span + span {
+    color: var(--muted);
+  }
+  .size {
+    display: grid;
+    gap: 8px;
+  }
+  .mb {
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+  }
+  .bar {
+    height: 4px;
+    background: var(--ink);
+    transform: scaleX(var(--w));
+    transform-origin: left center;
+  }
+  .default .bar {
+    background: var(--accent);
+  }
+  .get {
+    min-width: 132px;
+    padding: 12px 14px;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    background: none;
+    color: var(--ink);
+    font: 500 14px/1 var(--sans);
+    cursor: pointer;
+    transition:
+      transform 160ms var(--ease-out),
+      border-color 150ms ease,
+      opacity 120ms ease,
+      filter 120ms ease;
+  }
+  .get:active {
+    transform: scale(0.97);
+  }
+  .get.swap {
+    opacity: 0;
+    filter: blur(2px);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .get:hover {
+      border-color: var(--ink);
+    }
+    .repo:hover {
+      color: var(--ink);
+    }
+  }
+  .foot {
+    grid-column: 4 / -1;
+    margin: 0;
+    font-size: 15px;
+    color: var(--muted);
+  }
+  .foot a {
+    text-underline-offset: 4px;
+  }
+  .more {
+    margin-top: 64px;
+  }
+  .more .prose {
+    grid-column: 4 / span 8;
+  }
+  .more .prose :global(h2) {
+    margin-top: 0;
+  }
+  @media (max-width: 900px) {
+    h2,
+    ul,
+    .foot,
+    .more .prose {
+      grid-column: 1 / -1;
+    }
+    h2 {
+      margin-bottom: 16px;
+    }
+    .model {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .facts {
+      grid-column: 1;
+    }
+    .size {
+      grid-column: 1;
+    }
+    .get {
+      grid-column: 2;
+      grid-row: 1 / span 3;
+      align-self: start;
+    }
+  }
+</style>
