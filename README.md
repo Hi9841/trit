@@ -371,7 +371,7 @@ weights in every mode.
   they decode greedy. Whisper puts the terms in a previous-text prompt, as
   OpenAI's `initial_prompt`.
 - **English:** with `language: "en"`, Parakeet never writes pieces that
-  only other languages use. When a quarter or more of the words of a window
+  only other languages use. When 40 % or more of the words of a window
   are in no English word list (SCOWL size 70), it decodes the window again
   with a prior for English words.
 - **Timestamps:** `segments` gives sentences or pauses of 1 s for Parakeet,

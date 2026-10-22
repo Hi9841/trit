@@ -7,7 +7,7 @@
 usage: uv run trit/scripts/english_lists.py <american-english-large> <tokenizer.json>
 
 - english-words.txt: the lowercase words of SCOWL size 70 (Debian package
-  wamerican-large), apostrophes removed, front-coded: each line starts with
+  wamerican-large), possessives dropped and apostrophes removed, front-coded: each line starts with
   one character for the letters shared with the word before (0-9, then a-z
   for 10-35), then the rest of the word.
 - foreign-pieces.txt: pieces of the Parakeet v3 tokenizer that the 30000
@@ -31,6 +31,9 @@ OTHERS = ["fr", "es", "de", "it", "pt", "nl", "pl", "sv", "da", "fi", "cs", "ro"
 def words(scowl: str) -> list[str]:
     out = set()
     for line in Path(scowl).read_text(encoding="latin-1").splitlines():
+        # A possessive is its word: "redi's" must not become "redis".
+        if line.endswith("'s"):
+            continue
         word = line.strip().replace("'", "").lower()
         if re.fullmatch(r"[a-z]+", word):
             out.add(word)

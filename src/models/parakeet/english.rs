@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 /// The lowercase words of SCOWL size 70, front-coded (`scripts/english_lists.py`).
 const WORDS: &str = include_str!("../../text/english-words.txt");
 /// A pass is decoded again when this share of its words is not English.
-const DRIFT_SHARE: f32 = 0.25;
+const DRIFT_SHARE: f32 = 0.4;
 /// What a token that leaves English loses, in logits.
 const PENALTY: f32 = 10.0;
 
@@ -127,7 +127,7 @@ impl English {
     }
 
     fn is_word(&self, letters: &str) -> bool {
-        lexicon().first_from(letters) == Some(letters)
+        is_word(letters)
             || self
                 .terms
                 .read()
@@ -146,6 +146,11 @@ impl English {
         let at = terms.partition_point(|t| t.as_str() < prefix);
         terms.get(at).is_some_and(|t| t.starts_with(prefix))
     }
+}
+
+/// Whether `letters` (lowercase) is a word of the English word list.
+pub fn is_word(letters: &str) -> bool {
+    lexicon().first_from(letters) == Some(letters)
 }
 
 impl Partial {
