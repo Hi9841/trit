@@ -27,8 +27,8 @@ def chart(title: str, note: str, rows: list[tuple[str, float, str, float]], unit
     top = 70
     height = top + ROW * len(rows) + 30
     scale = (WIDTH - LABEL - 150) / max(max(t, o) for _, t, _, o in rows)
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{height}" '
-           f'viewBox="0 0 {WIDTH} {height}" font-family="Segoe UI, Helvetica, Arial, sans-serif">',
+    out = [(f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{height}" '
+            f'viewBox="0 0 {WIDTH} {height}" font-family="Segoe UI, Helvetica, Arial, sans-serif">'),
            f'<rect width="{WIDTH}" height="{height}" rx="12" fill="#ffffff" stroke="{GRID}"/>',
            f'<text x="24" y="34" font-size="18" font-weight="600" fill="{INK}">{escape(title)}</text>',
            f'<text x="24" y="54" font-size="12" fill="{MUTED}">{escape(note)}</text>']
