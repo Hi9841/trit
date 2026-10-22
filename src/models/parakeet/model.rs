@@ -1182,8 +1182,12 @@ impl Tdt {
         for candidate in &candidates {
             let span = candidate.span.clone();
             let end = match tokens.get(span.end) {
-                Some(&token) => End::Token(token, frames[span.end]),
-                None => End::Close,
+                // A term ends within `SPAN_REACH` frames of the words it
+                // replaces: a long pause after them is not scored.
+                Some(&token) if frames[span.end] <= frames[span.end - 1] + SPAN_REACH => {
+                    End::Token(token, frames[span.end])
+                }
+                _ => End::Close(heard.t.min(frames[span.end - 1] + SPAN_REACH)),
             };
             let (spellings, prior) = match candidate.check {
                 Check::None => (Vec::new(), 0.0),
@@ -1255,7 +1259,7 @@ impl Tdt {
                 let from = heard.trail[job.start].next;
                 let (last, anchor) = match job.end {
                     End::Token(token, frame) => (frame, Some(token)),
-                    End::Close => (heard.t, None),
+                    End::Close(frame) => (frame, None),
                 };
                 (last >= from).then(|| (from, last - from, anchor))
             })
@@ -1285,7 +1289,7 @@ impl Tdt {
                     });
                     nodes.len() - 1
                 });
-                let needed = rows(u, count, width, anchor);
+                let needed = rows(width, anchor);
                 nodes[node].rows = nodes[node].rows.max(needed);
                 path.push(node);
             }
@@ -1370,7 +1374,7 @@ impl Tdt {
                 } else {
                     anchor
                 };
-                for f in 0..width {
+                for f in 0..rows(width, anchor) {
                     let here = alpha[at(f, u)];
                     if here == f32::NEG_INFINITY {
                         continue;
@@ -1420,15 +1424,19 @@ struct Node {
     base: usize,
 }
 
-/// Joint rows of step `u` of a job with `count` tokens: the frames it
-/// crosses, and on the last step also the anchor's own frame.
-fn rows(u: usize, count: usize, width: usize, anchor: Option<usize>) -> usize {
-    if u == count && anchor.is_some() {
+/// Joint rows of each step of a job: the frames it crosses, and the
+/// anchor's own frame.
+fn rows(width: usize, anchor: Option<usize>) -> usize {
+    // Tokens may stay on the anchor's frame, before the anchor itself.
+    if anchor.is_some() {
         width + 1
     } else {
         width
     }
 }
+
+/// Frames after the last word of a span that its sound check covers: 2 s.
+const SPAN_REACH: usize = 25;
 
 /// A spelling to score: from the decoder before token `start` of the
 /// greedy pass, through `tokens`, to `end`.
@@ -1468,7 +1476,8 @@ struct Heard<'a> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum End {
     Token(usize, usize),
-    Close,
+    /// Every path that reaches this frame, or goes past it, ends.
+    Close(usize),
 }
 
 thread_local! {

@@ -24,6 +24,9 @@ pub struct Parakeet {
     tokenizer: Tokenizer,
     /// Tokens of other languages; blocked when the caller asks for English.
     non_english: Vec<usize>,
+    /// `non_english` without the pieces of the dictionary terms: a name
+    /// such as "Hetzner" must stay possible.
+    blocked: RwLock<Vec<usize>>,
     /// The English word prior, for callers that ask for English.
     english: english::English,
 }
@@ -51,6 +54,7 @@ impl Parakeet {
             model,
             frontend,
             english: english::English::new(&tokenizer),
+            blocked: RwLock::new(tokenizer.non_english()),
             non_english: tokenizer.non_english(),
             tokenizer,
         })
@@ -67,6 +71,13 @@ impl Parakeet {
     pub fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
         self.english.set_terms(terms);
         let (terms, skipped) = dictionary::Dictionary::build(&self.tokenizer, terms, weights);
+        let used = terms.as_ref().map(|d| d.pieces()).unwrap_or_default();
+        *self.blocked.write() = self
+            .non_english
+            .iter()
+            .copied()
+            .filter(|id| !used.contains(id))
+            .collect();
         *self.dictionary.write() = terms;
         skipped
     }
@@ -135,9 +146,11 @@ impl Parakeet {
             return (Vec::new(), Vec::new());
         };
         // Parakeet cannot be told a language; it can only be kept to English.
-        let (blocked, english): (&[usize], _) = match options.language.as_deref() {
-            Some("en") => (&self.non_english, Some(&self.english)),
-            _ => (&[], None),
+        let english = options.language.as_deref() == Some("en");
+        let blocked = self.blocked.read();
+        let (blocked, english): (&[usize], _) = match english {
+            true => (&blocked, Some(&self.english)),
+            false => (&[], None),
         };
         let dictionary = self.dictionary.read();
         self.model

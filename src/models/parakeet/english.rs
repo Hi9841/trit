@@ -27,6 +27,8 @@ pub struct English {
     digits: Vec<bool>,
     /// Per token id: the piece has a lowercase letter.
     lower: Vec<bool>,
+    /// Per token id: the piece is an apostrophe inside a word ("I've").
+    apostrophe: Vec<bool>,
     /// The words of the dictionary terms, sorted: English for this caller.
     terms: RwLock<Vec<String>>,
 }
@@ -37,6 +39,8 @@ pub struct Partial {
     letters: String,
     digits: bool,
     lower: bool,
+    /// No English word starts with the letters so far.
+    left: bool,
 }
 
 impl English {
@@ -52,6 +56,10 @@ impl English {
             lower: pieces
                 .iter()
                 .map(|p| p.chars().any(char::is_lowercase))
+                .collect(),
+            apostrophe: pieces
+                .iter()
+                .map(|p| !p.is_empty() && p.chars().all(|c| matches!(c, '\'' | '\u{2019}')))
                 .collect(),
             terms: RwLock::new(Vec::new()),
         }
@@ -83,7 +91,7 @@ impl English {
         };
         let mut word = Partial::default();
         for &token in tokens {
-            if self.keys[token].is_empty() || self.starts[token] {
+            if (self.keys[token].is_empty() && !self.apostrophe[token]) || self.starts[token] {
                 close(&word);
             }
             word = self.step(&word, token).0;
@@ -107,11 +115,18 @@ impl English {
         choice.0
     }
 
-    /// The word after `token`, and whether some English word starts with it.
+    /// The word after `token`, and whether the token may follow without
+    /// a penalty: the word stays a start of an English word, or it had
+    /// already left English before this token (cutting it short with a
+    /// blank would not make it English).
     pub fn step(&self, word: &Partial, token: usize) -> (Partial, bool) {
         let key = &self.keys[token];
         if key.is_empty() {
-            // Punctuation ends the word.
+            // An apostrophe inside a word keeps it ("I've" is "ive");
+            // other punctuation ends it.
+            if self.apostrophe[token] {
+                return (word.clone(), true);
+            }
             return (Partial::default(), true);
         }
         let mut next = if self.starts[token] {
@@ -122,8 +137,10 @@ impl English {
         next.letters.push_str(key);
         next.digits |= self.digits[token];
         next.lower |= self.lower[token];
-        let fits = next.free() || self.starts_word(&next.letters);
-        (next, fits)
+        let english = next.free() || self.starts_word(&next.letters);
+        let gone = word.left && !self.starts[token];
+        next.left = !english;
+        (next, english || gone)
     }
 
     fn is_word(&self, letters: &str) -> bool {
@@ -161,7 +178,7 @@ impl Partial {
 }
 
 /// Lowercase letters and digits of `text`.
-fn key(text: &str) -> String {
+pub fn key(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
@@ -180,7 +197,7 @@ impl Lexicon {
         let end = self
             .starts
             .get(index + 1)
-            .map_or(self.text.len(), |&next| next as usize - 1);
+            .map_or(self.text.len() - 1, |&next| next as usize - 1);
         &self.text[self.starts[index] as usize..end]
     }
 

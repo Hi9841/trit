@@ -3,7 +3,7 @@
 //! Greedy decoding runs without help. Then each run of words spelled close
 //! to a term (a few letters apart, or the same letters split or cased
 //! another way) is a candidate. The joint network scores the words it heard
-//! and the term over the same frames (`Tdt::span_logp`), and the term
+//! and the term over the same frames (`Tdt::score`), and the term
 //! replaces the words when it loses by less than `prior`. Speech that does
 //! not sound like the term keeps its own words, however close the spelling.
 
@@ -238,6 +238,14 @@ impl Dictionary {
         kept
     }
 
+    /// Every piece the terms are spelled with.
+    pub fn pieces(&self) -> std::collections::HashSet<usize> {
+        self.terms
+            .iter()
+            .flat_map(|term| term.spellings.iter().flatten().copied())
+            .collect()
+    }
+
     /// The tokens of a candidate's term as the user wrote it.
     pub fn written(&self, candidate: &Candidate) -> &[usize] {
         &self.terms[candidate.term].tokens
@@ -293,21 +301,28 @@ impl Dictionary {
     /// The words of `tokens`, each without its trailing punctuation.
     fn words(&self, tokens: &[usize]) -> Vec<Word> {
         let mut words: Vec<Word> = Vec::new();
+        // The last word may still grow: no piece that starts a word came
+        // after it. A quote that starts a word ("▁'") ends it too.
+        let mut open = false;
         for (i, &token) in tokens.iter().enumerate() {
             let letters = !self.keys[token].is_empty();
-            let starts = self.starts.get(token).copied().unwrap_or(false);
+            if self.starts.get(token).copied().unwrap_or(false) {
+                open = false;
+            }
             match words.last_mut() {
                 // Letters after punctuation without a space ("Node.js") join the word.
-                Some(word) if !starts && letters && word.tokens.end == i => word.tokens.end = i + 1,
-                Some(word) if !starts && letters => {
+                Some(word) if open && letters => {
                     word.tokens.end = i + 1;
                     word.joined = true;
                 }
-                Some(word) if !starts => word.joined = false,
-                _ if letters => words.push(Word {
-                    tokens: i..i + 1,
-                    joined: true,
-                }),
+                Some(word) if open => word.joined = false,
+                _ if letters => {
+                    words.push(Word {
+                        tokens: i..i + 1,
+                        joined: true,
+                    });
+                    open = true;
+                }
                 _ => {
                     if let Some(word) = words.last_mut() {
                         word.joined = false;
@@ -321,10 +336,7 @@ impl Dictionary {
 
 /// Lowercase letters and digits of `text`.
 fn key(text: &str) -> Vec<char> {
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+    english::key(text).chars().collect()
 }
 
 /// Edit distance where letters that sound alike cost half: vowels for each
