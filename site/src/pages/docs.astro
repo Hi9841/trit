@@ -49,7 +49,7 @@ const version = /^version = "([^"]+)"/m.exec(readRepo("trit/Cargo.toml"))?.[1] ?
 >
   <Header />
   <main>
-    <PageHead label={`Docs · Trit ${version}`} title="Use it from any language." art={plugs} act="plug">
+    <PageHead label={`Docs · Trit ${version}`} title="Use it from any language." art={plugs} scene="plugs">
       <p>
         Trit turns 16 kHz speech into text on the CPU. Call it from the <code>trit</code> command, the Rust crate, or a
         C ABI with bindings for Python, C#, Node and Bun. This page is{" "}
@@ -107,7 +107,7 @@ const version = /^version = "([^"]+)"/m.exec(readRepo("trit/Cargo.toml"))?.[1] ?
           ))
         }
       </div>
-      <figure class="art end" data-act="sleep">
+      <figure class="art end" data-scene="idle">
         <Fragment set:html={idle} />
         <figcaption>Workers spin for 3 ms after a step, then sleep. An idle engine uses no CPU.</figcaption>
       </figure>

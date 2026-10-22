@@ -30,15 +30,6 @@
   --xh-line: transparent;
   --tint: rgba(20, 17, 13, 0.045);
   --display-weight: 300;
-  /* Places in the benchmark tables: 1st, 2nd, 3rd, and 4th or worse. */
-  --gold: #7a5a00;
-  --gold-bg: rgba(212, 162, 23, 0.2);
-  --silver: #474c55;
-  --silver-bg: rgba(140, 147, 158, 0.2);
-  --bronze: #7c4314;
-  --bronze-bg: rgba(193, 120, 64, 0.2);
-  --worse: #8a2c2c;
-  --worse-bg: rgba(200, 80, 80, 0.1);
 }
 
 /* Dark: a written palette, not an inversion. Xiaohei stays black, with a chalk outline. */
@@ -54,14 +45,6 @@
   --xh-line: #ece8e1;
   --tint: rgba(236, 232, 225, 0.06);
   --display-weight: 250;
-  --gold: #f6d878;
-  --gold-bg: rgba(212, 162, 23, 0.2);
-  --silver: #d6d9de;
-  --silver-bg: rgba(170, 176, 186, 0.18);
-  --bronze: #e6ad80;
-  --bronze-bg: rgba(193, 120, 64, 0.2);
-  --worse: #e79a9a;
-  --worse-bg: rgba(200, 80, 80, 0.14);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
@@ -76,14 +59,6 @@
     --xh-line: #ece8e1;
     --tint: rgba(236, 232, 225, 0.06);
     --display-weight: 250;
-    --gold: #f6d878;
-    --gold-bg: rgba(212, 162, 23, 0.2);
-    --silver: #d6d9de;
-    --silver-bg: rgba(170, 176, 186, 0.18);
-    --bronze: #e6ad80;
-    --bronze-bg: rgba(193, 120, 64, 0.2);
-    --worse: #e79a9a;
-    --worse-bg: rgba(200, 80, 80, 0.14);
   }
 }
 
@@ -304,6 +279,23 @@ figcaption {
 
 .art .ln.dash {
   stroke-dasharray: 4 7;
+}
+
+/* Home, crank (the story is in crank.ts): a pulse of signal on the wave, and
+   the underline of the step being told. A pulse shows only while it travels. */
+.art .pulse,
+.art .uline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+.art .pulse {
+  stroke-dasharray: 0.14 2;
+  visibility: hidden;
+}
+.art .uline {
+  stroke-dasharray: 1;
 }
 
 /* ---------- inner pages ---------- */
@@ -613,12 +605,12 @@ figcaption {
   }
 }
 
-/* ---------- Drawing actions (played by src/lib/motion.ts) ----------
-   `.visible`: on screen. `.act`: the action plays. `.done`: its last frame.
-   Every start state hides behind `.js`, so without JavaScript each drawing
-   shows its last frame. */
+/* ---------- Drawing stories (played by src/lib/motion.ts) ----------
+   The stories move the drawings from JavaScript (crank.ts, scenes.ts); the
+   markup is each drawing's last frame, so without JavaScript it is complete.
+   `.visible`: on screen. */
 
-.art[data-act] {
+.art[data-scene] {
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -641,255 +633,28 @@ figcaption {
     transform: scaleY(0.12);
   }
 }
-
-/* Walking: two leg frames and a small rise on the passing frame. */
-.art .step-b {
-  opacity: 0;
-}
-.art.act .walking {
-  animation: walk-rise 320ms steps(1) infinite;
-}
-.art.act .step-a {
-  animation: frame-a 320ms steps(1) infinite;
-}
-.art.act .step-b {
-  animation: frame-b 320ms steps(1) infinite;
-}
-@keyframes walk-rise {
-  50% {
-    transform: translateY(-3px);
-  }
-}
-@keyframes frame-a {
-  50% {
-    opacity: 0;
-  }
-}
-@keyframes frame-b {
-  0% {
-    opacity: 0;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-.art.act .speed,
-.art.act .strain {
-  animation: flicker 240ms steps(1) infinite;
-}
-@keyframes flicker {
-  50% {
-    opacity: 0.2;
-  }
-}
-
-/* Home, crank: Xiaohei turns it, then the strip comes out with its time. */
-.art .crank {
-  transform-box: view-box;
-  transform-origin: 300px 300px;
-}
-.art.act .crank {
-  animation: rock 150ms var(--ease-in-out) infinite alternate;
-}
-.art.act .worker {
-  animation: lean 150ms var(--ease-in-out) infinite alternate;
-}
-@keyframes rock {
-  from {
-    transform: rotate(-18deg);
-  }
-  to {
-    transform: rotate(18deg);
-  }
-}
-@keyframes lean {
-  to {
-    transform: translate(2px, -3px);
-  }
-}
-.js .art[data-act="crank"] .tape {
-  clip-path: inset(0 100% 0 0);
-  transition: clip-path 150ms var(--ease-out);
-}
-.js .art[data-act="crank"].done .tape {
-  clip-path: inset(0 0 0 0);
-  transition-duration: 520ms;
-}
-.js .art[data-act="crank"] .result {
-  opacity: 0;
-  transition: opacity 150ms ease;
-}
-.js .art[data-act="crank"].done .result {
-  opacity: 1;
-  transition: opacity 300ms ease 300ms;
-}
-
-/* Home, suitcase: the case strains while Xiaohei leaves. */
-.art .case {
-  transform-box: fill-box;
-  transform-origin: 50% 100%;
-}
-.art.act .case {
-  animation: strain 300ms var(--ease-in-out) infinite alternate;
-}
-@keyframes strain {
-  to {
-    transform: scale(1.015, 0.99);
-  }
-}
-
-/* Benchmarks: each bar grows for its runtime's time (8× slower; --t1 to
-   --t3 come from the drawing); Xiaohei pulls the tape for as long as the
-   slowest. */
-.js .art[data-act="measure"] .bar,
-.js .art[data-act="measure"] .tape {
-  clip-path: inset(0 100% 0 0);
-}
-.js .art[data-act="measure"] .lab {
-  opacity: 0;
-}
-.js .art[data-act="measure"] .walker {
-  transform: translateX(-540px);
-}
-.js .art[data-act="measure"]:is(.act, .done) :is(.bar, .tape) {
-  clip-path: inset(0 0 0 0);
-}
-.js .art[data-act="measure"]:is(.act, .done) .lab {
-  opacity: 1;
-}
-.js .art[data-act="measure"]:is(.act, .done) .walker {
-  transform: none;
-}
-.js .art[data-act="measure"].act .bar-1 {
-  transition: clip-path var(--t1) linear;
-}
-.js .art[data-act="measure"].act .bar-2 {
-  transition: clip-path var(--t2) linear;
-}
-.js .art[data-act="measure"].act :is(.bar-3, .tape) {
-  transition: clip-path var(--t3) linear;
-}
-.js .art[data-act="measure"].act .walker {
-  transition: transform var(--t3) linear;
-}
-.js .art[data-act="measure"].act .lab-1 {
-  transition: opacity 150ms ease var(--t1);
-}
-.js .art[data-act="measure"].act .lab-2 {
-  transition: opacity 150ms ease var(--t2);
-}
-.js .art[data-act="measure"].act .lab-3 {
-  transition: opacity 150ms ease var(--t3);
-}
-
-/* Docs: Xiaohei pushes the Node plug in; it clicks and the cable goes live. */
-.js .art[data-act="plug"] .pusher {
-  transform: translateX(72px);
-}
-.js .art[data-act="plug"]:is(.act, .done) .pusher {
-  transform: none;
-}
-.js .art[data-act="plug"].act .pusher {
-  transition: transform 640ms var(--ease-out);
-}
-.js .art[data-act="plug"]:not(.done) .cable {
-  stroke: var(--ink);
-}
-.js .art[data-act="plug"] .cable {
-  transition: stroke 300ms ease;
-}
-.js .art[data-act="plug"]:not(.done) .lab {
-  opacity: 0;
-}
-.js .art[data-act="plug"] .lab {
-  transition: opacity 300ms ease 150ms;
-}
-.art[data-act="plug"] .spark {
-  opacity: 0;
-}
-.art[data-act="plug"].done .spark {
-  animation: spark 700ms var(--ease-out);
-}
-@keyframes spark {
-  20% {
-    opacity: 1;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .art .eyes,
-  .art .walking,
-  .art .step-a,
-  .art .step-b,
-  .art .speed,
-  .art .strain,
-  .art .crank,
-  .art .worker,
-  .art .case,
-  .art .spark {
+  .art .eyes {
     animation: none !important;
   }
-  .js .art[data-act] * {
-    transition: none !important;
-  }
 }
 
-/* Docs, last drawing: Xiaohei asleep. He breathes and the z's drift up, only
-   while it is on screen; with reduced motion he simply sleeps. */
+/* Docs: a cable that goes live, drawn on; the spark shows only as it clicks. */
+.art .live {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+}
+.art .spark {
+  opacity: 0;
+}
+
+/* Docs, last drawing: Xiaohei asleep, eyes shut. */
 .art .shut {
   fill: none;
   stroke: #ffffff;
   stroke-width: 2.4;
   stroke-linecap: round;
-}
-.art .zz {
-  font-size: 26px;
-}
-.art .z2 {
-  font-size: 32px;
-}
-.art .z3 {
-  font-size: 40px;
-}
-.art .torso {
-  transform-box: fill-box;
-  transform-origin: 50% 100%;
-}
-.art.visible .torso {
-  animation: breathe 3.2s var(--ease-in-out) infinite;
-}
-.art.visible .zz {
-  animation: drift 4.8s var(--ease-out) infinite;
-}
-.art.visible .z2 {
-  animation-delay: 1.6s;
-}
-.art.visible .z3 {
-  animation-delay: 3.2s;
-}
-@keyframes breathe {
-  50% {
-    transform: scale(1.04, 1.06);
-  }
-}
-@keyframes drift {
-  0% {
-    opacity: 0;
-    transform: translate(-8px, 14px);
-  }
-  /* 28px of rise, fading out at the top. */
-  25%,
-  70% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(6px, -14px);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .art .torso,
-  .art .zz {
-    animation: none !important;
-  }
 }

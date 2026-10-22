@@ -37,7 +37,7 @@ const search = await render(readme.slice(readme.indexOf("Get one")), "trit/READM
 >
   <Header />
   <main>
-    <PageHead label={`Models · ${catalog.length} checkpoints`} title="Models, as published." art={shelf} act="walk">
+    <PageHead label={`Models · ${catalog.length} checkpoints`} title="Models, as published." art={shelf} scene="shelf">
       <p>
         Trit reads <code>config.json</code> and <code>model.safetensors</code> of a Hugging Face folder and picks the
         network from <code>model_type</code>. These checkpoints have been run. Others of the same families load the

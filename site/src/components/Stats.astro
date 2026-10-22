@@ -1,55 +1,96 @@
 ---
-// Parakeet Redux on Trit, from desktop/bench/benchmarks.json and trit/src/catalog.rs.
-import { redux, sizeOf } from "../lib/data";
+// Parakeet Redux on Trit against the same weights in PyTorch (Transformers),
+// from desktop/bench/benchmarks.json: one row a fact.
+import { megabytes, redux } from "../lib/data";
 
 const { trit, transformers } = redux;
+const x = (speed: number) => `${Math.round(speed)}×`;
+const wer = (w: number) => `${w.toFixed(2)} %`;
 
-const stats = [
-  { n: `${Math.round(trit.speed)}×`, what: "Faster than realtime on a desktop CPU" },
-  { n: sizeOf("parakeet-redux"), what: "The whole model on disk, 1.58 bits a weight" },
-  {
-    n: `${trit.clean.toFixed(2)} %`,
-    what: `Word error rate on LibriSpeech clean. The same weights in PyTorch: ${transformers.clean.toFixed(2)} %`,
-  },
-  { n: "0", what: "GPUs, Python installs or ONNX files needed" },
+const rows = [
+  { what: "Faster than realtime", trit: x(trit.speed), them: x(transformers.speed) },
+  { what: "Memory after all clips", trit: megabytes(trit.run_mb), them: megabytes(transformers.run_mb) },
+  { what: "Word error rate, LibriSpeech clean", trit: wer(trit.clean), them: wer(transformers.clean) },
+  { what: "Needs", trit: "No Python", them: "Python, PyTorch" },
 ];
 ---
 
-<dl class="stats" aria-label="Measured">
-  {
-    stats.map((s) => (
-      <div>
-        <dt>{s.n}</dt>
-        <dd>{s.what}</dd>
-      </div>
-    ))
-  }
-</dl>
+<table class="versus" aria-label="Measured: Trit against Transformers">
+  <thead>
+    <tr>
+      <th scope="col"><span class="sr">Fact</span></th>
+      <th scope="col">Trit</th>
+      <th scope="col">Transformers</th>
+    </tr>
+  </thead>
+  <tbody>
+    {
+      rows.map((r) => (
+        <tr>
+          <th scope="row">{r.what}</th>
+          <td class="us">{r.trit}</td>
+          <td>{r.them}</td>
+        </tr>
+      ))
+    }
+  </tbody>
+</table>
+<p class="src">Same Parakeet Redux weights, same clips, same computer.</p>
 
 <style>
-  .stats {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 48px 24px;
-    margin: 0;
+  /* A three-column ledger: Trit's column in ink and larger, the baseline muted. */
+  .versus {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
   }
-  .stats > div {
-    padding-top: 24px;
+  thead th {
+    padding: 0 0 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: right;
+    color: var(--muted);
+  }
+  tbody th {
+    padding: 16px 16px 16px 0;
+    font-weight: 400;
+    line-height: 1.45;
+    text-align: left;
+    color: var(--muted);
+    vertical-align: baseline;
+  }
+  td {
+    padding: 16px 0 16px 16px;
+    text-align: right;
+    white-space: nowrap;
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    vertical-align: baseline;
+  }
+  td.us {
+    font-size: 22px;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  tbody tr {
     border-top: 1px solid var(--rule);
   }
-  dt {
-    font-size: clamp(40px, 4vw, 56px);
-    font-weight: var(--display-weight);
-    line-height: 1;
-    letter-spacing: -0.05em;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
+  tbody tr:last-child {
+    border-bottom: 1px solid var(--rule);
   }
-  dd {
-    max-width: 28ch;
-    margin: 8px 0 0;
-    font-size: 14px;
-    line-height: 1.45;
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+  .src {
+    margin: 16px 0 0;
+    font-size: 13px;
     color: var(--muted);
   }
 </style>

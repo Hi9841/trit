@@ -5,10 +5,11 @@ interface Props {
   label: string;
   title: string;
   art?: string;
-  act?: "walk" | "measure" | "plug";
+  /** The drawing's story in scenes.ts. */
+  scene?: "measure" | "shelf" | "plugs";
 }
 
-const { label, title, art, act } = Astro.props;
+const { label, title, art, scene } = Astro.props;
 ---
 
 <section class:list={["grid head", { plain: !art }]}>
@@ -19,7 +20,7 @@ const { label, title, art, act } = Astro.props;
   </div>
   {
     art && (
-      <figure class="art" data-act={act}>
+      <figure class="art" data-scene={scene}>
         <Fragment set:html={art} />
       </figure>
     )

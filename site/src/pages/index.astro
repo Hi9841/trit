@@ -41,7 +41,7 @@ const updated = updatedOf([
           <a href={links.benchmarks}>See the benchmarks</a>
         </div>
       </div>
-      <figure class="art draw" data-act="crank"><Fragment set:html={crank} /></figure>
+      <figure class="art draw" data-scene="crank"><Fragment set:html={crank} /></figure>
     </section>
 
     <section class="grid proof">
@@ -61,7 +61,7 @@ const updated = updatedOf([
     </section>
 
     <section class="grid pack">
-      <figure class="art" data-act="walk">
+      <figure class="art" data-scene="suitcase">
         <Fragment set:html={suitcase} />
         <figcaption>
           Same weights, two suitcases. After all the test clips, Transformers holds {
@@ -76,7 +76,8 @@ const updated = updatedOf([
 </Base>
 
 <script>
-  // The crank drawing draws itself once, after the handwriting font is ready.
+  // The crank drawing draws itself once, after the handwriting font is ready;
+  // its story (motion.ts) starts as the draw-in ends.
   document.fonts.ready.then(() => {
     for (const art of document.querySelectorAll(".art.draw")) {
       requestAnimationFrame(() => art.classList.add("go"));

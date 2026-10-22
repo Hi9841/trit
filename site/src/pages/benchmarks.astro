@@ -67,7 +67,34 @@ function modelWinner<T extends { runtime: string; trit: boolean; default: boolea
   return [...golds].sort((a, b) => b[1] - a[1])[0] ?? ["", 0];
 }
 
-const cells = (r: (typeof benches)[number]["runs"][number]) => [
+type Run = (typeof benches)[number]["runs"][number];
+
+// The answer before the data: Trit's default against the best other runtime
+// on each medal metric. The full table follows, one click down.
+const KEY = [
+  { name: "Speed", metric: speechMetrics[0]!, text: (r: Run) => `${Math.round(r.speed)}×` },
+  { name: "WER, all clips", metric: speechMetrics[3]!, text: (r: Run) => `${r.all.toFixed(2)} %` },
+  { name: "Memory after all clips", metric: speechMetrics[5]!, text: (r: Run) => mb(r.run_mb) },
+];
+
+function summaryOf(runs: Run[]) {
+  const mine = runs.find((r) => r.default) ?? runs[0]!;
+  const others = runs.filter((r) => !r.trit);
+
+  return KEY.map((k) => {
+    const best = [...others].sort((x, y) => (k.metric.lower ? 1 : -1) * (k.metric.value(x) - k.metric.value(y)))[0];
+
+    return {
+      name: k.name,
+      mine: k.text(mine),
+      first: place(runs, k.metric, mine) === 1,
+      theirs: best ? k.text(best) : "—",
+      who: best?.runtime ?? "",
+    };
+  });
+}
+
+const cells = (r: Run) => [
   `${Math.round(r.speed)}×`,
   `${r.clean.toFixed(2)} %`,
   `${r.other.toFixed(2)} %`,
@@ -84,7 +111,7 @@ const cells = (r: (typeof benches)[number]["runs"][number]) => [
 >
   <Header />
   <main>
-    <PageHead label="Benchmarks" title="Same model, different runtime." art={measure} act="measure">
+    <PageHead label="Benchmarks" title="Same model, different runtime." art={measure} scene="measure">
       <p>
         Each model runs on every CPU runtime that supports it, so the runtime is the only difference. Same clips,
         same computer, same scorer.
@@ -141,11 +168,10 @@ const cells = (r: (typeof benches)[number]["runs"][number]) => [
 
     <section class="grid legend-row">
       <p class="legend">
-        Place per column among the other runtimes and Trit's default (a tie shares the place):
-        <span class="place p1">1st</span>
-        <span class="place p2">2nd</span>
-        <span class="place p3">3rd</span>
-        <span class="place p4">4th or worse</span>. Trit's other settings show where they would stand.
+        Each model: Trit's default against the best other runtime, then every runtime and setting. In the tables,
+        each value carries its place among the other runtimes and Trit's default (a tie shares the place):
+        <span class="place p1">1st</span> in heavy ink, <span class="place p4">4th or worse</span> muted. Trit's
+        other settings show where they would stand.
       </p>
     </section>
 
@@ -153,6 +179,7 @@ const cells = (r: (typeof benches)[number]["runs"][number]) => [
       benches.map((b, i) => {
         const slowest = Math.max(...b.runs.map((r) => r.ms));
         const [best, golds] = modelWinner(b.runs, speechMetrics);
+        const summary = summaryOf(b.runs);
 
         return (
           <section class="grid model" aria-labelledby={`m-${i}`}>
@@ -164,51 +191,69 @@ const cells = (r: (typeof benches)[number]["runs"][number]) => [
               </p>
             </div>
             <div class="data-table">
-              <table>
-                <colgroup>
-                  <col class="c-runtime" />
-                  <col class="c-time" />
-                  <col span="6" class="c-num" />
-                </colgroup>
-                <thead>
-                  <tr>
-                    <th scope="col">Runtime</th>
-                    <th scope="col">Time per clip</th>
-                    <th scope="col" class="num">Speed</th>
-                    <th scope="col" class="num">Clean WER</th>
-                    <th scope="col" class="num">Other WER</th>
-                    <th scope="col" class="num">WER, all clips</th>
-                    <th scope="col" class="num">MB after load</th>
-                    <th scope="col" class="num">MB after all clips</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {b.runs.map((r) => (
-                    <tr class:list={{ trit: r.trit, default: r.default }}>
-                      <th scope="row">
-                        {r.runtime}
-                        {r.default ? <span class="tag">default</span> : null}
-                        <span>{r.precision}</span>
-                      </th>
-                      <td class="time">
-                        <span class="bar" style={`--w:${(r.ms / slowest).toFixed(3)}`} aria-hidden="true" />
-                        <span class="ms">{ms(r.ms)}</span>
-                      </td>
-                      {cells(r).map((text, c) => {
-                        const n = place(b.runs, speechMetrics[c], r);
-                        return (
-                          <td class="num">
-                            <span class={`place ${tier(n)}`} title={`${ordinal(n)} place`}>
-                              {text}
-                              <sup>{ordinal(n)}</sup>
-                            </span>
-                          </td>
-                        );
-                      })}
+              <dl class="vs">
+                {summary.map((v) => (
+                  <div>
+                    <dt>{v.name}</dt>
+                    <dd class="mine">
+                      {v.mine}
+                      {v.first ? <sup>1st</sup> : null}
+                    </dd>
+                    <dd class="theirs">
+                      {v.theirs}
+                      <span>{v.who}</span>
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+              <details>
+                <summary>All {b.runs.length} runtimes and settings</summary>
+                <table>
+                  <colgroup>
+                    <col class="c-runtime" />
+                    <col class="c-time" />
+                    <col span="6" class="c-num" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th scope="col">Runtime</th>
+                      <th scope="col">Time per clip</th>
+                      <th scope="col" class="num">Speed</th>
+                      <th scope="col" class="num">Clean WER</th>
+                      <th scope="col" class="num">Other WER</th>
+                      <th scope="col" class="num">WER, all clips</th>
+                      <th scope="col" class="num">MB after load</th>
+                      <th scope="col" class="num">MB after all clips</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {b.runs.map((r) => (
+                      <tr class:list={{ trit: r.trit, default: r.default }}>
+                        <th scope="row">
+                          {r.runtime}
+                          {r.default ? <span class="tag">default</span> : null}
+                          <span>{r.precision}</span>
+                        </th>
+                        <td class="time">
+                          <span class="bar" style={`--w:${(r.ms / slowest).toFixed(3)}`} aria-hidden="true" />
+                          <span class="ms">{ms(r.ms)}</span>
+                        </td>
+                        {cells(r).map((text, c) => {
+                          const n = place(b.runs, speechMetrics[c], r);
+                          return (
+                            <td class="num">
+                              <span class={`place ${tier(n)}`} title={`${ordinal(n)} place`}>
+                                {text}
+                                <sup>{ordinal(n)}</sup>
+                              </span>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </details>
             </div>
           </section>
         );
@@ -431,44 +476,97 @@ const cells = (r: (typeof benches)[number]["runs"][number]) => [
     vertical-align: 1px;
   }
 
-  /* A place: the value on its medal colour, with the place in words for
-     readers who do not see the colour. */
+  /* A place: the value with its place in words; 1st in heavy ink, 4th and
+     worse muted. No hues: the weight carries it. */
   .place {
     display: inline-flex;
     align-items: baseline;
     gap: 4px;
-    padding: 2px 7px;
-    border-radius: 2px;
+    padding: 2px 0;
     font-variant-numeric: tabular-nums;
   }
   .place sup {
     font-size: 10px;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.02em;
+    color: var(--muted);
   }
   .p1 {
-    background: var(--gold-bg);
-    color: var(--gold);
-    font-weight: 600;
-  }
-  .p2 {
-    background: var(--silver-bg);
-    color: var(--silver);
-  }
-  .p3 {
-    background: var(--bronze-bg);
-    color: var(--bronze);
+    font-weight: 650;
+    color: var(--ink);
   }
   .p4 {
-    background: var(--worse-bg);
-    color: var(--worse);
+    color: var(--muted);
   }
+  /* Trit's default row: a tint and one accent rule. */
   .default td,
   .default th {
     background: var(--tint);
   }
-  .default .place {
-    box-shadow: 0 0 0 1.5px var(--accent);
+  .default th {
+    box-shadow: inset 2px 0 0 var(--accent);
+    padding-left: 12px;
+  }
+
+  /* The summary: three facts, Trit's default large, the best other below. */
+  .vs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 24px;
+    margin: 0 0 24px;
+  }
+  .vs > div {
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+  }
+  .vs dt {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .vs .mine {
+    margin: 8px 0 0;
+    font-size: clamp(28px, 2.6vw, 40px);
+    font-weight: var(--display-weight);
+    line-height: 1;
+    letter-spacing: -0.04em;
+    font-variant-numeric: tabular-nums;
+  }
+  .vs .mine sup {
+    margin-left: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--accent-text);
+    vertical-align: 0.9em;
+  }
+  .vs .theirs {
+    margin: 8px 0 0;
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .vs .theirs span {
+    margin-left: 6px;
+    font-family: var(--sans);
+  }
+  details > summary {
+    padding: 12px 0;
+    border-top: 1px solid var(--rule);
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  details[open] > summary {
+    margin-bottom: 8px;
+  }
+  @media (max-width: 600px) {
+    .vs {
+      grid-template-columns: 1fr;
+      gap: 0;
+    }
   }
 
   .bar {

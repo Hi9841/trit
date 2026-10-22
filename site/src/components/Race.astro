@@ -1,47 +1,58 @@
 ---
-// Median time per clip, Parakeet Redux, 200 LibriSpeech test-clean clips,
-// Ryzen 9 7950X3D (desktop/bench/benchmarks.json).
+// The race on one time axis, against a human scale: a blink takes 100 to
+// 400 ms (the band). Each bar grows for its runtime's median time per clip,
+// 10x slower. Parakeet Redux, 200 LibriSpeech test-clean clips, Ryzen 9
+// 7950X3D (desktop/bench/benchmarks.json).
 import { redux } from "../lib/data";
+
+const BLINK = [100, 400];
 
 const lanes = [
   { who: "Trit", how: "ternary + f16", ms: Math.round(redux.trit.ms), trit: true },
   { who: "Photon", how: "PyTorch", ms: Math.round(redux.photon.ms), trit: false },
   { who: "Transformers", how: "PyTorch, fp32", ms: Math.round(redux.transformers.ms), trit: false },
 ];
+
+// The axis ends at the blink's end, or past the slowest runtime, in 100s.
+const AXIS = Math.max(BLINK[1]!, Math.ceil(Math.max(...lanes.map((l) => l.ms)) / 100) * 100);
+const pct = (ms: number) => `${(100 * ms) / AXIS}%`;
+const ticks = Array.from({ length: AXIS / 100 + 1 }, (_, i) => i * 100);
 ---
 
-<section class="race" aria-label="Runtime race">
+<section class="race" aria-label="Runtime race against a blink">
   <div class="head">
     <div class="clock">0<small>ms</small></div>
     <button class="run" type="button">Run</button>
   </div>
-  {
-    lanes.map((l) => (
-      <div class:list={["lane", { trit: l.trit }]} data-ms={l.ms}>
-        <div class="row">
+  <div class="chart" style={`--b0:${BLINK[0]! / AXIS};--b1:${BLINK[1]! / AXIS}`}>
+    <div class="band" aria-hidden="true"><span>A blink, {BLINK[0]}–{BLINK[1]} ms</span></div>
+    {
+      lanes.map((l) => (
+        <div class:list={["lane", { trit: l.trit }]} data-ms={l.ms}>
           <div class="who">
             {l.who}
             <span>{l.how}</span>
           </div>
-          <div class="t">{l.ms} ms</div>
+          <div class="track">
+            <div class="bar" style={`width:${pct(l.ms)}`} />
+            <span class="t" style={`left:${pct(l.ms)}`}>
+              {l.ms} ms
+            </span>
+          </div>
         </div>
-        <div class="track">
-          <div class="fill" />
-        </div>
-        {l.trit && <p class="said">“Restart the Kubernetes pod, then check the PostgreSQL logs.”</p>}
-      </div>
-    ))
-  }
+      ))
+    }
+    <div class="ticks" aria-hidden="true">
+      {ticks.map((ms) => <span style={`left:${pct(ms)}`}>{ms}</span>)}
+    </div>
+  </div>
   <p class="note">
-    Parakeet Redux, median of 200 LibriSpeech clips, Ryzen 9 7950X3D. Played 10× slower so the gap is
-    visible.
+    Parakeet Redux, median of 200 LibriSpeech clips, Ryzen 9 7950X3D. Played 10× slower. Blink duration: 100–400 ms.
   </p>
 </section>
 
 <script>
-  // Each lane fills at its measured time, 10x slower. The clock shows real milliseconds.
   const SLOW = 10;
-  const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   for (const box of document.querySelectorAll<HTMLElement>(".race")) {
     const lanes = [...box.querySelectorAll<HTMLElement>(".lane")];
@@ -51,7 +62,7 @@ const lanes = [
     let timers: number[] = [];
     let frame = 0;
 
-    const fill = (l: HTMLElement) => l.querySelector<HTMLElement>(".fill")!;
+    const bar = (l: HTMLElement) => l.querySelector<HTMLElement>(".bar")!;
 
     const start = () => {
       timers.forEach(clearTimeout);
@@ -59,36 +70,35 @@ const lanes = [
       cancelAnimationFrame(frame);
       run.textContent = "Run again";
 
-      for (const l of lanes) {
-        l.classList.remove("done");
-        fill(l).style.transition = "none";
-        fill(l).style.transform = "scaleX(0)";
-      }
-
-      if (still()) {
-        for (const l of lanes) {
-          fill(l).style.transform = "none";
-          l.classList.add("done");
-        }
-
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        for (const l of lanes) l.classList.add("done");
         clock.nodeValue = String(max);
 
         return;
       }
 
+      for (const l of lanes) {
+        l.classList.remove("done");
+        bar(l).style.transition = "none";
+        bar(l).style.transform = "scaleX(0)";
+      }
+
       clock.nodeValue = "0";
       box.getBoundingClientRect(); // commit the reset before the run
+
       const t0 = performance.now();
 
       for (const l of lanes) {
         const ms = Number(l.dataset.ms);
-        fill(l).style.transition = `transform ${ms * SLOW}ms linear`;
-        fill(l).style.transform = "scaleX(1)";
+
+        bar(l).style.transition = `transform ${ms * SLOW}ms linear`;
+        bar(l).style.transform = "scaleX(1)";
         timers.push(window.setTimeout(() => l.classList.add("done"), ms * SLOW));
       }
 
       const tick = (now: number) => {
         const elapsed = Math.min(Math.max(0, now - t0) / SLOW, max);
+
         clock.nodeValue = String(Math.round(elapsed));
 
         if (elapsed < max) frame = requestAnimationFrame(tick);
@@ -134,6 +144,9 @@ const lanes = [
     letter-spacing: 0;
     color: var(--muted);
   }
+  :global(html:not(.js)) .head {
+    display: none;
+  }
   .run {
     padding: 15px 18px;
     border: 1px solid var(--ink);
@@ -156,72 +169,108 @@ const lanes = [
       color: var(--paper);
     }
   }
+
+  /* The names on the left; the tracks share one axis on the right, and the
+     blink band runs behind all of them. */
+  .chart {
+    --names: 128px;
+    position: relative;
+    padding-top: 32px;
+  }
+  .band {
+    position: absolute;
+    top: 0;
+    bottom: 24px;
+    /* --b0 and --b1: where the blink starts and ends, as shares of the axis. */
+    left: calc(var(--names) + (100% - var(--names)) * var(--b0));
+    right: calc((100% - var(--names)) * (1 - var(--b1)));
+    background: var(--tint);
+    border-left: 1px dashed var(--rule);
+  }
+  .band span {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
   .lane {
-    padding: 16px 0 18px;
+    position: relative;
+    display: grid;
+    grid-template-columns: var(--names) 1fr;
+    align-items: center;
+    height: 56px;
     border-top: 1px solid var(--rule);
-  }
-  .lane:last-of-type {
-    border-bottom: 1px solid var(--rule);
-  }
-  .row {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 16px;
-    margin-bottom: 12px;
   }
   .who {
     font-size: 16px;
     font-weight: 500;
+    line-height: 1.2;
   }
   .who span {
-    margin-left: 8px;
-    font-size: 14px;
+    display: block;
+    font-size: 13px;
     font-weight: 400;
     color: var(--muted);
   }
-  .t {
-    font-family: var(--mono);
-    font-size: 15px;
-    font-variant-numeric: tabular-nums;
-    transition: opacity 150ms ease;
-  }
-  /* The race plays only with JavaScript; without it, it shows the result. */
-  :global(html.js) .lane:not(.done) .t {
-    opacity: 0;
-  }
-  :global(html:not(.js)) .head {
-    display: none;
-  }
   .track {
-    height: 6px;
-    overflow: hidden;
-    background: var(--rule);
-  }
-  .fill {
+    position: relative;
     height: 100%;
+  }
+  .bar {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    height: 10px;
+    margin-top: -5px;
     background: var(--ink);
     transform-origin: left center;
   }
-  :global(html.js) .fill {
-    transform: scaleX(0);
-  }
-  .trit .fill {
+  .trit .bar {
     background: var(--accent);
   }
-  .said {
-    margin: 12px 0 0;
-    font-family: var(--mono);
-    font-size: 15px;
-    line-height: 1.5;
-    color: var(--accent-text);
-    transition:
-      opacity 250ms var(--ease-out),
-      transform 250ms var(--ease-out);
+  :global(html.js) .bar {
+    transform: scaleX(0);
   }
-  :global(html.js) .lane:not(.done) .said {
+  .t {
+    position: absolute;
+    top: 50%;
+    margin: -10px 0 0 10px;
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 20px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    transition: opacity 150ms ease;
+  }
+  .trit .t {
+    color: var(--accent-text);
+  }
+  :global(html.js) .lane:not(.done) .t {
     opacity: 0;
-    transform: translateY(6px);
+  }
+  .ticks {
+    position: relative;
+    height: 24px;
+    margin-left: var(--names);
+    border-top: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .ticks span {
+    position: absolute;
+    top: 6px;
+    transform: translateX(-50%);
+  }
+  .ticks span:first-child {
+    transform: none;
+  }
+  .ticks span:last-child {
+    transform: translateX(-100%);
   }
   .note {
     max-width: var(--measure);
@@ -234,10 +283,8 @@ const lanes = [
     .clock {
       font-size: 48px;
     }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .said {
-      transform: none;
+    .chart {
+      --names: 104px;
     }
   }
 </style>
