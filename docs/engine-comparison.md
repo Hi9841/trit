@@ -193,30 +193,31 @@ Trit is called through its Python binding with `language="en"`.
 
 | Part | Choice | Where |
 |---|---|---|
-| Model | `moondream/parakeet-redux`, a 1.58-bit ternary Parakeet TDT 0.6B | Hugging Face |
-| Weights | 603,979,776 ternary weights plus 23,290,911 dense weights | `ternary.json` of the model |
-| Frontend | log-mel: 512-point FFT, 25 ms window, 10 ms hop, 128 bins | `trit/src/features.rs` |
-| Encoder | FastConformer, 24 layers, d_model 1024, 8 heads, subsampling 8 | `trit/src/model.rs` |
-| Decoder | TDT, 2 layers, d_model 640, 8,193 tokens, durations 0 to 4 | `trit/src/model.rs` |
-| Ternary kernel | i8 activations, `vpdpbusd` on AVX-512 VNNI, `vpmaddubsw` on AVX2, scalar | `trit/src/kernels.rs` |
-| Float kernels | f32 GEMM with FMA register tiles; f16 decoder weights with F16C | `trit/src/fgemm.rs`, `trit/src/half.rs` |
-| Threads | own team of spinning workers, one per physical core of one L3 domain | `trit/src/team.rs` |
-| Dictionary | trie of token paths, logit bonus during greedy decoding | `trit/src/bias.rs` |
-| Dependencies | `std`, `parking_lot`, `serde_json`, `mimalloc`. No inference library | `trit/Cargo.toml` |
+| Models | Parakeet TDT and CTC (Redux included), Canary, Whisper, Moonshine; S1-mini (Qwen3) for cleanup. The family comes from `model_type` in `config.json` | `trit/src/models/` |
+| Weights | Read from `model.safetensors` as published; no conversion step | `trit/src/cpu/tensors.rs` |
+| Frontends | NeMo log-mel (Parakeet, Canary), Whisper log-mel, raw audio (Moonshine) | `trit/src/audio/` |
+| Ternary kernel | Redux: i8 activations, `vpdpbusd` on AVX-512 VNNI, `vpmaddubsw` on AVX2, scalar | `trit/src/cpu/kernels.rs` |
+| Int8 kernel | W8A8 for layers 384 wide or more: VNNI 512, VNNI 256, AVX2, scalar | `trit/src/cpu/int8.rs` |
+| Float kernels | f32 GEMM with FMA register tiles; f16 weights with F16C | `trit/src/cpu/fgemm.rs`, `trit/src/cpu/half.rs` |
+| Decoding | Beam 5 for Whisper and Moonshine (Transformers rules, all beams in one batch); greedy for Parakeet and Canary | `trit/src/models/beam.rs` |
+| Threads | Own teams of spinning workers: one per physical core of one L3 domain (Parakeet, S1-mini), all physical cores (Whisper) | `trit/src/cpu/team.rs` |
+| Dictionary | Trie of token paths with a logit bonus (Parakeet, Canary, Moonshine); a previous-text prompt (Whisper) | `trit/src/models/parakeet/bias.rs` |
+| Dependencies | `std`, `parking_lot`, `serde_json`, `miniz_oxide`, `mimalloc`. No inference library | `trit/Cargo.toml` |
 | Ways in | `trit` CLI, Rust crate, C ABI, Python, C#, Node and Bun | [trit/README.md](../trit/README.md) |
 
 ## 5. Where Trit is behind
 
-1. **One model.** Trit runs Parakeet Redux only. The other runtimes run many
-   models; a better model on a slower runtime can still be the right choice
-   (see Parakeet TDT v2 above).
-2. **English only, by choice.** The model knows 25 languages; Trit blocks
-   every token that is not English.
-3. **No timestamps, no beam search, no streaming API.**
-4. **CPU only.** Trit has no GPU path. On a server with a GPU and batches of
+1. **CPU only.** Trit has no GPU path. On a server with a GPU and batches of
    files, a GPU runtime gives more throughput.
-5. **x86 speed only.** The fast kernels need AVX2 or AVX-512. Other CPUs run
-   the scalar path.
+2. **x86 speed only.** The fast kernels need AVX2 or AVX-512. Other CPUs,
+   ARM included, run the scalar path: the same text, much slower. Only
+   x86-64 Windows has been measured.
+3. **No streaming API.** Each call takes a whole clip. The TDT app cuts long
+   recordings at pauses itself.
+4. **Whisper encodes a full 30 s window**, so a short clip costs as much as
+   a long one.
+5. **S1-mini cleanup:** llama.cpp with q4_k_m weights is faster (148 ms
+   against 203 ms per case) at one more error on the 62 cases.
 
 ## 6. Reproduce
 
