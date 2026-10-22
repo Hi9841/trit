@@ -1,0 +1,11 @@
+{
+  "name": "trit",
+  "version": "0.1.0",
+  "description": "Trit for Node and Bun: speech to text on the CPU through the C ABI of trit-ffi",
+  "type": "module",
+  "main": "trit.mjs",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dependencies": {
+    "koffi": "^2.9.0"
+  }
+}
