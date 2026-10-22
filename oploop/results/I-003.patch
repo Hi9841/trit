@@ -1,0 +1,16 @@
+--- baseline/tree/trit/src/cpu/kernels.rs	2026-10-21 20:47:29.000000000 +0300
++++ ../trit/src/cpu/kernels.rs	2026-10-22 03:33:00.525131200 +0300
+@@ -426,8 +426,11 @@
+         let groups = k / GROUP;
+         // Reuse this thread's buffer: a fresh one would fault in new pages.
+         let mut values = QUANTIZED.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+-        values.clear();
+-        values.resize(m * k, 0);
++        // The quantizer writes every value of the first m x k, so a buffer that
++        // is long enough is used as it is: no fill on the calling thread.
++        if values.len() < m * k {
++            values.resize(m * k, 0);
++        }
+         let mut scales = vec![0.0f32; m * groups];
+         let mut sums = vec![0i32; m * groups];
+         let (all_values, all_scales, all_sums) = (
