@@ -1,4 +1,4 @@
-//! Dictionary terms, boosted during greedy decoding.
+//! Dictionary terms, boosted during greedy decoding (Canary, Moonshine).
 //!
 //! Each term is a path of token ids in a trie. At a decoding step, a token
 //! that continues the term matched so far, or starts a new term, gets a
@@ -26,6 +26,12 @@ pub struct BiasWeights {
     pub min_start: usize,
     /// Letters of a term that must be matched before continuations get a bonus.
     pub min_prefix: usize,
+    /// Parakeet TDT: the log-probability a term may lose by to the words
+    /// heard and still replace them (see `dictionary.rs`).
+    pub prior: f32,
+    /// Parakeet TDT: how far the spelling heard may be from a term (0 the
+    /// same, 1 nothing alike) for the sound check to run.
+    pub distance: f32,
 }
 
 impl Default for BiasWeights {
@@ -36,6 +42,8 @@ impl Default for BiasWeights {
             margin: 10.0,
             min_start: 4,
             min_prefix: 3,
+            prior: 8.0,
+            distance: 0.45,
         }
     }
 }

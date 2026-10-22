@@ -362,10 +362,18 @@ weights in every mode.
   family greedy. Whisper decodes a window again at temperatures 0.2 to 1.0
   when its text repeats itself or is unlikely, as OpenAI Whisper does
   (`Options::fallback`).
-- **Dictionary:** Parakeet, Canary, and Moonshine raise the logits of the
-  terms' tokens while they decode; with terms set they decode greedy.
-  Whisper puts the terms in a previous-text prompt, as OpenAI's
-  `initial_prompt`.
+- **Dictionary:** Parakeet TDT decodes greedy, then finds runs of words
+  spelled close to a term ("Perakeet", "trip run time", "wire shark") and
+  scores the words and the term over the same frames with the joint
+  network. The term replaces the words when it loses by less than
+  `BiasWeights::prior` (8 log-probability units). Canary and Moonshine
+  raise the logits of the terms' tokens while they decode; with terms set
+  they decode greedy. Whisper puts the terms in a previous-text prompt, as
+  OpenAI's `initial_prompt`.
+- **English:** with `language: "en"`, Parakeet never writes pieces that
+  only other languages use. When a quarter or more of the words of a window
+  are in no English word list (SCOWL size 70), it decodes the window again
+  with a prior for English words.
 - **Timestamps:** `segments` gives sentences or pauses of 1 s for Parakeet,
   and one segment per window for the others.
 - **Silence:** Parakeet returns an empty string under 80 ms of audio, and
@@ -402,8 +410,8 @@ weights in every mode.
 | `src/cleanup.rs` | `Cleaner`: S1-mini prompt and styles |
 | `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`) |
 | `src/audio/` | WAV reader, NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), windows for long audio |
-| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen) |
-| `src/models/parakeet/` | FastConformer encoder, TDT and CTC heads, dictionary biasing |
+| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen), the English word list and foreign pieces (from `scripts/english_lists.py`) |
+| `src/models/parakeet/` | FastConformer encoder, TDT and CTC heads, the sound-checked dictionary (`dictionary.rs`), the English prior (`english.rs`), the logit dictionary of Canary and Moonshine (`bias.rs`) |
 | `src/models/canary.rs` | Canary: the Parakeet encoder and a transformer decoder |
 | `src/models/whisper/` | Whisper encoder and decoder, language detection |
 | `src/models/moonshine.rs` | Moonshine |

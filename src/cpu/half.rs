@@ -58,6 +58,21 @@ impl HalfDense {
         out
     }
 
+    /// `rows` input vectors at once (`rows x in_features`), for the few
+    /// decoder products that cover many frames: one pass over the weights.
+    pub fn forward(&self, x: &[f32], rows: usize) -> Buf {
+        let (n, k) = (self.out_features, self.in_features);
+        let mut out = super::fgemm::matmul(x, rows, k, &self.weight, n);
+        if let Some(bias) = &self.bias {
+            for row in out.chunks_exact_mut(n) {
+                for (o, b) in row.iter_mut().zip(bias) {
+                    *o += b;
+                }
+            }
+        }
+        out
+    }
+
     /// One input vector of `in_features` values.
     pub fn matvec(&self, x: &[f32]) -> Buf {
         assert_eq!(x.len(), self.in_features);
