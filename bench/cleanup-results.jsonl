@@ -1,0 +1,30 @@
+{"engine": "trit", "runtime": "Trit", "precision": "int8", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 258.9, "date": "2026-10-21"}
+{"engine": "hf", "runtime": "Transformers (PyTorch)", "precision": "fp32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 1420.0, "date": "2026-10-21"}
+{"engine": "llamacpp-f16", "runtime": "llama.cpp", "precision": "f16 GGUF", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 340.3, "date": "2026-10-21"}
+{"engine": "llamacpp-q4", "runtime": "llama.cpp", "precision": "q4_k_m GGUF", "cases": 62, "wer": 4.92, "errors": 44, "words": 894, "exact": 38, "median_ms": 157.9, "date": "2026-10-21"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 240.7, "date": "2026-10-21"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 229.3, "date": "2026-10-21"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 224.4, "date": "2026-10-22"}
+{"engine": "trit-int8", "runtime": "Trit", "precision": "int8", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 192.3, "date": "2026-10-22"}
+{"engine": "trit-f16", "runtime": "Trit", "precision": "f16", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 370.0, "date": "2026-10-22"}
+{"engine": "trit-f32", "runtime": "Trit", "precision": "f32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 700.2, "date": "2026-10-22"}
+{"engine": "hf", "runtime": "Transformers (PyTorch)", "precision": "fp32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 1501.6, "date": "2026-10-22"}
+{"engine": "llamacpp-f16", "runtime": "llama.cpp", "precision": "f16 GGUF", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 344.5, "date": "2026-10-22"}
+{"engine": "llamacpp-q4", "runtime": "llama.cpp", "precision": "q4_k_m GGUF", "cases": 62, "wer": 4.92, "errors": 44, "words": 894, "exact": 38, "median_ms": 157.5, "date": "2026-10-22"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 194.4, "date": "2026-10-22"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 216.1, "date": "2026-10-22"}
+{"engine": "trit-int8", "runtime": "Trit", "precision": "int8", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 276.7, "date": "2026-10-22"}
+{"engine": "trit-f16", "runtime": "Trit", "precision": "f16", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 450.2, "date": "2026-10-22"}
+{"engine": "trit-f32", "runtime": "Trit", "precision": "f32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 744.0, "date": "2026-10-22"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 209.0, "date": "2026-10-22"}
+{"engine": "trit-int8", "runtime": "Trit", "precision": "int8", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 212.5, "date": "2026-10-22"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 214.0, "date": "2026-10-22"}
+{"engine": "trit-int8", "runtime": "Trit", "precision": "int8", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 201.2, "date": "2026-10-22"}
+{"engine": "llamacpp-q4", "runtime": "llama.cpp", "precision": "q4_k_m GGUF", "cases": 62, "wer": 4.92, "errors": 44, "words": 894, "exact": 38, "median_ms": 224.6, "date": "2026-10-22"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 202.9, "date": "2026-10-22"}
+{"engine": "trit-int8", "runtime": "Trit", "precision": "int8", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 198.2, "date": "2026-10-22"}
+{"engine": "trit-f16", "runtime": "Trit", "precision": "f16", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 401.5, "date": "2026-10-22"}
+{"engine": "trit-f32", "runtime": "Trit", "precision": "f32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 735.0, "date": "2026-10-22"}
+{"engine": "hf", "runtime": "Transformers (PyTorch)", "precision": "fp32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 1590.9, "date": "2026-10-22"}
+{"engine": "llamacpp-f16", "runtime": "llama.cpp", "precision": "f16 GGUF", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 361.9, "date": "2026-10-22"}
+{"engine": "llamacpp-q4", "runtime": "llama.cpp", "precision": "q4_k_m GGUF", "cases": 62, "wer": 4.92, "errors": 44, "words": 894, "exact": 38, "median_ms": 147.8, "date": "2026-10-22"}

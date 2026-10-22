@@ -1,0 +1,59 @@
+---
+import { links } from "../lib/links";
+---
+
+<footer class="grid">
+  <p>Trit is the speech engine of TDT, the dictation app. PolyForm Noncommercial 1.0.0: free for noncommercial use.</p>
+  <nav aria-label="Footer">
+    <a href={links.docs}>Docs</a>
+    <a href={links.benchmarks}>Benchmarks</a>
+    <a href={links.repo}>GitHub</a>
+  </nav>
+</footer>
+
+<style>
+  footer {
+    align-items: baseline;
+    margin-top: 192px;
+    padding-block: 32px 48px;
+    font-size: 15px;
+    color: var(--muted);
+  }
+  footer::before {
+    content: "";
+    grid-column: 1 / -1;
+    margin-bottom: 32px;
+    border-top: 1px solid var(--rule);
+  }
+  p {
+    grid-column: 1 / span 6;
+    margin: 0;
+  }
+  nav {
+    grid-column: 8 / -1;
+    justify-self: end;
+    display: flex;
+    gap: 24px;
+  }
+  a {
+    text-decoration: underline;
+    text-decoration-color: var(--rule);
+    text-underline-offset: 4px;
+    transition: text-decoration-color 150ms ease;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    a:hover {
+      text-decoration-color: currentColor;
+    }
+  }
+  @media (max-width: 900px) {
+    p,
+    nav {
+      grid-column: 1 / -1;
+      justify-self: start;
+    }
+    nav {
+      margin-top: 16px;
+    }
+  }
+</style>

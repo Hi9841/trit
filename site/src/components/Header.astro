@@ -1,0 +1,129 @@
+---
+import { links } from "../lib/links";
+import { mark } from "../lib/sketch";
+
+const here = Astro.url.pathname.replace(/\/$/, "");
+const page = (href: string) => (here === href ? "page" : undefined);
+---
+
+<header class="grid top">
+  <a class="mark" href="/"><Fragment set:html={mark} />trit</a>
+  <nav class="nav" aria-label="Site">
+    <a href={links.models} aria-current={page(links.models)}>Models</a>
+    <a href={links.benchmarks} aria-current={page(links.benchmarks)}>Benchmarks</a>
+    <a href={links.docs} aria-current={page(links.docs)}>Docs</a>
+    <a href={links.repo}>GitHub</a>
+    <button class="theme" type="button" aria-label="Dark theme" aria-pressed="false">
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.5"></circle>
+        <path d="M10 2.5 A7.5 7.5 0 0 1 10 17.5 Z" fill="currentColor"></path>
+      </svg>
+    </button>
+  </nav>
+</header>
+
+<script>
+  const root = document.documentElement;
+  const button = document.querySelector<HTMLButtonElement>(".theme");
+  const systemDark = matchMedia("(prefers-color-scheme: dark)");
+  const current = () => root.dataset.theme ?? (systemDark.matches ? "dark" : "light");
+  const show = () => button?.setAttribute("aria-pressed", String(current() === "dark"));
+
+  show();
+
+  systemDark.addEventListener("change", show);
+
+  button?.addEventListener("click", () => {
+    const next = current() === "dark" ? "light" : "dark";
+    root.classList.add("theme-switching");
+    root.dataset.theme = next;
+    localStorage.setItem("theme", next);
+    show();
+    requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove("theme-switching")));
+  });
+</script>
+
+<style>
+  .top {
+    padding-block: 32px;
+    align-items: center;
+  }
+  .mark {
+    grid-column: 1 / span 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 20px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+  }
+  .mark :global(svg) {
+    width: 20px;
+    height: 24px;
+  }
+  .nav {
+    grid-column: 5 / -1;
+    justify-self: end;
+    display: flex;
+    align-items: center;
+    gap: 32px;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .nav a {
+    color: var(--muted);
+    text-decoration: none;
+    transition: color 150ms ease;
+  }
+  .nav a[aria-current="page"] {
+    color: var(--ink);
+    text-decoration: underline;
+    text-decoration-color: var(--accent);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 8px;
+  }
+  .theme {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    margin: -8px -10px -8px -8px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    transition:
+      color 150ms ease,
+      transform 160ms var(--ease-out);
+  }
+  .theme svg {
+    width: 20px;
+    height: 20px;
+  }
+  .theme:active {
+    transform: scale(0.94);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .nav a:hover,
+    .theme:hover {
+      color: var(--ink);
+    }
+  }
+  @media (forced-colors: active) {
+    .theme {
+      border: 1px solid ButtonText;
+    }
+  }
+  @media (max-width: 600px) {
+    .nav {
+      gap: 20px;
+    }
+    .nav a:nth-child(-n + 2) {
+      display: none;
+    }
+  }
+</style>

@@ -1,0 +1,240 @@
+---
+// Median time per clip, Parakeet Redux, 200 LibriSpeech test-clean clips,
+// Ryzen 9 7950X3D (desktop/bench/benchmarks.json).
+import { redux } from "../lib/data";
+
+const lanes = [
+  { who: "Trit", how: "ternary + f16", ms: Math.round(redux.trit.ms), trit: true },
+  { who: "Photon", how: "PyTorch", ms: Math.round(redux.photon.ms), trit: false },
+  { who: "Transformers", how: "PyTorch, fp32", ms: Math.round(redux.transformers.ms), trit: false },
+];
+---
+
+<section class="race" aria-label="Runtime race">
+  <div class="head">
+    <div class="clock">0<small>ms</small></div>
+    <button class="run" type="button">Run</button>
+  </div>
+  {
+    lanes.map((l) => (
+      <div class:list={["lane", { trit: l.trit }]} data-ms={l.ms}>
+        <div class="row">
+          <div class="who">
+            {l.who}
+            <span>{l.how}</span>
+          </div>
+          <div class="t">{l.ms} ms</div>
+        </div>
+        <div class="track">
+          <div class="fill" />
+        </div>
+        {l.trit && <p class="said">“Restart the Kubernetes pod, then check the PostgreSQL logs.”</p>}
+      </div>
+    ))
+  }
+  <p class="note">
+    Parakeet Redux, median of 200 LibriSpeech clips, Ryzen 9 7950X3D. Played 10× slower so the gap is
+    visible.
+  </p>
+</section>
+
+<script>
+  // Each lane fills at its measured time, 10x slower. The clock shows real milliseconds.
+  const SLOW = 10;
+  const still = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  for (const box of document.querySelectorAll<HTMLElement>(".race")) {
+    const lanes = [...box.querySelectorAll<HTMLElement>(".lane")];
+    const clock = box.querySelector(".clock")!.firstChild!;
+    const run = box.querySelector<HTMLButtonElement>(".run")!;
+    const max = Math.max(...lanes.map((l) => Number(l.dataset.ms)));
+    let timers: number[] = [];
+    let frame = 0;
+
+    const fill = (l: HTMLElement) => l.querySelector<HTMLElement>(".fill")!;
+
+    const start = () => {
+      timers.forEach(clearTimeout);
+      timers = [];
+      cancelAnimationFrame(frame);
+      run.textContent = "Run again";
+
+      for (const l of lanes) {
+        l.classList.remove("done");
+        fill(l).style.transition = "none";
+        fill(l).style.transform = "scaleX(0)";
+      }
+
+      if (still()) {
+        for (const l of lanes) {
+          fill(l).style.transform = "none";
+          l.classList.add("done");
+        }
+
+        clock.nodeValue = String(max);
+
+        return;
+      }
+
+      clock.nodeValue = "0";
+      box.getBoundingClientRect(); // commit the reset before the run
+      const t0 = performance.now();
+
+      for (const l of lanes) {
+        const ms = Number(l.dataset.ms);
+        fill(l).style.transition = `transform ${ms * SLOW}ms linear`;
+        fill(l).style.transform = "scaleX(1)";
+        timers.push(window.setTimeout(() => l.classList.add("done"), ms * SLOW));
+      }
+
+      const tick = (now: number) => {
+        const elapsed = Math.min(Math.max(0, now - t0) / SLOW, max);
+        clock.nodeValue = String(Math.round(elapsed));
+
+        if (elapsed < max) frame = requestAnimationFrame(tick);
+      };
+
+      frame = requestAnimationFrame(tick);
+    };
+
+    run.addEventListener("click", start);
+
+    // The first run starts when the race is in view, not before.
+    const watcher = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        watcher.disconnect();
+        timers.push(window.setTimeout(start, 300));
+      },
+      { threshold: 0.35 },
+    );
+
+    watcher.observe(box);
+  }
+</script>
+
+<style>
+  .head {
+    display: flex;
+    justify-content: space-between;
+    align-items: end;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .clock {
+    font-family: var(--mono);
+    font-size: 64px;
+    line-height: 0.9;
+    letter-spacing: -0.05em;
+    font-variant-numeric: tabular-nums;
+  }
+  .clock small {
+    margin-left: 8px;
+    font-size: 18px;
+    letter-spacing: 0;
+    color: var(--muted);
+  }
+  .run {
+    padding: 15px 18px;
+    border: 1px solid var(--ink);
+    border-radius: 2px;
+    background: none;
+    color: var(--ink);
+    font: 500 14px/1 var(--sans);
+    cursor: pointer;
+    transition:
+      transform 160ms var(--ease-out),
+      background-color 150ms ease,
+      color 150ms ease;
+  }
+  .run:active {
+    transform: scale(0.97);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .run:hover {
+      background: var(--ink);
+      color: var(--paper);
+    }
+  }
+  .lane {
+    padding: 16px 0 18px;
+    border-top: 1px solid var(--rule);
+  }
+  .lane:last-of-type {
+    border-bottom: 1px solid var(--rule);
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+  .who {
+    font-size: 16px;
+    font-weight: 500;
+  }
+  .who span {
+    margin-left: 8px;
+    font-size: 14px;
+    font-weight: 400;
+    color: var(--muted);
+  }
+  .t {
+    font-family: var(--mono);
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    opacity: 0;
+    transition: opacity 150ms ease;
+  }
+  .lane.done .t {
+    opacity: 1;
+  }
+  .track {
+    height: 6px;
+    overflow: hidden;
+    background: var(--rule);
+  }
+  .fill {
+    height: 100%;
+    background: var(--ink);
+    transform: scaleX(0);
+    transform-origin: left center;
+  }
+  .trit .fill {
+    background: var(--accent);
+  }
+  .said {
+    margin: 12px 0 0;
+    font-family: var(--mono);
+    font-size: 15px;
+    line-height: 1.5;
+    color: var(--accent-text);
+    opacity: 0;
+    transform: translateY(6px);
+    transition:
+      opacity 250ms var(--ease-out),
+      transform 250ms var(--ease-out);
+  }
+  .lane.done .said {
+    opacity: 1;
+    transform: none;
+  }
+  .note {
+    max-width: var(--measure);
+    margin: 16px 0 0;
+    font-size: 15px;
+    line-height: 1.45;
+    color: var(--muted);
+  }
+  @media (max-width: 600px) {
+    .clock {
+      font-size: 48px;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .said {
+      transform: none;
+    }
+  }
+</style>

@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Same model, different runtime: Trit and the main speech runtimes</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f4f2;
+    --surface-1: #fcfcfb;
+    --border: #e2e1dc;
+    --grid: #ebeae6;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #7a7974;
+    --series-1: #2a78d6;
+    --other: #a3a29c;
+    --other-strong: #6f6e69;
+    --r1-bg: #fbe7a1; --r1-fg: #6b4e00; --r1-edge: #d9b23c;
+    --r2-bg: #e4e6ea; --r2-fg: #3b4149; --r2-edge: #a9aeb6;
+    --r3-bg: #f3d6bd; --r3-fg: #6e3c12; --r3-edge: #c98b55;
+    --r4-bg: #f7dede; --r4-fg: #7b2626; --r4-edge: #dba0a0;
+    --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --mono: "Cascadia Mono", "SF Mono", Consolas, ui-monospace, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface-0: #121211;
+      --surface-1: #1a1a19;
+      --border: #2e2e2c;
+      --grid: #262624;
+      --text-primary: #f0efec;
+      --text-secondary: #c3c2b7;
+      --text-muted: #8f8e88;
+      --series-1: #3987e5;
+      --other: #5f5e5a;
+      --other-strong: #9d9c96;
+      --r1-bg: #4a3b0f; --r1-fg: #f6d878; --r1-edge: #8a6d1d;
+      --r2-bg: #34383e; --r2-fg: #dde0e4; --r2-edge: #6a7079;
+      --r3-bg: #4a2f1a; --r3-fg: #eab68b; --r3-edge: #8d5a33;
+      --r4-bg: #3f2323; --r4-fg: #eba3a3; --r4-edge: #7e4040;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-0); color: var(--text-primary); font: 15px/1.55 var(--font); }
+  main { max-width: 1120px; margin: 0 auto; padding: 48px 24px 80px; }
+  header { margin-bottom: 28px; }
+  .eyebrow { font: 600 12px/1 var(--font); letter-spacing: .08em; text-transform: uppercase; color: var(--series-1); }
+  h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.15; margin: 10px 0 12px; letter-spacing: -.01em; }
+  h2 { font-size: 18px; margin: 0 0 4px; }
+  h3.section { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); margin: 36px 0 12px; }
+  .lede { color: var(--text-secondary); max-width: 780px; margin: 0; }
+  .meta { color: var(--text-muted); font-size: 13px; margin-top: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 28px 0 8px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .tile .label { color: var(--text-secondary); font-size: 13px; }
+  .tile .value { font-size: 30px; font-weight: 650; letter-spacing: -.02em; margin: 2px 0; font-variant-numeric: tabular-nums; }
+  .tile .note { color: var(--text-muted); font-size: 13px; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px 12px; margin-bottom: 14px; }
+  .card .sub { color: var(--text-secondary); font-size: 13px; margin: 0 0 12px; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--text-secondary); margin: 0 0 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  svg text { font-family: var(--font); }
+  .axis-label { fill: var(--text-muted); font-size: 12px; }
+  .tick { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .point-label { font-size: 12px; fill: var(--text-secondary); }
+  .point-label.hero { fill: var(--text-primary); font-weight: 650; }
+  .model h2 { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+  .model h2 small { font-size: 13px; font-weight: 400; color: var(--text-muted); }
+  .rows { display: grid; grid-template-columns: minmax(190px, 1.3fr) minmax(150px, 1.8fr) repeat(6, minmax(70px, .6fr));
+          font-size: 13px; font-variant-numeric: tabular-nums; }
+  .rows > div { padding: 7px 8px; border-bottom: 1px solid var(--grid); display: flex; align-items: center; }
+  .rows > .h { color: var(--text-secondary); font-weight: 600; font-size: 12px; }
+  .rows > .n { justify-content: flex-end; }
+  .rows > .who { display: block; }
+  .rows .who small { display: block; color: var(--text-muted); font-size: 12px; }
+  .rows .hero { font-weight: 650; }
+  .barcell { gap: 8px; }
+  .barcell span { white-space: nowrap; }
+  .bar { display: block; height: 12px; border-radius: 0 4px 4px 0; background: var(--other); min-width: 2px; }
+  .bar.gpu { background: transparent; border: 2px solid var(--other-strong); border-left-width: 0; }
+  .bar.hero { background: var(--series-1); }
+  .win { color: var(--series-1); font-weight: 650; }
+  .rank { display: inline-flex; align-items: baseline; gap: 4px; padding: 1px 6px; border-radius: 6px; border: 1px solid transparent; }
+  .rank sup { font-size: 10px; font-weight: 600; opacity: .85; }
+  .r1 { background: var(--r1-bg); color: var(--r1-fg); border-color: var(--r1-edge); font-weight: 650; }
+  .r2 { background: var(--r2-bg); color: var(--r2-fg); border-color: var(--r2-edge); }
+  .r3 { background: var(--r3-bg); color: var(--r3-fg); border-color: var(--r3-edge); }
+  .r4 { background: var(--r4-bg); color: var(--r4-fg); border-color: var(--r4-edge); }
+  .rows > .trit-row { background: color-mix(in srgb, var(--series-1) 5%, transparent); }
+  .rows > .who.trit-row { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--series-1) 45%, transparent); color: var(--series-1); }
+  .rows > .hero-row { background: color-mix(in srgb, var(--series-1) 13%, transparent); }
+  .rows > .who.hero-row { box-shadow: inset 4px 0 0 var(--series-1); color: var(--series-1); }
+  .rows > .hero-row .rank { box-shadow: 0 0 0 2px var(--series-1); font-weight: 650; }
+  .rows .who .tag { display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 5px; font-size: 11px; font-weight: 600;
+                    background: var(--series-1); color: #fff; vertical-align: 1px; }
+  .standing { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 12px; font-size: 12px; color: var(--text-secondary); align-items: center; }
+  .legend-ranks { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0 20px; font-size: 13px; color: var(--text-secondary); }
+  .rows.text { grid-template-columns: minmax(190px, 1.3fr) minmax(170px, 2.2fr) repeat(3, minmax(70px, .6fr)); }
+  @media (max-width: 760px) { .rows, .rows.text { grid-template-columns: 1.4fr 1.6fr repeat(2, .7fr); } .rows .wide { display: none; } }
+  .tip { position: fixed; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+         border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; box-shadow: 0 6px 20px rgba(0,0,0,.12); opacity: 0;
+         transition: opacity .12s; max-width: 300px; z-index: 10; }
+  .tip b { font-weight: 650; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 8px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th { color: var(--text-secondary); font-weight: 600; background: var(--surface-1); }
+  th:nth-child(-n+3), td:nth-child(-n+3) { text-align: left; }
+  tr.hero td { font-weight: 650; }
+  tr.hero td:first-child { box-shadow: inset 3px 0 0 var(--series-1); }
+  tr.first td { border-top: 2px solid var(--border); }
+  .table-wrap { overflow-x: auto; }
+  .best { color: var(--series-1); }
+  ul.notes { color: var(--text-secondary); padding-left: 20px; margin: 8px 0 0; }
+  ul.notes li { margin: 4px 0; }
+  code, pre { font-family: var(--mono); font-size: 13px; }
+  pre { background: var(--surface-0); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; margin: 8px 0 12px; }
+  .langs { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .langs h3 { font-size: 14px; margin: 8px 0 0; }
+  footer { color: var(--text-muted); font-size: 12px; margin-top: 32px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">Speech runtime benchmark</div>
+    <h1>Same model, different runtime</h1>
+    <p class="lede">Each model here runs on every CPU runtime that supports it, so the runtime is the only difference. Trit, TDT's own
+      engine, runs every model at each precision: auto (its default), int8, f16, and f32. For Whisper and Moonshine, Trit's default is
+      beam search with 5 beams; every runtime that has beam search runs it with 5 beams too, and greedy rows of every runtime
+      (Trit included) stay for comparison. The other runtimes are Photon, ONNX Runtime, sherpa-onnx, faster-whisper, whisper.cpp,
+      Transformers, OpenAI Whisper, and llama.cpp. Same 456 English clips, same computer, same scorer.</p>
+    <p class="meta" id="meta"></p>
+    <div class="legend-ranks">Place per column among the other runtimes and Trit's default (a tie shares the place; Trit's other
+      settings show where they would stand):
+      <span class="rank r1">1st</span><span class="rank r2">2nd</span><span class="rank r3">3rd</span><span class="rank r4">4th or worse</span>
+      <span>· Trit rows are blue; the <b style="color:var(--series-1)">Trit default</b> row (what Trit runs when the caller sets
+      nothing) has a blue ring on each score</span></div>
+  </header>
+
+  <section id="models"></section>
+
+  <footer id="footer"></footer>
+</main>
+<div class="tip" id="tip"></div>
+
+<script>
+const RESULTS = /*RESULTS*/[];
+const CLEANUP = /*CLEANUP*/[];
+const SVGNS = "http://www.w3.org/2000/svg";
+const LIBRI = ["clean", "other"];
+
+const set = (r, name) => r.sets.find((s) => s.set === name);
+const libriWer = (r) => {
+  const e = LIBRI.reduce((a, n) => a + set(r, n).errors, 0);
+  const w = LIBRI.reduce((a, n) => a + set(r, n).words, 0);
+  return 100 * e / w;
+};
+const libriMs = (r) => (set(r, "clean").median_ms + set(r, "other").median_ms) / 2;
+const isHero = (r) => r.runtime === "Trit";
+const runtimeShort = (r) => r.runtime.replace(/ \(.*\)$/, "");
+const label = (r) => `${r.model_name} on ${r.runtime}, ${r.precision}${r.device === "gpu" ? ", GPU" : ""}`;
+const short = (r) => isHero(r) ? `Trit ${r.precision}` :
+  `${r.model_name.replace(/^(Whisper|Parakeet TDT|Distil-Whisper) /, "").replace(/ \(.*\)$/, "").replace(/, 1\.58-bit/, "")}, ${runtimeShort(r)}${r.device === "gpu" ? " GPU" : ""}`;
+const fmt = (v, dp) => v.toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+
+function el(name, attrs = {}, parent) {
+  const node = document.createElementNS(SVGNS, name);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+const tip = document.getElementById("tip");
+function hover(node, html) {
+  node.addEventListener("pointerenter", () => { tip.innerHTML = html; tip.style.opacity = 1; });
+  node.addEventListener("pointermove", (e) => {
+    tip.style.left = `${Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8)}px`;
+    tip.style.top = `${e.clientY + 14}px`;
+  });
+  node.addEventListener("pointerleave", () => { tip.style.opacity = 0; });
+}
+
+const detail = (r) => `<b>${label(r)}</b><br>LibriSpeech WER ${libriWer(r).toFixed(2)} %<br>` +
+  `median ${set(r, "clean").median_ms.toFixed(0)} ms per clean clip, ${set(r, "clean").rtfx.toFixed(0)}x realtime<br>` +
+  `memory ${r.rss_mb.toLocaleString()} MB, load ${r.load_s.toFixed(2)} s`;
+
+function tiles() {
+  const trit = RESULTS.find(isHero);
+  if (!trit) return;
+  const sameModel = RESULTS.filter((r) => r.model === trit.model && !isHero(r));
+  const cpu = RESULTS.filter((r) => !isHero(r) && r.device === "cpu");
+  const peers = cpu.filter((r) => libriWer(r) <= libriWer(trit));
+  const peer = peers.length ? peers.reduce((a, b) => (libriMs(a) < libriMs(b) ? a : b)) : null;
+  const fastest = cpu.length ? cpu.reduce((a, b) => (libriMs(a) < libriMs(b) ? a : b)) : null;
+  const ms = set(trit, "clean").median_ms;
+  const tile = (l, v, n) => `<div class="tile"><div class="label">${l}</div><div class="value">${v}</div><div class="note">${n}</div></div>`;
+  const out = [tile("Trit, time per clip", `${ms.toFixed(0)} ms`, `${set(trit, "clean").rtfx.toFixed(0)}x realtime on 8 CPU cores. LibriSpeech WER ${libriWer(trit).toFixed(2)} %.`)];
+  for (const other of sameModel) {
+    out.push(tile(`Same weights on ${runtimeShort(other)}${other.device === "gpu" ? " GPU" : ""}`,
+      `${(set(other, "clean").median_ms / ms).toFixed(1)}x slower`,
+      `${set(other, "clean").median_ms.toFixed(0)} ms per clip, ${other.rss_mb.toLocaleString()} MB against Trit's ${trit.rss_mb} MB.`));
+  }
+  if (peer) out.push(tile("Fastest other CPU runtime as accurate as Trit", `${(libriMs(peer) / libriMs(trit)).toFixed(1)}x slower`, `${label(peer)}, WER ${libriWer(peer).toFixed(2)} %.`));
+  if (fastest) out.push(tile("Fastest other CPU runtime", `${libriMs(fastest).toFixed(0)} ms`, `${label(fastest)}, WER ${libriWer(fastest).toFixed(2)} %.`));
+  document.getElementById("tiles").innerHTML = out.join("");
+}
+
+/** Trit as it runs when the caller sets nothing: auto precision, the model's own decoding. */
+const isDefault = (r) => isHero(r) && r.precision.startsWith("auto") && !r.precision.includes("greedy");
+const ordinal = (n) => `${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"}`;
+const totalWer = (r) => {
+  const e = r.sets.reduce((a, s) => a + s.errors, 0);
+  const w = r.sets.reduce((a, s) => a + s.words, 0);
+  return 100 * e / w;
+};
+
+/** The place of `value` among `values`: 1 + the number of better values (a tie shares the place). */
+function place(values, value, lowerIsBetter) {
+  return 1 + values.filter((v) => (lowerIsBetter ? v < value : v > value)).length;
+}
+
+/** A value with its place pill. */
+function ranked(value, values, lowerIsBetter, dp, unit = "", cls = "") {
+  const n = place(values, value, lowerIsBetter);
+  return `<div class="n ${cls}"><span class="rank r${Math.min(n, 4)}" title="${ordinal(n)} of ${values.length} (the other runtimes and Trit's default)">` +
+    `${fmt(value, dp)}${unit}<sup>${ordinal(n)}</sup></span></div>`;
+}
+
+/** The rows that compete for places: every other runtime and Trit's default. */
+const competing = (rows) => rows.filter((r) => !isHero(r) || isDefault(r));
+
+/** Where Trit's default row places on each column, for the card header. */
+function standing(columns, rows) {
+  const trit = rows.find(isDefault);
+  if (!trit) return "";
+  const chips = columns.map(([name, f, lower]) => {
+    const n = place(competing(rows).map(f), f(trit), lower);
+    return `<span class="rank r${Math.min(n, 4)}">${name} ${ordinal(n)}</span>`;
+  });
+  return `<div class="standing"><b style="color:var(--series-1)">Trit default</b> (${trit.precision}): ${chips.join("")}</div>`;
+}
+
+function models() {
+  const groups = [...new Set(RESULTS.map((r) => r.model))];
+  document.getElementById("models").innerHTML = groups.map((model) => {
+    const rows = RESULTS.filter((r) => r.model === model).sort((a, b) => set(a, "clean").median_ms - set(b, "clean").median_ms);
+    const max = Math.max(...rows.map((r) => set(r, "clean").median_ms));
+    // [name, value, lower is better, decimals, unit, class]
+    const columns = [
+      ["Speed", (r) => set(r, "clean").rtfx, false],
+      ["Clean WER", (r) => set(r, "clean").wer, true],
+      ["Other WER", (r) => set(r, "other").wer, true],
+      ["All clips WER", totalWer, true],
+      ["MB after load", (r) => r.load_mb, true],
+      ["MB after all clips", (r) => r.rss_mb, true],
+    ];
+    const values = columns.map(([, f]) => competing(rows).map(f));
+    const body = rows.map((r) => {
+      const ms = set(r, "clean").median_ms, hero = isHero(r), def = isDefault(r);
+      const row = def ? "hero-row" : hero ? "trit-row" : "";
+      return `<div class="who ${hero ? "hero" : ""} ${row}">${hero ? "Trit" : r.runtime}${def ? '<span class="tag">default</span>' : ""}` +
+        `<small>${r.precision}, ${r.device === "gpu" ? "GPU" : "CPU"}</small></div>` +
+        `<div class="barcell ${row}"><i class="bar ${hero ? "hero" : r.device === "gpu" ? "gpu" : ""}" style="width:${(70 * ms / max).toFixed(1)}%"></i><span>${ms.toFixed(0)} ms</span></div>` +
+        ranked(set(r, "clean").rtfx, values[0], false, 0, "x", row) +
+        ranked(set(r, "clean").wer, values[1], true, 2, "", row) +
+        ranked(set(r, "other").wer, values[2], true, 2, "", `wide ${row}`) +
+        ranked(totalWer(r), values[3], true, 2, "", `wide ${row}`) +
+        ranked(r.load_mb, values[4], true, 0, "", `wide ${row}`) +
+        ranked(r.rss_mb, values[5], true, 0, "", `wide ${row}`);
+    }).join("");
+    return `<div class="card model"><h2>${rows[0].model_name}<small>${rows.length} runtime settings, fastest first</small></h2>` +
+      standing(columns, rows) +
+      `<div class="rows"><div class="h">Runtime</div><div class="h">Time per test-clean clip</div><div class="h n">Speed</div>` +
+      `<div class="h n">Clean WER</div><div class="h n wide">Other WER</div><div class="h n wide">All 456 clips WER</div>` +
+      `<div class="h n wide">MB after load</div><div class="h n wide">MB after all clips</div>${body}</div></div>`;
+  }).join("") + cleanupCard();
+}
+
+/** S1-mini: the same 62 raw transcripts on each runtime; WER counts casing and punctuation. */
+function cleanupCard() {
+  if (!CLEANUP.length) return "";
+  const rows = [...CLEANUP].sort((a, b) => a.median_ms - b.median_ms);
+  const max = Math.max(...rows.map((r) => r.median_ms));
+  const columns = [
+    ["Speed", (r) => 1000 / r.median_ms, false],
+    ["Formatted WER", (r) => r.wer, true],
+    ["Exact", (r) => r.exact, false],
+  ];
+  const values = columns.map(([, f]) => competing(rows).map(f));
+  const body = rows.map((r) => {
+    const hero = isHero(r), def = isDefault(r), row = def ? "hero-row" : hero ? "trit-row" : "";
+    return `<div class="who ${hero ? "hero" : ""} ${row}">${hero ? "Trit" : r.runtime}${def ? '<span class="tag">default</span>' : ""}<small>${r.precision}, CPU</small></div>` +
+      `<div class="barcell ${row}"><i class="bar ${hero ? "hero" : ""}" style="width:${(70 * r.median_ms / max).toFixed(1)}%"></i><span>${r.median_ms.toFixed(0)} ms</span></div>` +
+      ranked(1000 / r.median_ms, values[0], false, 1, "/s", row) +
+      ranked(r.wer, values[1], true, 2, "", row) +
+      ranked(r.exact, values[2], false, 0, `/${r.cases}`, row);
+  }).join("");
+  return `<div class="card model"><h2>Superwhisper S1-mini (cleanup)<small>${rows.length} runtime settings, ${rows[0].cases} transcripts, fastest first</small></h2>` +
+    standing(columns, rows) +
+    `<div class="rows text"><div class="h">Runtime</div><div class="h">Time per transcript</div><div class="h n">Speed</div>` +
+    `<div class="h n">Formatted WER</div><div class="h n">Exact</div>${body}</div></div>`;
+}
+
+function scatter() {
+  const svg = document.getElementById("scatter");
+  const W = 1060, H = 460, m = { l: 56, r: 24, t: 16, b: 48 };
+  const xs = RESULTS.map(libriMs), ys = RESULTS.map(libriWer);
+  const x0 = Math.log10(Math.min(...xs) / 1.4), x1 = Math.log10(Math.max(...xs) * 1.6);
+  const yMax = Math.ceil(Math.max(...ys) + 0.5);
+  const X = (v) => m.l + (Math.log10(v) - x0) / (x1 - x0) * (W - m.l - m.r);
+  const Y = (v) => m.t + (1 - v / yMax) * (H - m.t - m.b);
+  for (let v = 0; v <= yMax; v += yMax > 8 ? 2 : 1) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: "var(--grid)" }, svg);
+    el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end", class: "tick" }, svg).textContent = `${v} %`;
+  }
+  for (const v of [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]) {
+    if (Math.log10(v) < x0 || Math.log10(v) > x1) continue;
+    el("line", { x1: X(v), x2: X(v), y1: m.t, y2: H - m.b, stroke: "var(--grid)" }, svg);
+    el("text", { x: X(v), y: H - m.b + 18, "text-anchor": "middle", class: "tick" }, svg).textContent = v >= 1000 ? `${v / 1000} s` : `${v} ms`;
+  }
+  el("text", { x: (m.l + W - m.r) / 2, y: H - 8, "text-anchor": "middle", class: "axis-label" }, svg).textContent = "Median time per clip (log scale), faster to the left";
+  el("text", { x: 14, y: (m.t + H - m.b) / 2, "text-anchor": "middle", class: "axis-label", transform: `rotate(-90 14 ${(m.t + H - m.b) / 2})` }, svg).textContent = "Word error rate, lower is better";
+  const placed = [];
+  // Trit first for label priority, drawn last so it sits on top.
+  const byPriority = [...RESULTS].sort((a, b) => isHero(b) - isHero(a));
+  const labels = new Map();
+  for (const r of byPriority) {
+    const cx = X(libriMs(r)), cy = Y(libriWer(r)), text = short(r);
+    const w = text.length * 6.3 + 4, box = { x: cx + 10, y: cy - 7, w, h: 14 };
+    const clash = placed.some((p) => box.x < p.x + p.w && p.x < box.x + box.w && box.y < p.y + p.h && p.y < box.y + box.h);
+    if ((isHero(r) || !clash) && box.x + w < W) { placed.push(box); labels.set(r, text); }
+  }
+  for (const r of [...RESULTS].sort((a, b) => isHero(a) - isHero(b))) {
+    const cx = X(libriMs(r)), cy = Y(libriWer(r)), hero = isHero(r), gpu = r.device === "gpu";
+    const g = el("g", {}, svg);
+    el("circle", { cx, cy, r: 14, fill: "transparent" }, g);
+    el("circle", { cx, cy, r: hero ? 8 : 5.5, fill: gpu ? "var(--surface-1)" : hero ? "var(--series-1)" : "var(--other)",
+      stroke: gpu ? "var(--other-strong)" : "var(--surface-1)", "stroke-width": 2 }, g);
+    if (labels.has(r)) el("text", { x: cx + 10, y: cy + 4, class: `point-label${hero ? " hero" : ""}` }, g).textContent = labels.get(r);
+    hover(g, detail(r));
+  }
+}
+
+function table() {
+  const cols = [
+    ["Model", (r) => r.model_name], ["Runtime", (r) => isHero(r) ? "Trit" : r.runtime], ["Precision", (r) => `${r.precision}, ${r.device.toUpperCase()}`],
+    ["Clean WER", (r) => set(r, "clean").wer, 2], ["Other WER", (r) => set(r, "other").wer, 2],
+    ["Dev terms WER", (r) => set(r, "tech").wer, 2], ["Dictation WER", (r) => set(r, "tts16").wer, 2],
+    ["Median ms", (r) => set(r, "clean").median_ms, 0], ["Speed", (r) => set(r, "clean").rtfx, 0, "max", "x"],
+    ["Memory MB", (r) => r.rss_mb, 0], ["Load s", (r) => r.load_s, 2],
+  ];
+  const best = cols.map(([, f, dp, dir]) => dp === undefined ? null : (dir === "max" ? Math.max : Math.min)(...RESULTS.map(f)));
+  let previous = null;
+  document.getElementById("table").innerHTML = `<thead><tr>${cols.map(([h]) => `<th>${h}</th>`).join("")}</tr></thead><tbody>` +
+    RESULTS.map((r) => {
+      const first = r.model !== previous && previous !== null;
+      previous = r.model;
+      return `<tr class="${isHero(r) ? "hero" : ""} ${first ? "first" : ""}">` + cols.map(([, f, dp, , unit], i) => {
+        const v = f(r);
+        return dp === undefined ? `<td>${v}</td>` : `<td class="${v === best[i] ? "best" : ""}">${fmt(v, dp)}${unit || ""}</td>`;
+      }).join("") + "</tr>";
+    }).join("") + "</tbody>";
+}
+
+const first = RESULTS[0];
+document.getElementById("meta").textContent = first
+  ? `${first.date} · AMD Ryzen 9 7950X3D, 32 GB RAM, Windows 11, CPU only, English · ${new Set(RESULTS.map((r) => r.model)).size} speech models on ${new Set(RESULTS.map((r) => r.runtime)).size} runtimes, ${RESULTS.length} pairs, 456 clips each; S1-mini on ${CLEANUP.length}`
+  : "No results yet.";
+document.getElementById("footer").textContent = "Made by desktop/bench/runtimes.py and runtimes_report.py. Raw results: desktop/bench/runtimes-results.jsonl.";
+if (RESULTS.length) { models(); }
+</script>
+</body>
+</html>

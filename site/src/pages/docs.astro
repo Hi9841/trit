@@ -1,0 +1,351 @@
+---
+import Base from "../layouts/Base.astro";
+import Header from "../components/Header.astro";
+import PageHead from "../components/PageHead.astro";
+import Footer from "../components/Footer.astro";
+import Cmd from "../components/Cmd.astro";
+import { render, sections } from "../lib/markdown";
+import { links } from "../lib/links";
+import { readRepo } from "../lib/repo";
+import { idle, plugs } from "../lib/sketch";
+
+const README = "trit/README.md";
+
+// This page is the README. Its own contents list is replaced by the index on
+// the left, and its performance table by the Benchmarks page.
+const SKIP = new Set(["contents", "performance"]);
+
+// The README in two parts: getting it running, then the facts to look up.
+const REFERENCE = new Set([
+  "languages",
+  "transcript-cleanup",
+  "behavior-and-limits",
+  "precision",
+  "environment-variables",
+  "layout-of-the-code",
+  "license",
+]);
+
+const [intro, ...rest] = sections(readRepo(README));
+const all = [{ title: "Start", id: "start", body: intro.body.replace(/^# .*$/m, "") }, ...rest];
+
+const rendered = await Promise.all(
+  all.flatMap((s) => (SKIP.has(s.id) ? [] : [render(s.body, README).then((html) => ({ ...s, html }))])),
+);
+
+const groups = [
+  { name: "Use it", items: rendered.filter((s) => !REFERENCE.has(s.id)) },
+  { name: "Reference", items: rendered.filter((s) => REFERENCE.has(s.id)) },
+];
+
+const version = /^version = "([^"]+)"/m.exec(readRepo("trit/Cargo.toml"))?.[1] ?? "";
+---
+
+<Base
+  title="Docs · Trit"
+  description="How to use Trit, speech to text on the CPU: the trit command line, the Rust crate, the C ABI, and bindings for Python, C#, Node and Bun. Models, languages, cleanup, precision and limits."
+>
+  <Header />
+  <main>
+    <PageHead label={`Docs · Trit ${version}`} title="Use it from any language." art={plugs} act="plug">
+      <p>
+        Trit turns 16 kHz speech into text on the CPU. Call it from the <code>trit</code> command, the Rust crate, or a
+        C ABI with bindings for Python, C#, Node and Bun. This page is{" "}
+        <a href={`${links.repo}/blob/main/trit/README.md`}>trit/README.md</a>, rendered.
+      </p>
+      <Cmd command="cargo build --release" />
+    </PageHead>
+
+    <div class="grid body">
+      <nav class="index" aria-label="On this page">
+        {
+          groups.map((g) => (
+            <>
+              <p class="label">{g.name}</p>
+              <ol>
+                {g.items.map((p) => (
+                  <li>
+                    <a href={`#${p.id}`}>{p.title}</a>
+                  </li>
+                ))}
+              </ol>
+            </>
+          ))
+        }
+      </nav>
+      <details class="index-phone">
+        <summary><span class="here">On this page</span></summary>
+        {
+          groups.map((g) => (
+            <>
+              <p class="label">{g.name}</p>
+              <ol>
+                {g.items.map((p) => (
+                  <li>
+                    <a href={`#${p.id}`}>{p.title}</a>
+                  </li>
+                ))}
+              </ol>
+            </>
+          ))
+        }
+      </details>
+      <div class="prose">
+        {
+          groups.map((g, k) => (
+            <div class:list={["part", { later: k > 0 }]}>
+              <p class="part-name">{g.name}</p>
+              {g.items.map((p) => (
+                <section aria-labelledby={p.id}>
+                  <h2 id={p.id}>{p.title}</h2>
+                  <Fragment set:html={p.html} />
+                </section>
+              ))}
+            </div>
+          ))
+        }
+      </div>
+      <figure class="art end" data-act="sleep">
+        <Fragment set:html={idle} />
+        <figcaption>Workers spin for 3 ms after a step, then sleep. An idle engine uses no CPU.</figcaption>
+      </figure>
+    </div>
+  </main>
+  <Footer />
+</Base>
+
+<script>
+  // The index marks the section being read; on a phone, the menu bar names it.
+  const items = [...document.querySelectorAll<HTMLAnchorElement>(".index a, .index-phone a")];
+  const here = document.querySelector(".index-phone .here");
+  const titles = new Map([...document.querySelectorAll(".prose h2")].map((h) => [h.id, h.textContent ?? ""]));
+
+  const mark = (id: string) => {
+    for (const a of items) a.toggleAttribute("aria-current", a.hash === `#${id}`);
+
+    if (here) here.textContent = titles.get(id) ?? "On this page";
+  };
+
+  const watcher = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) if (e.isIntersecting) mark(e.target.id);
+      top();
+    },
+    { rootMargin: "-20% 0px -70% 0px" },
+  );
+
+  // Above the first section nothing is current, whatever the observer saw.
+  const first = document.querySelector(".prose h2");
+
+  const top = () => {
+    if (!first || first.getBoundingClientRect().top < innerHeight * 0.2) return;
+
+    for (const a of items) a.removeAttribute("aria-current");
+
+    if (here) here.textContent = "On this page";
+  };
+
+  addEventListener("scroll", top, { passive: true });
+
+  for (const h of titles.keys()) {
+    const heading = document.getElementById(h);
+
+    if (heading) watcher.observe(heading);
+  }
+
+  // On a phone, picking a section closes the menu.
+  const menu = document.querySelector("details.index-phone");
+
+  menu?.addEventListener("click", (e) => {
+    if (e.target instanceof HTMLAnchorElement) menu.removeAttribute("open");
+  });
+</script>
+
+<style>
+  .body {
+    align-items: start;
+    margin-top: 96px;
+  }
+  .index {
+    grid-column: 1 / span 3;
+    grid-row: 1 / span 2;
+    position: sticky;
+    top: 24px;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+  }
+  /* Group names in sentence case: one uppercase label per screen is enough. */
+  .label,
+  .part-name {
+    margin-bottom: 12px;
+    font-size: 13px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  ol + .label {
+    margin-top: 32px;
+  }
+  ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .index ol {
+    border-left: 1px solid var(--rule);
+  }
+  .index a {
+    display: block;
+    margin-left: -1px;
+    padding: 4px 0 4px 16px;
+    border-left: 2px solid transparent;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--muted);
+    text-decoration: none;
+    transition:
+      color 150ms ease,
+      border-color 150ms ease;
+  }
+  .index a[aria-current] {
+    border-left-color: var(--accent);
+    color: var(--ink);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    a:hover {
+      color: var(--ink);
+    }
+  }
+  .index-phone {
+    display: none;
+  }
+
+  /* Code and tables use nine columns; text keeps its measure inside them. */
+  .prose {
+    grid-column: 4 / -1;
+    min-width: 0;
+  }
+  .part,
+  .prose section {
+    max-width: none;
+  }
+  .prose section > :global(*) {
+    max-width: var(--measure);
+  }
+  .prose section > :global(.table),
+  .prose section > :global(.codeblock),
+  .prose section > :global(ul:has(> li.term)) {
+    max-width: none;
+  }
+  /* Each part starts on a full ink rule with its name; the second after a
+     longer pause. */
+  .part {
+    padding-top: 16px;
+    border-top: 1px solid var(--ink);
+  }
+  .part.later {
+    margin-top: 128px;
+  }
+  .prose .part-name {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  .part > section:first-of-type > h2 {
+    margin-top: 16px;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .end {
+    grid-column: 4 / span 7;
+    margin-top: 32px; /* the drawing keeps its own air above the z's */
+    margin-bottom: -96px; /* 96px to the footer rule, as above */
+  }
+  .end figcaption {
+    text-wrap: balance;
+  }
+
+  /* Tablets and phones: the index is a menu bar that stays on top and names
+     the section being read. */
+  @media (max-width: 900px) {
+    .body {
+      margin-top: 64px;
+    }
+    .index {
+      display: none;
+    }
+    .index-phone {
+      display: block;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      grid-column: 1 / -1;
+      margin: 0 calc(var(--margin) * -1) 40px;
+      padding: 0 var(--margin);
+      border-bottom: 1px solid var(--rule);
+      background: var(--paper);
+    }
+    .index-phone[open] {
+      max-height: 100vh;
+      max-height: 100svh;
+      overflow-y: auto;
+    }
+    summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 48px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      list-style: none;
+    }
+    summary::-webkit-details-marker {
+      display: none;
+    }
+    summary::after {
+      content: "";
+      flex: none;
+      width: 8px;
+      height: 8px;
+      margin-right: 4px;
+      border-right: 1.5px solid currentColor;
+      border-bottom: 1.5px solid currentColor;
+      transform: translateY(-2px) rotate(45deg);
+      transition: transform 150ms var(--ease-out);
+    }
+    details[open] summary::after {
+      transform: translateY(2px) rotate(225deg);
+    }
+    .index-phone ol {
+      padding-bottom: 16px;
+      columns: 2;
+      column-gap: 24px;
+    }
+    .index-phone a {
+      display: block;
+      padding: 8px 0;
+      font-size: 15px;
+      color: var(--muted);
+      text-decoration: none;
+    }
+    .index-phone a[aria-current] {
+      color: var(--ink);
+    }
+    .prose,
+    .end {
+      grid-column: 1 / -1;
+    }
+    /* Headings land below the menu bar, not under it. */
+    .prose :global(:is(h2, h3)) {
+      scroll-margin-top: 64px;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    summary::after {
+      transition: none;
+    }
+  }
+</style>

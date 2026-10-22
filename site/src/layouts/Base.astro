@@ -1,0 +1,44 @@
+---
+import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
+import "@fontsource/patrick-hand";
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <!-- Before first paint: the saved theme, and a flag that JavaScript runs. -->
+    <script is:inline>
+      const saved = localStorage.getItem("theme");
+
+      if (saved === "light" || saved === "dark") {
+        document.documentElement.dataset.theme = saved;
+      }
+
+      document.documentElement.classList.add("js");
+    </script>
+  </head>
+  <body>
+    <slot />
+    <script>
+      import "../lib/motion";
+      import "../lib/codecopy";
+    </script>
+  </body>
+</html>
