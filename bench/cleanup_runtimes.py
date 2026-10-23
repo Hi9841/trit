@@ -185,7 +185,7 @@ def main():
         elif any(p.startswith("torch") for p in packages):
             command += ENV["torch"]
         command += ["python", __file__, name, "--child"]
-        code = subprocess.run(command, cwd=DESKTOP).returncode
+        code = subprocess.run(command, cwd=DESKTOP, check=False).returncode
         if code:
             print(f"  failed with exit code {code}", flush=True)
 

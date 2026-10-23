@@ -188,6 +188,7 @@ trit_free(engine);
 | `trit_transcribe(engine, const float *samples, size_t count, const char *language)` | Text, or NULL |
 | `trit_transcribe_with(engine, samples, count, language, int beam)` | The same with beams (0: the model's default, 1: greedy) |
 | `trit_transcribe_wav(engine, const char *path, const char *language)` | Text, or NULL |
+| `trit_transcribe_json(engine, samples, count, const char *options)`, `trit_transcribe_wav_json(engine, path, options)` | `{"text", "segments": [{"start", "end", "text"}]}` as JSON, or NULL. `options` is NULL or a JSON object with any of `language`, `task` (`"transcribe"`, `"translate"`), `beam`, `fallback`, `timestamps` |
 | `trit_set_dictionary(engine, const char *terms)` | Terms skipped, or -1. One term per line |
 | `trit_cleaner_load(const char *model)`, `trit_cleaner_load_with(model, precision)` | A cleaner, or NULL |
 | `trit_clean(cleaner, text, styling, structure, context)` | Clean text, or NULL. NULL settings take the default |
@@ -197,7 +198,8 @@ trit_free(engine);
 | `trit_version(void)` | `"0.1.0"` |
 
 Rules: strings are UTF-8. `language` is an ISO 639-1 code or NULL. Free
-every returned text with `trit_free_text`. No panic crosses the ABI; it
+every returned text with `trit_free_text`. An unknown option fails with the
+list of valid ones. No panic crosses the ABI; it
 becomes NULL or -1 and an error text.
 
 Other languages with a C FFI use the header as it is: Go (cgo), Swift,
@@ -218,6 +220,9 @@ print(engine.kind)                                # "parakeet_tdt"
 print(engine.transcribe_wav("take.wav", language="en"))
 print(engine.transcribe(samples, language="en"))  # list, array("f"), or numpy float32, 16 kHz mono
 print(engine.transcribe(samples, beam=1))         # greedy
+print(engine.transcribe_wav("take.wav", task="translate"))  # into English (Whisper, Canary)
+for s in engine.segments_wav("take.wav", language="en"):    # also segments(samples)
+    print(s.start, s.end, s.text)                 # seconds from the start
 engine.set_dictionary(["Kubernetes", "PostgreSQL"])
 trit.release_memory()                             # when the app goes idle
 
@@ -240,13 +245,17 @@ using TritSpeech;
 using var engine = new Trit("parakeet-redux");           // second argument: precision, "f16" and so on
 Console.WriteLine(engine.TranscribeWav("take.wav", "en"));
 Console.WriteLine(engine.Transcribe(samples, "en"));     // float[] or Span<float>, 16 kHz mono
+Console.WriteLine(engine.TranscribeWav("take.wav", task: "translate"));  // into English
+foreach (var s in engine.SegmentsWav("take.wav", "en"))  // also Segments(samples)
+    Console.WriteLine($"{s.Start} {s.End} {s.Text}");    // seconds from the start
 engine.SetDictionary("Kubernetes", "PostgreSQL");
 
 using var cleaner = new TritCleaner();
 Console.WriteLine(cleaner.Clean("so um send it friday no wait thursday"));
 ```
 
-Errors throw `TritException`.
+Errors throw `TritException`. The options of each call are `language`,
+`beam`, `task`, and `fallback`, as in the C ABI.
 
 ## Node and Bun
 
@@ -259,6 +268,9 @@ import { Trit, Cleaner, releaseMemory } from "./trit.mjs";
 const engine = new Trit("parakeet-redux");             // second argument: { precision: "f16" }
 console.log(engine.transcribeWav("take.wav", "en"));
 console.log(engine.transcribe(samples, "en"));         // Float32Array, 16 kHz mono
+console.log(engine.transcribeWav("take.wav", null, { task: "translate" }));  // into English
+for (const s of engine.segmentsWav("take.wav", "en"))  // also segments(samples)
+  console.log(s.start, s.end, s.text);                 // seconds from the start
 engine.setDictionary(["Kubernetes", "PostgreSQL"]);
 engine.close();
 releaseMemory();
@@ -371,9 +383,7 @@ weights in every mode.
   they decode greedy. Whisper puts the terms in a previous-text prompt, as
   OpenAI's `initial_prompt`.
 - **English:** with `language: "en"`, Parakeet never writes pieces that
-  only other languages use. When 40 % or more of the words of a window
-  are in no English word list (SCOWL size 70), it decodes the window again
-  with a prior for English words.
+  only other languages use.
 - **Timestamps:** `segments` gives sentences or pauses of 1 s for Parakeet,
   and one segment per window for the others.
 - **Silence:** Parakeet returns an empty string under 80 ms of audio, and
@@ -410,8 +420,8 @@ weights in every mode.
 | `src/cleanup.rs` | `Cleaner`: S1-mini prompt and styles |
 | `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`) |
 | `src/audio/` | WAV reader, NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), windows for long audio |
-| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen), the English word list and foreign pieces (from `scripts/english_lists.py`) |
-| `src/models/parakeet/` | FastConformer encoder, TDT and CTC heads, the sound-checked dictionary (`dictionary.rs`), the English prior (`english.rs`), the logit dictionary of Canary and Moonshine (`bias.rs`) |
+| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen), the foreign pieces (from `scripts/foreign_pieces.py`) |
+| `src/models/parakeet/` | FastConformer encoder, TDT and CTC heads, the sound-checked dictionary (`dictionary.rs`), the logit dictionary of Canary and Moonshine (`bias.rs`) |
 | `src/models/canary.rs` | Canary: the Parakeet encoder and a transformer decoder |
 | `src/models/whisper/` | Whisper encoder and decoder, language detection |
 | `src/models/moonshine.rs` | Moonshine |

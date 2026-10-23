@@ -218,8 +218,8 @@ def load_photon(device):
     os.environ.update(MOONDREAM_API_KEY="", HF_HUB_DISABLE_TELEMETRY="1", DO_NOT_TRACK="1")
     import kestrel.model_download as kestrel_download
     import kestrel_kernels.ternary as kernels
-    from kestrel import photon as kestrel_photon
     import moondream as md
+    from kestrel import photon as kestrel_photon
 
     # Kestrel ships no ternary CPU kernel for Windows. TDT's Photon worker
     # fell back to dense weights here; do the same.
@@ -392,7 +392,7 @@ def load_hf_whisper(repo, device, beam=1):
 
 
 def load_oai(name, device, beam=1):
-    torch, _ = torch_device(device)
+    torch_device(device)
     import whisper
 
     model = whisper.load_model(name, device=device)
@@ -407,7 +407,7 @@ def load_oai(name, device, beam=1):
 
 
 def load_hf_moonshine(repo, beam=1):
-    torch, dtype = torch_device("cpu")
+    torch, _ = torch_device("cpu")
     from transformers import AutoProcessor, MoonshineForConditionalGeneration
 
     processor = AutoProcessor.from_pretrained(repo)
@@ -542,7 +542,7 @@ def main() -> None:
         if any(p.startswith("torch") for p in packages):
             command += ENV_ARGS["torch"]
         command += ["python", __file__, name, "--child", "--sets", ",".join(sets)]
-        code = subprocess.run(command, cwd=DESKTOP).returncode
+        code = subprocess.run(command, cwd=DESKTOP, check=False).returncode
         if code:
             print(f"  failed with exit code {code}", flush=True)
 

@@ -18,7 +18,7 @@ from pathlib import Path
 
 DESKTOP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(DESKTOP / "bench"))
-from runtimes import ENGINES  # noqa: E402
+from runtimes import ENGINES
 
 SETS = ["clean", "other", "tech", "tts16"]
 MODELS = {

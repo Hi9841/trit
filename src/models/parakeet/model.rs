@@ -2,7 +2,6 @@
 //! The structure follows the Apache-2.0 Hugging Face `ParakeetForTDT`.
 
 use super::dictionary::{Candidate, Check, Dictionary, CAPITAL_PRIOR};
-use super::english::{English, Partial};
 use crate::cpu::activation;
 use crate::cpu::buf::Buf;
 use crate::cpu::fgemm;
@@ -961,14 +960,13 @@ impl Parakeet {
         encoded: &[f32],
         t: usize,
         dictionary: Option<&Dictionary>,
-        english: Option<&English>,
         banned: &[usize],
     ) -> (Vec<usize>, Vec<usize>) {
         let c = &self.config;
         match &self.head {
             Head::Tdt(tdt) => {
                 let projected = tdt.encoder_projector.forward(encoded, t);
-                tdt.decode(c, &projected, t, dictionary, english, banned)
+                tdt.decode(c, &projected, t, dictionary, banned)
             }
             Head::Ctc(head) => ctc_greedy(&head.forward(encoded, t), c.vocab, c.blank, banned),
             Head::Encoder => (Vec::new(), Vec::new()),
@@ -1044,23 +1042,17 @@ impl Tdt {
     }
 
     /// Greedy TDT decoding over projected encoder frames (`t x decoder_hidden`).
-    /// A transcript mostly in no English word is decoded again with the
-    /// `english` prior; `dictionary` terms then replace the words heard
-    /// where the sound allows (see `english.rs` and `dictionary.rs`).
+    /// `dictionary` terms then replace the words heard where the sound
+    /// allows (see `dictionary.rs`).
     fn decode(
         &self,
         c: &Config,
         projected: &[f32],
         t: usize,
         dictionary: Option<&Dictionary>,
-        english: Option<&English>,
         banned: &[usize],
     ) -> (Vec<usize>, Vec<usize>) {
-        let keep = dictionary.is_some();
-        let mut run = self.greedy(c, projected, t, None, banned, keep);
-        if let Some(english) = english.filter(|e| e.drifted(&run.tokens)) {
-            run = self.greedy(c, projected, t, Some(english), banned, keep);
-        }
+        let run = self.greedy(c, projected, t, banned, dictionary.is_some());
         let Greedy {
             mut tokens,
             mut frames,
@@ -1078,14 +1070,13 @@ impl Tdt {
         (tokens, frames)
     }
 
-    /// One greedy pass; `english` steers unclear words to English, and
-    /// `keep` records the decoder before each token for the dictionary.
+    /// One greedy pass; `keep` records the decoder before each token for
+    /// the dictionary.
     fn greedy(
         &self,
         c: &Config,
         projected: &[f32],
         t: usize,
-        english: Option<&English>,
         banned: &[usize],
         keep: bool,
     ) -> Greedy {
@@ -1110,7 +1101,6 @@ impl Tdt {
             }
         };
         snapshot(&mut run.trail, &state, &dec, 0);
-        let mut word = Partial::default();
         let (mut frame, mut symbols) = (0usize, 0usize);
         let mut joint_in = vec![0.0f32; dh];
         while frame < t {
@@ -1122,13 +1112,7 @@ impl Tdt {
             for &id in banned {
                 logits[id] = f32::NEG_INFINITY;
             }
-            let mut token = argmax(&logits[..c.vocab]);
-            if let Some(english) = english {
-                token = english.pick(&word, &logits[..c.vocab], token, c.blank);
-                if token != c.blank {
-                    word = english.step(&word, token).0;
-                }
-            }
+            let token = argmax(&logits[..c.vocab]);
             let mut duration = c.durations[argmax(&logits[c.vocab..])];
             if token == c.blank {
                 duration = duration.max(1);

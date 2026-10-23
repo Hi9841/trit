@@ -4,6 +4,8 @@
 //   Console.WriteLine(engine.Kind);                          // "whisper"
 //   Console.WriteLine(engine.TranscribeWav("take.wav"));      // the model detects the language
 //   Console.WriteLine(engine.Transcribe(samples, "de"));      // float[] at 16 kHz mono
+//   Console.WriteLine(engine.TranscribeWav("take.wav", task: "translate"));  // into English
+//   foreach (var s in engine.SegmentsWav("take.wav")) Console.WriteLine($"{s.Start}-{s.End} {s.Text}");
 //
 //   using var cleaner = new TritCleaner();                   // Superwhisper S1-mini
 //   Console.WriteLine(cleaner.Clean("so um send it friday no wait thursday"));
@@ -13,11 +15,17 @@
 // Add <AllowUnsafeBlocks>true</AllowUnsafeBlocks> to the project file.
 
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 
 namespace TritSpeech;
 
 public sealed class TritException(string message) : Exception(message);
+
+/// <summary>A stretch of the recording and its text; times in seconds from the start.</summary>
+public sealed record Segment(double Start, double End, string Text);
 
 internal static partial class Native
 {
@@ -38,8 +46,8 @@ internal static partial class Native
     [LibraryImport(Lib)] public static partial void trit_release_memory();
     [LibraryImport(Lib)] public static partial IntPtr trit_kind(IntPtr engine);
     [LibraryImport(Lib)] public static partial void trit_free(IntPtr engine);
-    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static unsafe partial IntPtr trit_transcribe_with(IntPtr engine, float* samples, nuint count, string? language, int beam);
-    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_transcribe_wav(IntPtr engine, string path, string? language);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static unsafe partial IntPtr trit_transcribe_json(IntPtr engine, float* samples, nuint count, string? options);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_transcribe_wav_json(IntPtr engine, string path, string? options);
     [LibraryImport(Lib)] public static partial void trit_free_text(IntPtr text);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial int trit_set_dictionary(IntPtr engine, string terms);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_cleaner_load_with(string? model, string? precision);
@@ -69,21 +77,76 @@ public sealed class Trit : IDisposable
     public string Kind => Marshal.PtrToStringUTF8(Native.trit_kind(Handle))!;
 
     /// <summary>16 kHz mono samples in -1..1; language is an ISO 639-1 code or null to detect it; beam: beams
-    /// for Whisper, Moonshine, and Canary (0: the model's default, 5 for Whisper and Moonshine; 1: greedy).</summary>
-    public string Transcribe(ReadOnlySpan<float> samples, string? language = null, int beam = 0)
+    /// for Whisper, Moonshine, and Canary (0: the model's default, 5 for Whisper and Moonshine; 1: greedy);
+    /// task: "transcribe" (null), or "translate" into English (multilingual Whisper, Canary); fallback:
+    /// Whisper decodes a window again at higher temperatures when its text repeats itself (null: on).</summary>
+    public string Transcribe(ReadOnlySpan<float> samples, string? language = null, int beam = 0,
+        string? task = null, bool? fallback = null) =>
+        Text(Run(samples, Options(language, beam, task, fallback, false)));
+
+    /// <summary>A 16 kHz WAV file (16-bit PCM or 32-bit float); the rest as for <see cref="Transcribe"/>.</summary>
+    public string TranscribeWav(string path, string? language = null, int beam = 0,
+        string? task = null, bool? fallback = null) =>
+        Text(RunWav(path, Options(language, beam, task, fallback, false)));
+
+    /// <summary>The text in timed segments: sentences or pauses for Parakeet, windows of up to 30 s (40 s
+    /// Canary) for the others. Arguments as for <see cref="Transcribe"/>.</summary>
+    public List<Segment> Segments(ReadOnlySpan<float> samples, string? language = null, int beam = 0,
+        string? task = null, bool? fallback = null) =>
+        SegmentList(Run(samples, Options(language, beam, task, fallback, true)));
+
+    /// <summary><see cref="Segments"/> for a 16 kHz WAV file.</summary>
+    public List<Segment> SegmentsWav(string path, string? language = null, int beam = 0,
+        string? task = null, bool? fallback = null) =>
+        SegmentList(RunWav(path, Options(language, beam, task, fallback, true)));
+
+    /// <summary>The options JSON of trit_transcribe_json.</summary>
+    static string Options(string? language, int beam, string? task, bool? fallback, bool timestamps)
+    {
+        using var buffer = new MemoryStream();
+        using (var json = new Utf8JsonWriter(buffer))
+        {
+            json.WriteStartObject();
+            if (language != null) json.WriteString("language", language);
+            json.WriteNumber("beam", beam);
+            if (task != null) json.WriteString("task", task);
+            if (fallback is bool on) json.WriteBoolean("fallback", on);
+            json.WriteBoolean("timestamps", timestamps);
+            json.WriteEndObject();
+        }
+        return System.Text.Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    JsonDocument Run(ReadOnlySpan<float> samples, string options)
     {
         unsafe
         {
             fixed (float* pointer = samples)
-                return Native.Text(Native.trit_transcribe_with(Handle, pointer, (nuint)samples.Length, language, beam));
+                return JsonDocument.Parse(Native.Text(Native.trit_transcribe_json(Handle, pointer, (nuint)samples.Length, options)));
         }
     }
 
-    /// <summary>A 16 kHz WAV file (16-bit PCM or 32-bit float).</summary>
-    public string TranscribeWav(string path, string? language = null) =>
-        Native.Text(Native.trit_transcribe_wav(Handle, path, language));
+    JsonDocument RunWav(string path, string options) =>
+        JsonDocument.Parse(Native.Text(Native.trit_transcribe_wav_json(Handle, path, options)));
 
-    /// <summary>Terms to favor while decoding (Parakeet). Returns how many it cannot spell.</summary>
+    static string Text(JsonDocument result)
+    {
+        using (result) return result.RootElement.GetProperty("text").GetString()!;
+    }
+
+    static List<Segment> SegmentList(JsonDocument result)
+    {
+        using (result)
+        {
+            var segments = new List<Segment>();
+            foreach (var s in result.RootElement.GetProperty("segments").EnumerateArray())
+                segments.Add(new Segment(s.GetProperty("start").GetDouble(), s.GetProperty("end").GetDouble(),
+                    s.GetProperty("text").GetString()!));
+            return segments;
+        }
+    }
+
+    /// <summary>Terms to favor while decoding (Parakeet). Returns how many it cannot spell. No terms clears them.</summary>
     public int SetDictionary(params string[] terms)
     {
         int skipped = Native.trit_set_dictionary(Handle, string.Join('\n', terms));

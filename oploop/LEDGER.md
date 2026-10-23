@@ -4,8 +4,7 @@
 
 - Baseline: `oploop/baseline/trit_ffi.dll` and `trit-src.tgz`, the tree of 2026-10-22 03:12
   (Whisper/Moonshine 5 beams, Transformers rules; int8 from 384 wide; pool 16 MB; S1 int8 head).
-- Work: the working tree (`trit/`). No commits: the owner asked for none; each kept change
-  is a patch in `results/`.
+- Work: the working tree (`trit/`). The kept changes are in commit `cdec553`.
 - Machine: AMD Ryzen 9 7950X3D (16 cores, 2 CCDs), 32 GB, Windows 11.
 - Runtime: Rust 1.98.1 release (fat LTO), Python 3.12 harness through the ctypes binding.
 
@@ -58,7 +57,7 @@ p = 0.83, 0 texts differ.
 - Result: J1 tiny A 64.3 ms (62.9-65.5) vs B 61.7 ms (60.8-62.6), per-clip ratio 0.940,
   p = 0.0088, 3 rounds x 200 clips; errors 231 = 231, 0 of 200 texts differ.
 - Other journeys: J2 base.en 110.1 vs 110.3 ms, ratio 0.997, p = 0.68 (no change), 0 texts differ.
-- Decision: KEEP (`results/I-001.patch`). Base.en did not move: its beam work is a smaller
+- Decision: KEEP (commit `cdec553`). Base.en did not move: its beam work is a smaller
   share and the saving is inside its noise.
 
 ### Profile P-2 (Whisper encoder and decoder steps, 200 test-clean clips, timers)
@@ -109,4 +108,4 @@ Encoder int8 dense: ~10.6 G int8 MAC in 11.7 ms = ~20 % of VNNI peak.
 - Result: J2 base.en A 110.0 ms (109.4-117.4) vs B 107.3 ms (105.8-110.2), ratio 0.959,
   p = 0.0074; J1 tiny 61.7 vs 59.9 ms, ratio 0.952, p = 0.03; J4 Redux 34.8 vs 34.7 ms,
   p = 0.66. 0 texts differ on all three (231, 124, 81 errors on both sides).
-- Decision: KEEP (`results/I-003.patch`).
+- Decision: KEEP (commit `cdec553`).

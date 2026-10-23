@@ -544,8 +544,8 @@ fn print_json(model: &Path, rows: &[Row], failed: &[(String, String)], skipped: 
             "ms": row.ms,
             "text": row.text,
             "segments": row.segments.iter().map(|s| serde_json::json!({
-                "start": s.start,
-                "end": s.end,
+                "start": hundredths(s.start),
+                "end": hundredths(s.end),
                 "text": s.text,
             })).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
@@ -934,4 +934,9 @@ fn toon(value: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Seconds to 0.01 s, so JSON shows 3.28 and not the f32 as f64 (3.2799999713897705).
+fn hundredths(seconds: f32) -> f64 {
+    (f64::from(seconds) * 100.0).round() / 100.0
 }

@@ -7,7 +7,7 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::OnceLock;
-use trit::{BiasWeights, Cleaner, LoadOptions, Options, Precision, Trit};
+use trit::{BiasWeights, Cleaner, LoadOptions, Options, Precision, Task, Trit};
 
 // The library's own allocations: the same allocator as the trit CLI and
 // TDT. A host's allocator only serves the host; text crosses the ABI as
@@ -58,6 +58,18 @@ unsafe fn engine_arg<'a>(engine: *const Trit) -> Result<&'a Trit, String> {
     engine
         .as_ref()
         .ok_or_else(|| "engine is NULL; call trit_load first".to_string())
+}
+
+/// # Safety
+/// `samples` points to `count` floats, or is NULL when `count` is 0.
+unsafe fn samples_arg<'a>(samples: *const f32, count: usize) -> Result<&'a [f32], String> {
+    if count == 0 {
+        return Ok(&[]);
+    }
+    if samples.is_null() {
+        return Err("samples is NULL".into());
+    }
+    Ok(std::slice::from_raw_parts(samples, count))
 }
 
 fn owned_text(text: String) -> *mut c_char {
@@ -217,14 +229,7 @@ pub unsafe extern "C" fn trit_transcribe_with(
         let engine = engine_arg(engine)?;
         let mut options = options(language)?;
         options.beam = usize::try_from(beam).map_err(|_| format!("beam {beam} is below 0"))?;
-        if samples.is_null() && count > 0 {
-            return Err("samples is NULL".into());
-        }
-        let samples = if count == 0 {
-            &[][..]
-        } else {
-            std::slice::from_raw_parts(samples, count)
-        };
+        let samples = samples_arg(samples, count)?;
         Ok(owned_text(engine.transcribe_with(samples, &options)))
     })
 }
@@ -249,7 +254,134 @@ pub unsafe extern "C" fn trit_transcribe_wav(
     })
 }
 
-/// Frees text from `trit_transcribe`, `trit_transcribe_wav`, or `trit_clean`.
+const OPTION_KEYS: &str = "language, task, beam, fallback, timestamps";
+
+/// Options from a JSON object, and whether to time segments. NULL or "" is
+/// the default; every key is optional.
+///
+/// # Safety
+/// `options` is NULL or a NUL-terminated string.
+unsafe fn json_options(options: *const c_char) -> Result<(Options, bool), String> {
+    let mut parsed = Options::default();
+    let mut timestamps = false;
+    if options.is_null() {
+        return Ok((parsed, timestamps));
+    }
+    let text = text_arg(options, "options")?.trim();
+    if text.is_empty() {
+        return Ok((parsed, timestamps));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("options is not JSON: {e}"))?;
+    let object = value
+        .as_object()
+        .ok_or("options is not a JSON object; example: {\"language\": \"en\"}")?;
+    for (key, value) in object {
+        let wrong = || format!("options.{key} cannot be {value}");
+        match key.as_str() {
+            "language" => {
+                parsed.language = match value {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(code) => {
+                        Some(code.trim().to_lowercase()).filter(|code| !code.is_empty())
+                    }
+                    _ => return Err(wrong()),
+                }
+            }
+            "task" => {
+                parsed.task = value.as_str().and_then(Task::parse).ok_or_else(|| {
+                    format!("{}; valid tasks: {}", wrong(), Task::NAMES.join(", "))
+                })?
+            }
+            "beam" => {
+                parsed.beam = value
+                    .as_u64()
+                    .and_then(|beam| usize::try_from(beam).ok())
+                    .ok_or_else(wrong)?
+            }
+            "fallback" => parsed.fallback = Some(value.as_bool().ok_or_else(wrong)?),
+            "timestamps" => timestamps = value.as_bool().ok_or_else(wrong)?,
+            _ => {
+                return Err(format!(
+                    "unknown option {key}; valid options: {OPTION_KEYS}"
+                ))
+            }
+        }
+    }
+    Ok((parsed, timestamps))
+}
+
+/// `{"text": ..., "segments": [{"start", "end", "text"}]}`, the shape of one
+/// result of `trit transcribe --format json`. With timestamps, the text is
+/// the segments joined.
+fn json_result(engine: &Trit, samples: &[f32], options: &Options, timestamps: bool) -> String {
+    let (text, segments) = if timestamps {
+        let segments = engine.segments(samples, options);
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        (texts.join(" "), segments)
+    } else {
+        (engine.transcribe_with(samples, options), Vec::new())
+    };
+    serde_json::json!({
+        "text": text,
+        "segments": segments.iter().map(|s| serde_json::json!({
+            "start": hundredths(s.start),
+            "end": hundredths(s.end),
+            "text": s.text,
+        })).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// Transcribes `count` mono samples at 16 kHz with options, and returns
+/// JSON: `{"text": "...", "segments": [{"start": 0.0, "end": 1.8, "text": "..."}]}`.
+/// `options` is NULL or a JSON object with any of: `language` (ISO 639-1
+/// code), `task` (`"transcribe"` or `"translate"`), `beam` (as for
+/// `trit_transcribe_with`), `fallback` (Whisper temperature fallback,
+/// default true), `timestamps` (fill `segments`, default false). An unknown
+/// key or value fails. Free the result with `trit_free_text`.
+///
+/// # Safety
+/// As for `trit_transcribe`; `options` is NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn trit_transcribe_json(
+    engine: *const Trit,
+    samples: *const f32,
+    count: usize,
+    options: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let engine = engine_arg(engine)?;
+        let (options, timestamps) = json_options(options)?;
+        let samples = samples_arg(samples, count)?;
+        Ok(owned_text(json_result(
+            engine, samples, &options, timestamps,
+        )))
+    })
+}
+
+/// `trit_transcribe_json` for a 16 kHz WAV file.
+///
+/// # Safety
+/// `engine` is from `trit_load`; `path` is a NUL-terminated UTF-8 path;
+/// `options` is NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn trit_transcribe_wav_json(
+    engine: *const Trit,
+    path: *const c_char,
+    options: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let engine = engine_arg(engine)?;
+        let (options, timestamps) = json_options(options)?;
+        let samples = trit::read_wav(Path::new(text_arg(path, "path")?))?;
+        Ok(owned_text(json_result(
+            engine, &samples, &options, timestamps,
+        )))
+    })
+}
+
+/// Frees text from `trit_transcribe*`, `trit_transcribe_wav*`, or `trit_clean`.
 /// NULL is a no-op.
 ///
 /// # Safety
@@ -379,4 +511,9 @@ pub unsafe extern "C" fn trit_clean(
         }
         Ok(owned_text(cleaner.clean(text, &style)))
     })
+}
+
+/// Seconds to 0.01 s, so JSON shows 3.28 and not the f32 as f64 (3.2799999713897705).
+fn hundredths(seconds: f32) -> f64 {
+    (f64::from(seconds) * 100.0).round() / 100.0
 }

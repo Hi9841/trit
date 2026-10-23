@@ -7,7 +7,7 @@ use std::path::Path;
 
 pub const WORD_START: char = '\u{2581}';
 /// Latin pieces of the Parakeet v3 vocabulary that common words of 23 other
-/// languages use and common English words do not (`scripts/english_lists.py`).
+/// languages use and common English words do not (`scripts/foreign_pieces.py`).
 const FOREIGN_PIECES: &str = include_str!("foreign-pieces.txt");
 
 pub struct Tokenizer {

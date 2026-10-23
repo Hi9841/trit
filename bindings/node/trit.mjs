@@ -5,6 +5,8 @@
 //   console.log(engine.kind);                            // "whisper"
 //   console.log(engine.transcribeWav("take.wav"));       // the model detects the language
 //   console.log(engine.transcribe(samples, "de"));       // Float32Array at 16 kHz mono
+//   console.log(engine.transcribeWav("take.wav", null, { task: "translate" }));  // into English
+//   for (const s of engine.segmentsWav("take.wav")) console.log(s.start, s.end, s.text);
 //   engine.close();
 //
 //   const cleaner = new Cleaner();                       // Superwhisper S1-mini
@@ -21,13 +23,16 @@ import koffi from "koffi";
 const NAMES = { win32: "trit_ffi.dll", darwin: "libtrit_ffi.dylib" };
 const name = NAMES[process.platform] ?? "libtrit_ffi.so";
 const here = path.dirname(fileURLToPath(import.meta.url));
+
 const found = [process.env.TRIT_LIB, path.join(here, name), path.join(here, "../../target/release", name)]
   .find((candidate) => candidate && fs.existsSync(candidate));
+
 if (!found) {
   throw new Error(`${name} not found; build it: cargo build --release -p trit-ffi (or set TRIT_LIB=<path>)`);
 }
 
 const lib = koffi.load(found);
+
 const c = {
   version: lib.func("const char *trit_version(void)"),
   lastError: lib.func("const char *trit_last_error(void)"),
@@ -35,8 +40,8 @@ const c = {
   releaseMemory: lib.func("void trit_release_memory(void)"),
   kind: lib.func("const char *trit_kind(void *engine)"),
   free: lib.func("void trit_free(void *engine)"),
-  transcribe: lib.func("void *trit_transcribe_with(void *engine, const float *samples, size_t count, const char *language, int beam)"),
-  transcribeWav: lib.func("void *trit_transcribe_wav(void *engine, const char *path, const char *language)"),
+  transcribe: lib.func("void *trit_transcribe_json(void *engine, const float *samples, size_t count, const char *options)"),
+  transcribeWav: lib.func("void *trit_transcribe_wav_json(void *engine, const char *path, const char *options)"),
   freeText: lib.func("void trit_free_text(void *text)"),
   setDictionary: lib.func("int trit_set_dictionary(void *engine, const char *terms)"),
   cleanerLoad: lib.func("void *trit_cleaner_load_with(const char *model_dir, const char *precision)"),
@@ -48,11 +53,23 @@ export class TritError extends Error {}
 
 function text(pointer) {
   if (!pointer) throw new TritError(c.lastError());
+
   try {
     return koffi.decode(pointer, "char", -1);
   } finally {
     c.freeText(pointer);
   }
+}
+
+/** The options JSON of trit_transcribe_json. */
+function options(language, { beam = 0, task = null, fallback = null } = {}, timestamps = false) {
+  const json = { language, beam, timestamps };
+
+  if (task !== null) json.task = task;
+
+  if (fallback !== null) json.fallback = fallback;
+
+  return JSON.stringify(json);
 }
 
 export const version = () => c.version();
@@ -71,6 +88,7 @@ export class Trit {
    */
   constructor(model = null, { precision = null } = {}) {
     this.#handle = c.load(model, precision);
+
     if (!this.#handle) throw new TritError(c.lastError());
   }
 
@@ -82,23 +100,55 @@ export class Trit {
   /**
    * @param {Float32Array} samples 16 kHz mono, in the range -1 to 1.
    * @param {string | null} language ISO 639-1 code, or null to let the model detect it.
-   * @param {{beam?: number}} options beam: beams for Whisper, Moonshine, and Canary (0: the model's
-   *   default, 5 for Whisper and Moonshine; 1: greedy).
+   * @param {{beam?: number, task?: string, fallback?: boolean}} settings beam: beams for Whisper,
+   *   Moonshine, and Canary (0: the model's default, 5 for Whisper and Moonshine; 1: greedy).
+   *   task: "transcribe" (default), or "translate" into English (multilingual Whisper, Canary).
+   *   fallback: Whisper decodes a window again at higher temperatures when its text repeats
+   *   itself (default true).
+   * @returns {string}
    */
-  transcribe(samples, language = null, { beam = 0 } = {}) {
+  transcribe(samples, language = null, settings = {}) {
+    return this.#samples(samples, options(language, settings)).text;
+  }
+
+  /** @param {string} file a 16 kHz WAV file (16-bit PCM or 32-bit float); the rest as for `transcribe`. */
+  transcribeWav(file, language = null, settings = {}) {
+    return this.#wav(file, options(language, settings)).text;
+  }
+
+  /**
+   * The text in timed segments: sentences or pauses for Parakeet, windows of up to 30 s
+   * (40 s Canary) for the others. Arguments as for `transcribe`.
+   * @returns {{start: number, end: number, text: string}[]} times in seconds from the start.
+   */
+  segments(samples, language = null, settings = {}) {
+    return this.#samples(samples, options(language, settings, true)).segments;
+  }
+
+  /** `segments` for a 16 kHz WAV file. */
+  segmentsWav(file, language = null, settings = {}) {
+    return this.#wav(file, options(language, settings, true)).segments;
+  }
+
+  #samples(samples, json) {
     const floats = samples instanceof Float32Array ? samples : Float32Array.from(samples);
-    return text(c.transcribe(this.#live(), floats, floats.length, language, beam));
+
+    return JSON.parse(text(c.transcribe(this.#live(), floats, floats.length, json)));
   }
 
-  /** @param {string} file a 16 kHz WAV file (16-bit PCM or 32-bit float). */
-  transcribeWav(file, language = null) {
-    return text(c.transcribeWav(this.#live(), file, language));
+  #wav(file, json) {
+    return JSON.parse(text(c.transcribeWav(this.#live(), file, json)));
   }
 
-  /** @param {string[]} terms @returns {number} terms the model cannot spell (Parakeet uses them). */
+  /**
+   * Terms to favor while decoding (Parakeet). An empty list clears them.
+   * @param {string[]} terms @returns {number} terms the model cannot spell.
+   */
   setDictionary(terms) {
     const skipped = c.setDictionary(this.#live(), terms.join("\n"));
+
     if (skipped < 0) throw new TritError(c.lastError());
+
     return skipped;
   }
 
@@ -109,6 +159,7 @@ export class Trit {
 
   #live() {
     if (!this.#handle) throw new TritError("engine is closed");
+
     return this.#handle;
   }
 }
@@ -120,6 +171,7 @@ export class Cleaner {
   /** @param {{precision?: string}} options as for `Trit`. */
   constructor(model = null, { precision = null } = {}) {
     this.#handle = c.cleanerLoad(model, precision);
+
     if (!this.#handle) throw new TritError(c.lastError());
   }
 
@@ -131,6 +183,7 @@ export class Cleaner {
    */
   clean(raw, { styling = null, structure = null, context = null } = {}) {
     if (!this.#handle) throw new TritError("cleaner is closed");
+
     return text(c.clean(this.#handle, raw, styling, structure, context));
   }
 

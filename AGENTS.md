@@ -77,7 +77,7 @@ Do the steps in order. Each step ends on a check.
 There are no unit tests. The checks are:
 
 - **TDT's model:** the ratchet in `desktop/bench/engine-budget.json`: clean
-  81 errors, other 172, tech with developer terms 18. A change must not
+  81 errors, other 172, tech with developer terms 17. A change must not
   raise one of them.
 - **Other families:** the error totals over the 456 clips. After a change,
   rerun the affected engines with `runtimes.py`, then
@@ -91,7 +91,7 @@ There are no unit tests. The checks are:
 
 - `src/lib.rs`: the public API (`Trit`, `Options`, `Cleaner`, `find_model`, `read_wav`). One way to do each thing.
 - `src/models/mod.rs`: `Model` selects the family from `model_type` in `config.json`. Every load and call enters the worker team of its spread (`cpu::enter`: `Spread::OneCache` for short products, `AllCores` for Whisper). Each spread has its own team.
-- `src/models/<family>`: one network each. `transformer.rs` holds the shared pieces (norms, GELU, rotary, attention with grouped heads, conv columns, layer loading). `beam.rs` is beam search for the decoder families. `parakeet/dictionary.rs` is the Parakeet TDT dictionary: terms replace close spellings when the joint network's score allows. `parakeet/bias.rs` is the logit dictionary of Canary and Moonshine. `parakeet/english.rs` is the English word prior for drifted windows.
+- `src/models/<family>`: one network each. `transformer.rs` holds the shared pieces (norms, GELU, rotary, attention with grouped heads, conv columns, layer loading). `beam.rs` is beam search for the decoder families. `parakeet/dictionary.rs` is the Parakeet TDT dictionary: terms replace close spellings when the joint network's score allows. `parakeet/bias.rs` is the logit dictionary of Canary and Moonshine.
 - Precision: `Tensors::open_with(path, precision)` carries the `Precision` of `LoadOptions`; `Dense::load` and `Dense::table` (token tables) read it. Load every dense layer through them, so all four precisions work.
 - `src/cpu/`: kernels. `fgemm.rs` is the one f32 GEMM; its weights are f32 or f16 (`Weight`). `kernels.rs` is ternary (Redux), `int8.rs` int8 (VNNI 512, VNNI 256, AVX2). Each has AVX-512, AVX2, and scalar paths; `TRIT_ISA=scalar|avx2|avxvnni` forces a path. All paths must give the same text. Worker threads allocate nothing per task (thread-local scratch, `Buf` pool on the caller): allocator heaps of workers keep what they free.
 - `src/audio/`, `src/text/`: frontends and tokenizers. `bpe.rs` encodes with hand-written pre-tokenizers (GPT-2 and Qwen); it matches Hugging Face `tokenizers` ids.
@@ -111,6 +111,6 @@ There are no unit tests. The checks are:
 - `skill/SKILL.md` comes from `trit skill`. Change the text in `src/main.rs` (`HOME_HELP`, `TRANSCRIBE_HELP`, `CLEAN_HELP`, `skill_text`) and `src/catalog.rs`, then run `trit skill > skill/SKILL.md`. CI fails when it is stale.
 - The desktop app depends on this crate by path (`desktop/Cargo.toml`) and passes `Options::language("en")`. A public API change must build there too: `cargo build --manifest-path ../desktop/Cargo.toml`.
 - Read the model files as published. Converting at load (F32 or BF16 to f16) is the only change allowed; the files on disk stay as Hugging Face ships them.
-- `src/text/english-words.txt` and `foreign-pieces.txt` come from `scripts/english_lists.py` (SCOWL size 70 and wordfreq). Do not edit them by hand.
+- `src/text/foreign-pieces.txt` comes from `scripts/foreign_pieces.py` (wordfreq). Do not edit it by hand.
 - S1-mini's system prompt and control line are its trained input format (`src/cleanup.rs`). Keep them word for word.
 - On this Windows computer, a debug build of `libmimalloc-sys` can fail with MSVC error D8050. Use `--release` for clippy.

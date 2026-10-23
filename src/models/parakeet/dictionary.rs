@@ -8,7 +8,6 @@
 //! not sound like the term keeps its own words, however close the spelling.
 
 use crate::models::parakeet::bias::BiasWeights;
-use crate::models::parakeet::english;
 use crate::text::sentencepiece::{Tokenizer, WORD_START};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -53,9 +52,6 @@ struct Term {
     key: Vec<char>,
     /// The words as the user wrote them.
     words: Vec<String>,
-    /// Every word is an English word too ("Sentry", "Vault"): the sound
-    /// cannot tell it from other English words ("century", "fault").
-    common: bool,
 }
 
 /// Words heard that a term may replace.
@@ -117,9 +113,6 @@ impl Dictionary {
                         tokens,
                         key: key(term),
                         words: term.split_whitespace().map(str::to_string).collect(),
-                        common: term.split_whitespace().all(|word| {
-                            english::is_word(&key(word).into_iter().collect::<String>())
-                        }),
                     };
                     match seen.get(&entry.key) {
                         Some(&at) => entries[at] = entry,
@@ -152,21 +145,21 @@ impl Dictionary {
         let mut out = Vec::new();
         for first in 0..words.len() {
             let mut heard: Vec<char> = Vec::new();
-            // Every word heard so far is an English word.
-            let mut english_words = true;
             for last in first..words.len().min(first + MAX_SPAN_WORDS) {
                 if last > first && !words[last - 1].joined {
                     break;
                 }
-                let word: Vec<char> = words[last]
-                    .tokens
-                    .clone()
-                    .flat_map(|i| self.keys[tokens[i]].clone())
-                    .collect();
-                english_words &= english::is_word(&word.iter().collect::<String>());
-                heard.extend(word);
+                heard.extend(
+                    words[last]
+                        .tokens
+                        .clone()
+                        .flat_map(|i| self.keys[tokens[i]].clone()),
+                );
                 let span = words[first].tokens.start..words[last].tokens.end;
                 let count = last - first + 1;
+                // Words that spell one term are not another term: "rust"
+                // is "Rust", not "REST".
+                let spelled = self.terms.iter().any(|term| heard == term.key);
                 for (index, term) in self.terms.iter().enumerate() {
                     // "trip run time" may be "Trit Runtime"; "data dog" "Datadog".
                     if count + 1 < term.words.len() || count > term.words.len() + 2 {
@@ -188,14 +181,15 @@ impl Dictionary {
                     } else {
                         // A word heard wrong still starts with the sound of
                         // the term: "Dino" for "Deno", "Cotlin" for "Kotlin".
-                        if term.key.len() < MIN_FUZZY_LETTERS || swap(heard[0], term.key[0]) >= 1.0
+                        if spelled
+                            || term.key.len() < MIN_FUZZY_LETTERS
+                            || swap(heard[0], term.key[0]) >= 1.0
                         {
                             continue;
                         }
                         // The term with an ending is another word: "notions"
-                        // is not "Notion". An English word is not a term that
-                        // is an English word too: "century" is not "Sentry".
-                        if english_words && (term.common || heard.starts_with(&term.key)) {
+                        // is not "Notion".
+                        if inflected(&heard, &term.key) {
                             continue;
                         }
                         // About as long as the term: "to" is never "Tokio".
@@ -336,7 +330,20 @@ impl Dictionary {
 
 /// Lowercase letters and digits of `text`.
 fn key(text: &str) -> Vec<char> {
-    english::key(text).chars().collect()
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// `heard` is `term` with an English ending: "notions" for "Notion". A
+/// doubled last "s" is a misspelling, not a plural: "postgress".
+fn inflected(heard: &[char], term: &[char]) -> bool {
+    match heard.strip_prefix(term) {
+        Some(['s']) => term.last() != Some(&'s'),
+        Some(['e', 's'] | ['e', 'd'] | ['i', 'n', 'g'] | ['e', 'r'] | ['e', 'r', 's']) => true,
+        _ => false,
+    }
 }
 
 /// Edit distance where letters that sound alike cost half: vowels for each

@@ -5,6 +5,9 @@
     print(engine.kind)                              # "whisper"
     print(engine.transcribe_wav("take.wav"))        # the model detects the language
     print(engine.transcribe(samples, language="de"))  # 16 kHz mono floats: list, array, or numpy
+    print(engine.transcribe_wav("take.wav", task="translate"))  # into English
+    for s in engine.segments_wav("take.wav"):       # timed sentences
+        print(f"{s.start:.2f}-{s.end:.2f} {s.text}")
 
     cleaner = trit.Cleaner()                        # Superwhisper S1-mini
     print(cleaner.clean("so um send it friday no wait thursday"))
@@ -16,12 +19,18 @@ Build it with `cargo build --release -p trit-ffi` in the trit folder.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import sys
 from array import array
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-__all__ = ["Trit", "Cleaner", "TritError", "version"]
+if TYPE_CHECKING:
+    from typing import Self
+
+__all__ = ["Cleaner", "Segment", "Trit", "TritError", "release_memory", "version"]
 
 _NAMES = {"win32": "trit_ffi.dll", "darwin": "libtrit_ffi.dylib"}
 
@@ -49,8 +58,8 @@ def _library() -> ctypes.CDLL:
         "trit_release_memory": ([], None),
         "trit_kind": ([ptr], text),
         "trit_free": ([ptr], None),
-        "trit_transcribe_with": ([ptr, floats, size, text, ctypes.c_int], ptr),
-        "trit_transcribe_wav": ([ptr, text, text], ptr),
+        "trit_transcribe_json": ([ptr, floats, size, text], ptr),
+        "trit_transcribe_wav_json": ([ptr, text, text], ptr),
         "trit_free_text": ([ptr], None),
         "trit_set_dictionary": ([ptr, text], ctypes.c_int),
         "trit_cleaner_load_with": ([text, text], ptr),
@@ -93,6 +102,36 @@ def _arg(value: str | os.PathLike | None) -> bytes | None:
     return None if value is None else os.fsencode(value)
 
 
+@dataclass(frozen=True)
+class Segment:
+    """A stretch of the recording and its text; times in seconds from the start."""
+
+    start: float
+    end: float
+    text: str
+
+
+def _options(language, beam, task, fallback, timestamps) -> bytes:
+    options = {"language": language, "beam": beam, "timestamps": timestamps}
+    if task is not None:
+        options["task"] = task
+    if fallback is not None:
+        options["fallback"] = fallback
+    return json.dumps(options).encode()
+
+
+def _samples(samples):
+    """A float pointer and a count for `samples`, and the buffer that holds them."""
+    if hasattr(samples, "__array_interface__"):  # numpy, without importing it
+        import numpy as np
+
+        buffer = np.ascontiguousarray(samples, dtype=np.float32).ravel()
+        return buffer.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), buffer.size, buffer
+    buffer = samples if isinstance(samples, array) and samples.typecode == "f" else array("f", samples)
+    address, count = buffer.buffer_info()
+    return ctypes.cast(address, ctypes.POINTER(ctypes.c_float)), count, buffer
+
+
 class Trit:
     """One loaded speech model. Load once and keep it."""
 
@@ -109,32 +148,55 @@ class Trit:
     @property
     def kind(self) -> str:
         """"parakeet_tdt", "parakeet_ctc", "canary", "whisper", or "moonshine"."""
-        return _lib.trit_kind(self._handle).decode()
+        return _lib.trit_kind(self._live()).decode()
 
-    def transcribe(self, samples, language: str | None = None, beam: int = 0) -> str:
+    def transcribe(self, samples, language: str | None = None, beam: int = 0,
+                   task: str | None = None, fallback: bool | None = None) -> str:
         """16 kHz mono samples in -1..1: list, array('f'), or numpy array.
         `language`: ISO 639-1 code, or None to let the model detect it.
         `beam`: beams for Whisper, Moonshine, and Canary (0: the model's
-        default, 5 for Whisper and Moonshine; 1: greedy)."""
-        lang = _arg(language)
-        if hasattr(samples, "__array_interface__"):  # numpy, without importing it
-            import numpy as np
+        default, 5 for Whisper and Moonshine; 1: greedy).
+        `task`: "transcribe" (None), or "translate" into English
+        (multilingual Whisper, Canary).
+        `fallback`: Whisper decodes a window again at higher temperatures
+        when its text repeats itself (None: on)."""
+        return self._samples(samples, _options(language, beam, task, fallback, False))["text"]
 
-            buffer = np.ascontiguousarray(samples, dtype=np.float32)
-            pointer = buffer.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-            return _text(_lib.trit_transcribe_with(self._handle, pointer, buffer.size, lang, beam))
-        buffer = samples if isinstance(samples, array) and samples.typecode == "f" else array("f", samples)
-        address, count = buffer.buffer_info()
-        pointer = ctypes.cast(address, ctypes.POINTER(ctypes.c_float))
-        return _text(_lib.trit_transcribe_with(self._handle, pointer, count, lang, beam))
+    def transcribe_wav(self, path: str | os.PathLike, language: str | None = None, beam: int = 0,
+                       task: str | None = None, fallback: bool | None = None) -> str:
+        """A 16 kHz WAV file (16-bit PCM or 32-bit float); options as for `transcribe`."""
+        return self._wav(path, _options(language, beam, task, fallback, False))["text"]
 
-    def transcribe_wav(self, path: str | os.PathLike, language: str | None = None) -> str:
-        """A 16 kHz WAV file (16-bit PCM or 32-bit float)."""
-        return _text(_lib.trit_transcribe_wav(self._handle, os.fsencode(path), _arg(language)))
+    def segments(self, samples, language: str | None = None, beam: int = 0,
+                 task: str | None = None, fallback: bool | None = None) -> list[Segment]:
+        """The text in timed segments: sentences or pauses for Parakeet,
+        windows of up to 30 s (40 s Canary) for the others. Options as for
+        `transcribe`."""
+        result = self._samples(samples, _options(language, beam, task, fallback, True))
+        return [Segment(**s) for s in result["segments"]]
+
+    def segments_wav(self, path: str | os.PathLike, language: str | None = None, beam: int = 0,
+                     task: str | None = None, fallback: bool | None = None) -> list[Segment]:
+        """`segments` for a 16 kHz WAV file."""
+        result = self._wav(path, _options(language, beam, task, fallback, True))
+        return [Segment(**s) for s in result["segments"]]
+
+    def _samples(self, samples, options: bytes) -> dict:
+        pointer, count, _buffer = _samples(samples)
+        return json.loads(_text(_lib.trit_transcribe_json(self._live(), pointer, count, options)))
+
+    def _wav(self, path: str | os.PathLike, options: bytes) -> dict:
+        return json.loads(_text(_lib.trit_transcribe_wav_json(self._live(), os.fsencode(path), options)))
+
+    def _live(self):
+        if not self._handle:
+            raise TritError("engine is closed")
+        return self._handle
 
     def set_dictionary(self, terms: list[str]) -> int:
-        """Terms to favor while decoding (Parakeet). Returns how many it cannot spell."""
-        skipped = _lib.trit_set_dictionary(self._handle, "\n".join(terms).encode())
+        """Terms to favor while decoding (Parakeet). Returns how many it cannot spell.
+        An empty list clears them."""
+        skipped = _lib.trit_set_dictionary(self._live(), "\n".join(terms).encode())
         if skipped < 0:
             raise _error()
         return skipped
@@ -144,7 +206,7 @@ class Trit:
             _lib.trit_free(self._handle)
             self._handle = None
 
-    def __enter__(self) -> "Trit":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_) -> None:
@@ -169,6 +231,8 @@ class Cleaner:
               context: str | None = None) -> str:
         """styling: casual, semi-casual, semi-formal (default), formal;
         structure: prose (default), lists; context: general (default), email."""
+        if not self._handle:
+            raise TritError("cleaner is closed")
         return _text(_lib.trit_clean(self._handle, text.encode(), _arg(styling), _arg(structure), _arg(context)))
 
     def close(self) -> None:
@@ -176,7 +240,7 @@ class Cleaner:
             _lib.trit_cleaner_free(self._handle)
             self._handle = None
 
-    def __enter__(self) -> "Cleaner":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_) -> None:

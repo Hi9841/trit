@@ -81,7 +81,26 @@ char *trit_transcribe_with(const Trit *engine, const float *samples, size_t coun
  * Free with trit_free_text(). */
 char *trit_transcribe_wav(const Trit *engine, const char *path, const char *language);
 
-/* Frees text from trit_transcribe, trit_transcribe_wav, or trit_clean.
+/* trit_transcribe with options, and the result as JSON:
+ *   {"text": "...", "segments": [{"start": 0.0, "end": 1.8, "text": "..."}]}
+ * `options`: NULL or a JSON object; every key is optional:
+ *   "language":   ISO 639-1 code, as for trit_transcribe
+ *   "task":       "transcribe" (default), or "translate" into English
+ *                 (multilingual Whisper, Canary)
+ *   "beam":       as for trit_transcribe_with
+ *   "fallback":   Whisper decodes a window again at higher temperatures
+ *                 when its text repeats itself (default true)
+ *   "timestamps": fill "segments" (default false): sentences or pauses for
+ *                 Parakeet, windows of up to 30 s (40 s Canary) for others
+ * An unknown key or value fails. Example: "{\"language\": \"en\", \"timestamps\": true}".
+ * Returns the JSON, or NULL on failure. Free with trit_free_text(). */
+char *trit_transcribe_json(const Trit *engine, const float *samples, size_t count,
+                           const char *options);
+
+/* trit_transcribe_json for a 16 kHz WAV file, as for trit_transcribe_wav. */
+char *trit_transcribe_wav_json(const Trit *engine, const char *path, const char *options);
+
+/* Frees text from the trit_transcribe and trit_clean functions.
  * NULL is a no-op. */
 void trit_free_text(char *text);
 

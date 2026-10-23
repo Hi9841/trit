@@ -18,7 +18,12 @@ import numpy as np
 import psutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "trit" / "bindings" / "python"))
-import trit  # noqa: E402
+import trit
+
+
+def read(path: str) -> np.ndarray:
+    with wave.open(path) as clip:
+        return np.frombuffer(clip.readframes(clip.getnframes()), dtype=np.int16).astype(np.float32) / 32768
 
 
 def main() -> None:
@@ -33,7 +38,7 @@ def main() -> None:
     engine = trit.Trit(model, precision=precision)
     load = mb()
     files = sorted(glob.glob(folder + "/*.wav"))[:count]
-    clips = [np.frombuffer(wave.open(f).readframes(10**8), dtype=np.int16).astype(np.float32) / 32768 for f in files]
+    clips = [read(f) for f in files]
     engine.transcribe(clips[0], language="en")
     times = []
     for samples in clips:

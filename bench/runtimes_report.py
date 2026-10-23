@@ -113,7 +113,7 @@ def summary(results: list[dict], cleanup: list[dict]) -> str:
                 best[r["runtime"]] = r
         others = sorted(best.values(), key=total)
         lowest = min([total(trit)] + [total(r) for r in others])
-        mark = lambda n: f"**{n}**" if n == lowest else str(n)
+        mark = lambda n, lowest=lowest: f"**{n}**" if n == lowest else str(n)
         fastest = min((r for r in rows if r["runtime"] != "Trit"), key=clean_ms)
         out.append(f"| {trit['model_name']} | {mark(total(trit))} | "
                    + ", ".join(f"{r['runtime'].replace(' (PyTorch)', '')} {mark(total(r))}" for r in others)
@@ -122,7 +122,7 @@ def summary(results: list[dict], cleanup: list[dict]) -> str:
     if trit:
         others = [r for r in cleanup if r["runtime"] != "Trit"]
         lowest = min([trit["errors"]] + [r["errors"] for r in others])
-        mark = lambda n: f"**{n}**" if n == lowest else str(n)
+        mark = lambda n, lowest=lowest: f"**{n}**" if n == lowest else str(n)
         fastest = min(others, key=lambda r: r["median_ms"])
         out.append(f"| S1-mini (formatted words, {trit['cases']} cases) | {mark(trit['errors'])} | "
                    + ", ".join(f"{r['runtime'].replace(' (PyTorch)', '')} {r['precision']} {mark(r['errors'])}" for r in others)

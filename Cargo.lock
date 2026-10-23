@@ -246,6 +246,7 @@ name = "trit-ffi"
 version = "0.1.0"
 dependencies = [
  "mimalloc",
+ "serde_json",
  "trit",
 ]
 

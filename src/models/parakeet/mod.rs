@@ -4,7 +4,6 @@
 
 pub mod bias;
 mod dictionary;
-mod english;
 pub(crate) mod model;
 
 use crate::audio::mel::MelFrontend;
@@ -27,8 +26,6 @@ pub struct Parakeet {
     /// `non_english` without the pieces of the dictionary terms: a name
     /// such as "Hetzner" must stay possible.
     blocked: RwLock<Vec<usize>>,
-    /// The English word prior, for callers that ask for English.
-    english: english::English,
 }
 
 /// One minute: 750 encoder frames, a few MB of attention per head.
@@ -53,7 +50,6 @@ impl Parakeet {
             dictionary: RwLock::new(None),
             model,
             frontend,
-            english: english::English::new(&tokenizer),
             blocked: RwLock::new(tokenizer.non_english()),
             non_english: tokenizer.non_english(),
             tokenizer,
@@ -69,7 +65,6 @@ impl Parakeet {
     }
 
     pub fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
-        self.english.set_terms(terms);
         let (terms, skipped) = dictionary::Dictionary::build(&self.tokenizer, terms, weights);
         let used = terms.as_ref().map(|d| d.pieces()).unwrap_or_default();
         *self.blocked.write() = self
@@ -148,12 +143,8 @@ impl Parakeet {
         // Parakeet cannot be told a language; it can only be kept to English.
         let english = options.language.as_deref() == Some("en");
         let blocked = self.blocked.read();
-        let (blocked, english): (&[usize], _) = match english {
-            true => (&blocked, Some(&self.english)),
-            false => (&[], None),
-        };
+        let blocked: &[usize] = if english { &blocked } else { &[] };
         let dictionary = self.dictionary.read();
-        self.model
-            .decode(&encoded, t, dictionary.as_ref(), english, blocked)
+        self.model.decode(&encoded, t, dictionary.as_ref(), blocked)
     }
 }

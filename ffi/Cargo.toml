@@ -13,3 +13,4 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 trit = { path = ".." }
 mimalloc = { version = "0.1", default-features = false }
+serde_json = "1.0"
