@@ -67,6 +67,7 @@ examples:
 |---|---|---|---:|
 | parakeet-redux | parakeet_tdt | 25 European | 178 |
 | parakeet-tdt-0.6b-v3 | parakeet_tdt | 25 European | 2508 |
+| parakeet-rnnt-0.6b | parakeet_rnnt | en | 2467 |
 | parakeet-ctc-0.6b | parakeet_ctc | en | 2436 |
 | canary-1b-v2 | canary | 25 European | 3916 |
 | whisper-tiny | whisper | 99 | 151 |
@@ -77,9 +78,11 @@ examples:
 | distil-large-v3.5 | whisper | en | 3026 |
 | moonshine-tiny | moonshine | en | 108 |
 | moonshine-base | moonshine | en | 246 |
+| qwen3-asr-0.6b | qwen3_asr | 30 | 1876 |
+| wav2vec2-base-960h | wav2vec2 | en | 378 |
 | s1-mini | cleanup | en | 1503 |
 
-Example: `hf download moondream/parakeet-redux --include "*.json" model.safetensors --local-dir models/parakeet-redux`. The default model is parakeet-redux; `TRIT_MODEL=<dir>` sets another.
+Example: `hf download moondream/parakeet-redux config.json tokenizer.json model.safetensors --local-dir models/parakeet-redux`. The default model is parakeet-redux; `TRIT_MODEL=<dir>` sets another.
 
 ## Use it from code
 

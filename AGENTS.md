@@ -90,8 +90,9 @@ There are no unit tests. The checks are:
 ### Architecture
 
 - `src/lib.rs`: the public API (`Trit`, `Options`, `Cleaner`, `find_model`, `read_wav`). One way to do each thing.
-- `src/models/mod.rs`: `Model` selects the family from `model_type` in `config.json`. Every load and call enters the worker team of its spread (`cpu::enter`: `Spread::OneCache` for short products, `AllCores` for Whisper). Each spread has its own team.
-- `src/models/<family>`: one network each. `transformer.rs` holds the shared pieces (norms, GELU, rotary, attention with grouped heads, conv columns, layer loading). `beam.rs` is beam search for the decoder families. `parakeet/dictionary.rs` is the Parakeet TDT dictionary: terms replace close spellings when the joint network's score allows. `parakeet/bias.rs` is the logit dictionary of Canary and Moonshine.
+- `src/models/mod.rs`: `FAMILIES` has one row per `model_type`: its loader and its worker spread (`Spread::OneCache` for short products, `AllCores` for Whisper). `MODEL_TYPES` comes from it. Every family implements `Family`. Every load and call enters the team of its spread; each spread has its own team.
+- `src/models/parts/`: building blocks that the config picks, shared across families. `fastconformer.rs` is the encoder of Parakeet and Canary; `transducer.rs` the TDT and RNNT head; `ctc.rs`, `beam.rs`, `qwen3.rs` (the language model of Qwen3-ASR and S1-mini). `dictionary.rs` is the TDT dictionary: terms replace close spellings when the joint network's score allows. `logit_bias.rs` is the logit dictionary of Canary and Moonshine.
+- `src/models/families/`: one file per checkpoint family; it reads the files and wires the parts. `layers.rs` holds the shared layers (norms, GELU, rotary, attention with grouped heads, conv columns); `config.rs` reads `config.json`.
 - Precision: `Tensors::open_with(path, precision)` carries the `Precision` of `LoadOptions`; `Dense::load` and `Dense::table` (token tables) read it. Load every dense layer through them, so all four precisions work.
 - `src/cpu/`: kernels. `fgemm.rs` is the one f32 GEMM; its weights are f32 or f16 (`Weight`). `kernels.rs` is ternary (Redux), `int8.rs` int8 (VNNI 512, VNNI 256, AVX2). Each has AVX-512, AVX2, and scalar paths; `TRIT_ISA=scalar|avx2|avxvnni` forces a path. All paths must give the same text. Worker threads allocate nothing per task (thread-local scratch, `Buf` pool on the caller): allocator heaps of workers keep what they free.
 - `src/audio/`, `src/text/`: frontends and tokenizers. `bpe.rs` encodes with hand-written pre-tokenizers (GPT-2 and Qwen); it matches Hugging Face `tokenizers` ids.
@@ -101,8 +102,8 @@ There are no unit tests. The checks are:
 ### Add a model family
 
 1. Read the reference implementation (Transformers `modeling_<family>.py`) and the tensor names (`model.safetensors` header). Note every norm epsilon, activation form, rotary layout, and scale.
-2. Write `src/models/<family>.rs` with `load(dir, config, precision)` and `pieces(samples, options)` (text per window), from `transformer.rs` pieces, `Dense::load` layers, and `Dense::table` token tables.
-3. Register it in `src/models/mod.rs` (`MODEL_TYPES`, `Model`, `spread`).
+2. Reuse the parts in `src/models/parts/` that the config names (a FastConformer checkpoint needs only a new head or none). Put what is new in `parts/` when another family can share it, else in `src/models/families/<family>.rs`, from `layers.rs`, `Dense::load` layers, and `Dense::table` token tables.
+3. Add one row to `FAMILIES` in `src/models/mod.rs` and implement `Family` for the new type.
 4. Add the checkpoints you ran to `src/catalog.rs`, then run `trit skill > skill/SKILL.md` and update the README tables.
 5. Check: the same text as the reference runtime on a few clips of `desktop/target/accuracy/tts16`.
 

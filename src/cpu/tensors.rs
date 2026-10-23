@@ -1,6 +1,7 @@
-//! Reads a `.safetensors` file: a little-endian u64 header length, a JSON
+//! Reads `.safetensors` files: a little-endian u64 header length, a JSON
 //! header with dtype, shape, and byte range per tensor, then the raw data.
-//! Tensors are read from the file one at a time. Reading the whole 178 MB
+//! A large model comes in shards that `model.safetensors.index.json` lists.
+//! Tensors are read from the files one at a time. Reading the whole 178 MB
 //! file into one buffer kept that memory in the process after load.
 
 use super::gemm::Precision;
@@ -8,42 +9,73 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
+/// The weight file of a model folder, or the index of its shards.
+pub const WEIGHTS: &str = "model.safetensors";
+pub const SHARD_INDEX: &str = "model.safetensors.index.json";
+
 pub struct Tensors {
-    source: Source,
-    data_start: usize,
+    files: Vec<File>,
     entries: HashMap<String, Entry>,
     precision: Precision,
 }
 
-enum Source {
-    File(File),
-}
-
 struct Entry {
     dtype: String,
+    /// Index into `files`.
+    file: usize,
+    /// Byte range in the file.
     start: usize,
     end: usize,
 }
 
 impl Tensors {
-    /// Opens a file whose dense layers `Dense::load` stores as `precision` says.
-    pub fn open_with(path: &Path, precision: Precision) -> Result<Self, String> {
-        let error = |e: std::io::Error| format!("Could not read {}: {e}", path.display());
-        let file = File::open(path).map_err(error)?;
-        let total = file.metadata().map_err(error)?.len() as usize;
-        let mut length = [0u8; 8];
-        read_at(&file, &mut length, 0).map_err(error)?;
-        let header_len = u64::from_le_bytes(length) as usize;
-        let data_start = 8usize
-            .checked_add(header_len)
-            .filter(|end| *end <= total)
-            .ok_or("safetensors header runs past the end of the file")?;
-        let mut header = vec![0u8; header_len];
-        read_at(&file, &mut header, 8).map_err(error)?;
-        let entries = parse_header(&header, data_start, total)?;
+    /// Opens the weights of a model folder (`WEIGHTS`, or the shards that
+    /// `SHARD_INDEX` lists); `Dense::load` stores its dense layers as
+    /// `precision` says.
+    pub fn open_dir(dir: &Path, precision: Precision) -> Result<Self, String> {
+        let single = dir.join(WEIGHTS);
+        if single.is_file() {
+            return Self::open_files(&[single.as_path()], precision);
+        }
+        let index = dir.join(SHARD_INDEX);
+        let text = std::fs::read_to_string(&index)
+            .map_err(|e| format!("Could not read {}: {e}", single.display()))?;
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("{} is not JSON: {e}", index.display()))?;
+        let mut shards: Vec<&str> = json["weight_map"]
+            .as_object()
+            .ok_or_else(|| format!("{} has no weight_map", index.display()))?
+            .values()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
+        shards.sort_unstable();
+        shards.dedup();
+        let paths: Vec<_> = shards.iter().map(|shard| dir.join(shard)).collect();
+        let paths: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
+        Self::open_files(&paths, precision)
+    }
+
+    fn open_files(paths: &[&Path], precision: Precision) -> Result<Self, String> {
+        let mut files = Vec::with_capacity(paths.len());
+        let mut entries = HashMap::new();
+        for path in paths {
+            let error = |e: std::io::Error| format!("Could not read {}: {e}", path.display());
+            let file = File::open(path).map_err(error)?;
+            let total = file.metadata().map_err(error)?.len() as usize;
+            let mut length = [0u8; 8];
+            read_at(&file, &mut length, 0).map_err(error)?;
+            let header_len = u64::from_le_bytes(length) as usize;
+            let data_start = 8usize
+                .checked_add(header_len)
+                .filter(|end| *end <= total)
+                .ok_or("safetensors header runs past the end of the file")?;
+            let mut header = vec![0u8; header_len];
+            read_at(&file, &mut header, 8).map_err(error)?;
+            parse_header(&header, (files.len(), data_start, total), &mut entries)?;
+            files.push(file);
+        }
         Ok(Self {
-            source: Source::File(file),
-            data_start,
+            files,
             entries,
             precision,
         })
@@ -65,23 +97,18 @@ impl Tensors {
     }
 
     fn raw(&self, name: &str, entry: &Entry) -> Result<Vec<u8>, String> {
-        let (start, end) = (self.data_start + entry.start, self.data_start + entry.end);
-        match &self.source {
-            Source::File(file) => {
-                let mut bytes = vec![0u8; end - start];
-                read_at(file, &mut bytes, start as u64)
-                    .map_err(|e| format!("Could not read tensor {name}: {e}"))?;
-                Ok(bytes)
-            }
-        }
+        let mut bytes = vec![0u8; entry.end - entry.start];
+        read_at(&self.files[entry.file], &mut bytes, entry.start as u64)
+            .map_err(|e| format!("Could not read tensor {name}: {e}"))?;
+        Ok(bytes)
     }
 
     /// Calls `each` with the tensor's bytes, 1 MB at a time, so a large
     /// tensor never exists twice in memory (raw and converted).
     fn chunks(&self, name: &str, entry: &Entry, mut each: impl FnMut(&[u8])) -> Result<(), String> {
         const CHUNK: usize = 1 << 20;
-        let (start, end) = (self.data_start + entry.start, self.data_start + entry.end);
-        let Source::File(file) = &self.source;
+        let (start, end) = (entry.start, entry.end);
+        let file = &self.files[entry.file];
         let mut buffer = vec![0u8; CHUNK.min(end - start)];
         let mut at = start;
         while at < end {
@@ -192,15 +219,15 @@ impl Tensors {
     }
 }
 
-/// Name to dtype and byte range, checked against the file length.
+/// Adds each tensor of one file's header: its dtype and byte range in the
+/// file, checked against the file length.
 fn parse_header(
     header: &[u8],
-    data_start: usize,
-    total: usize,
-) -> Result<HashMap<String, Entry>, String> {
+    (file, data_start, total): (usize, usize, usize),
+    entries: &mut HashMap<String, Entry>,
+) -> Result<(), String> {
     let header: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(header)
         .map_err(|e| format!("safetensors header is not JSON: {e}"))?;
-    let mut entries = HashMap::new();
     for (name, value) in header {
         if name == "__metadata__" {
             continue;
@@ -221,9 +248,18 @@ fn parse_header(
         if start > end || data_start + end > total {
             return Err(format!("tensor {name} points outside the file"));
         }
-        entries.insert(name, Entry { dtype, start, end });
+        let (start, end) = (data_start + start, data_start + end);
+        entries.insert(
+            name,
+            Entry {
+                dtype,
+                file,
+                start,
+                end,
+            },
+        );
     }
-    Ok(entries)
+    Ok(())
 }
 
 /// Positional read of the whole buffer; safe to call from several threads.

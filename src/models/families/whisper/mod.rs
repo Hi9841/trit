@@ -9,7 +9,8 @@ use crate::audio::{
     whisper_mel::{WhisperMel, WINDOW_SAMPLES},
 };
 use crate::cpu::{buf::Buf, tensors::Tensors};
-use crate::models::transformer::argmax;
+use crate::models::config::Json;
+use crate::models::layers::argmax;
 use crate::text::bpe::Bpe;
 use crate::{Options, Precision, Task};
 use parking_lot::RwLock;
@@ -49,10 +50,10 @@ struct Tokens {
 }
 
 impl Whisper {
-    pub fn load(dir: &Path, config: &str, precision: Precision) -> Result<Self, String> {
+    pub fn load(dir: &Path, config: &Json, precision: Precision) -> Result<Self, String> {
         let config = model::Config::parse(config)?;
         let mel = WhisperMel::new(config.mels);
-        let tensors = Tensors::open_with(&dir.join("model.safetensors"), precision)?;
+        let tensors = Tensors::open_dir(dir, precision)?;
         let model = model::Whisper::load(&tensors, config)?;
         drop(tensors);
         let bpe = Bpe::open(&dir.join("tokenizer.json"))?;
@@ -196,7 +197,7 @@ impl Whisper {
         let t = &self.tokens;
         let limit = self.model.config.max_tokens;
         if beam > 1 && temperature == 0.0 {
-            let best = crate::models::beam::search(
+            let best = crate::models::parts::beam::search(
                 (beam, BEAM_RULES),
                 (session.clone(), logits),
                 (limit.saturating_sub(session.position), t.eos),
@@ -334,7 +335,8 @@ impl Decoded {
 const BEAMS: usize = 5;
 /// Whose beam search rules to follow: Transformers' gave 768 and 479 errors
 /// (tiny, base.en), OpenAI's 782 and 472; Transformers' runtime made 772 and 479.
-const BEAM_RULES: crate::models::beam::Rules = crate::models::beam::Rules::Transformers;
+const BEAM_RULES: crate::models::parts::beam::Rules =
+    crate::models::parts::beam::Rules::Transformers;
 
 /// The temperatures OpenAI Whisper, faster-whisper, and whisper.cpp try.
 const TEMPERATURES: [f32; 6] = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];

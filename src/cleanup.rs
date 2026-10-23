@@ -5,7 +5,7 @@
 //! (see its model card): a fixed system prompt, a control line, then the
 //! raw transcript.
 
-use crate::models::qwen3::{Prefix, Qwen3};
+use crate::models::parts::qwen3::{Prefix, Qwen3};
 use crate::text::bpe::Bpe;
 use std::path::Path;
 

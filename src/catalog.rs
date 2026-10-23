@@ -32,6 +32,13 @@ pub const CATALOG: &[Known] = &[
         mb: 2508,
     },
     Known {
+        name: "parakeet-rnnt-0.6b",
+        repo: "nvidia/parakeet-rnnt-0.6b",
+        kind: "parakeet_rnnt",
+        languages: "en",
+        mb: 2467,
+    },
+    Known {
         name: "parakeet-ctc-0.6b",
         repo: "nvidia/parakeet-ctc-0.6b",
         kind: "parakeet_ctc",
@@ -102,6 +109,20 @@ pub const CATALOG: &[Known] = &[
         mb: 246,
     },
     Known {
+        name: "qwen3-asr-0.6b",
+        repo: "Qwen/Qwen3-ASR-0.6B",
+        kind: "qwen3_asr",
+        languages: "30",
+        mb: 1876,
+    },
+    Known {
+        name: "wav2vec2-base-960h",
+        repo: "facebook/wav2vec2-base-960h",
+        kind: "wav2vec2",
+        languages: "en",
+        mb: 378,
+    },
+    Known {
         name: "s1-mini",
         repo: "superwhisper/s1-mini",
         kind: "cleanup",
@@ -111,11 +132,42 @@ pub const CATALOG: &[Known] = &[
 ];
 
 impl Known {
-    /// The command that downloads only the files Trit reads.
+    /// The files Trit reads from a folder of this kind.
+    pub fn files(&self) -> &'static [&'static str] {
+        match self.kind {
+            "whisper" => &[
+                "config.json",
+                "generation_config.json",
+                "tokenizer.json",
+                "model.safetensors",
+            ],
+            "wav2vec2" => &[
+                "config.json",
+                "preprocessor_config.json",
+                "tokenizer_config.json",
+                "vocab.json",
+                "model.safetensors",
+            ],
+            "qwen3_asr" => &[
+                "config.json",
+                "tokenizer_config.json",
+                "vocab.json",
+                "merges.txt",
+                "model.safetensors",
+            ],
+            _ => &["config.json", "tokenizer.json", "model.safetensors"],
+        }
+    }
+
+    /// The command that downloads only the files Trit reads. The files are
+    /// named one by one: on Windows `hf` expands a quoted `*.json` against
+    /// the current folder, so an `--include` glob is not reliable.
     pub fn download_command(&self) -> String {
         format!(
-            "hf download {} --include \"*.json\" model.safetensors --local-dir models/{}",
-            self.repo, self.name
+            "hf download {} {} --local-dir models/{}",
+            self.repo,
+            self.files().join(" "),
+            self.name
         )
     }
 }

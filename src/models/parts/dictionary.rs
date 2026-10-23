@@ -8,7 +8,7 @@
 //! Speech that does not sound like the term keeps its own words, however
 //! close the spelling.
 
-use crate::models::parakeet::bias::BiasWeights;
+use crate::models::parts::logit_bias::BiasWeights;
 use crate::text::sentencepiece::{Tokenizer, WORD_START};
 use std::collections::HashMap;
 use std::ops::Range;

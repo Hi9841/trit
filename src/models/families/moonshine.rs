@@ -5,12 +5,13 @@
 
 use crate::audio;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::beam;
-use crate::models::parakeet::bias::{self, Bias, BiasWeights};
-use crate::models::transformer::{
+use crate::models::config::Json;
+use crate::models::layers::{
     add_into, argmax, attention, attention_with, conv_columns, linear, stacked, Gelu, HeadMajor,
     Norm, Rotary,
 };
+use crate::models::parts::beam;
+use crate::models::parts::logit_bias::{self as bias, Bias, BiasWeights};
 use crate::text::sentencepiece::Tokenizer;
 use crate::{Options, Precision};
 use parking_lot::RwLock;
@@ -23,7 +24,8 @@ const TOKENS_PER_SECOND: f32 = 6.5;
 const BEAMS: usize = 5;
 /// Whose beam search rules to follow: those of Transformers, Moonshine's
 /// reference implementation (557 and 415 errors, OpenAI's 561 and 417).
-const BEAM_RULES: crate::models::beam::Rules = crate::models::beam::Rules::Transformers;
+const BEAM_RULES: crate::models::parts::beam::Rules =
+    crate::models::parts::beam::Rules::Transformers;
 /// Longest window per pass; the decoder holds 194 positions.
 const WINDOW_SAMPLES: usize = 30 * 16_000;
 
@@ -44,15 +46,8 @@ struct Config {
 }
 
 impl Config {
-    fn parse(text: &str) -> Result<Self, String> {
-        let json: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| format!("config.json is not JSON: {e}"))?;
-        let num = |key: &str| -> Result<usize, String> {
-            json[key]
-                .as_u64()
-                .map(|v| v as usize)
-                .ok_or_else(|| format!("config.json has no {key}"))
-        };
+    fn parse(json: &Json) -> Result<Self, String> {
+        let num = |key: &str| json.num(key);
         let d = num("hidden_size")?;
         let heads = num("encoder_num_attention_heads")?;
         if num("decoder_num_attention_heads")? != heads
@@ -62,7 +57,7 @@ impl Config {
         {
             return Err("config.json describes a Moonshine shape this engine does not run".into());
         }
-        let factor = json["partial_rotary_factor"].as_f64().unwrap_or(1.0);
+        let factor = json.float("partial_rotary_factor").unwrap_or(1.0);
         Ok(Self {
             d,
             ffn: num("intermediate_size")?,
@@ -75,8 +70,8 @@ impl Config {
             eos: num("eos_token_id")?,
             // int(head_dim * factor), rounded down to whole pairs.
             rotary_dims: ((d / heads) as f64 * factor) as usize / 2 * 2,
-            rope_base: json["rope_theta"].as_f64().unwrap_or(10_000.0) as f32,
-            gelu: Gelu::parse(json["encoder_hidden_act"].as_str().unwrap_or("gelu"))?,
+            rope_base: json.float("rope_theta").unwrap_or(10_000.0) as f32,
+            gelu: Gelu::parse(json.str("encoder_hidden_act").unwrap_or("gelu"))?,
         })
     }
 }
@@ -122,9 +117,9 @@ pub struct Moonshine {
 }
 
 impl Moonshine {
-    pub fn load(dir: &Path, config: &str, precision: Precision) -> Result<Self, String> {
+    pub fn load(dir: &Path, config: &Json, precision: Precision) -> Result<Self, String> {
         let c = Config::parse(config)?;
-        let t = Tensors::open_with(&dir.join("model.safetensors"), precision)?;
+        let t = Tensors::open_dir(dir, precision)?;
         let d = c.d;
         let attn = |p: &str, n: &str| format!("{p}.{n}");
         let encoder = (0..c.encoder_layers)

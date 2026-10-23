@@ -5,11 +5,12 @@
 
 use crate::audio::mel::MelFrontend;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::parakeet::bias::{self, Bias, BiasWeights};
-use crate::models::parakeet::model::{Config as EncoderConfig, Parakeet as Encoder};
-use crate::models::transformer::{
+use crate::models::config::Json;
+use crate::models::layers::{
     add_into, argmax, attention, attention_with, linear, stacked, HeadMajor, Norm,
 };
+use crate::models::parts::fastconformer::{Config as EncoderConfig, Parakeet as Encoder};
+use crate::models::parts::logit_bias::{self as bias, Bias, BiasWeights};
 use crate::text::sentencepiece::Tokenizer;
 use crate::{Options, Precision};
 use parking_lot::RwLock;
@@ -32,28 +33,22 @@ struct Config {
 }
 
 impl Config {
-    fn parse(text: &str) -> Result<Self, String> {
-        let json: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| format!("config.json is not JSON: {e}"))?;
-        let dec = &json["decoder_config"];
-        let num = |value: &serde_json::Value, key: &str| -> Result<usize, String> {
-            value[key]
-                .as_u64()
-                .map(|v| v as usize)
-                .ok_or_else(|| format!("config.json has no decoder_config.{key}"))
-        };
-        let heads = num(dec, "num_attention_heads")?;
-        if num(dec, "num_key_value_heads")? != heads || dec["hidden_act"].as_str() != Some("relu") {
+    fn parse(json: &Json) -> Result<Self, String> {
+        let num = |key: &str| json.num(&format!("decoder_config.{key}"));
+        let heads = num("num_attention_heads")?;
+        if num("num_key_value_heads")? != heads
+            || json.str("decoder_config.hidden_act") != Some("relu")
+        {
             return Err("config.json describes a Canary decoder this engine does not run".into());
         }
         Ok(Self {
-            d: num(dec, "hidden_size")?,
-            ffn: num(dec, "intermediate_size")?,
+            d: num("hidden_size")?,
+            ffn: num("intermediate_size")?,
             heads,
-            layers: num(dec, "num_hidden_layers")?,
-            vocab: num(dec, "vocab_size")?,
-            max_tokens: num(dec, "max_position_embeddings")?,
-            eos: num(dec, "eos_token_id")?,
+            layers: num("num_hidden_layers")?,
+            vocab: num("vocab_size")?,
+            max_tokens: num("max_position_embeddings")?,
+            eos: num("eos_token_id")?,
         })
     }
 }
@@ -92,10 +87,10 @@ const WINDOW_SAMPLES: usize = 40 * 16_000;
 type Caches = (Vec<Vec<f32>>, Vec<Vec<f32>>);
 
 impl Canary {
-    pub fn load(dir: &Path, config_text: &str, precision: Precision) -> Result<Self, String> {
-        let c = Config::parse(config_text)?;
-        let encoder_config = EncoderConfig::parse(config_text)?;
-        let t = Tensors::open_with(&dir.join("model.safetensors"), precision)?;
+    pub fn load(dir: &Path, config: &Json, precision: Precision) -> Result<Self, String> {
+        let c = Config::parse(config)?;
+        let encoder_config = EncoderConfig::parse(config)?;
+        let t = Tensors::open_dir(dir, precision)?;
         let frontend = MelFrontend::new(encoder_config.mels);
         let encoder = Encoder::load(&t, encoder_config)?;
         encoder.warm_positions();
@@ -246,8 +241,8 @@ impl Canary {
                     .collect()
             };
             let limit = c.max_tokens.saturating_sub(prompt.len());
-            return crate::models::beam::search(
-                (beam, crate::models::beam::Rules::OpenAi),
+            return crate::models::parts::beam::search(
+                (beam, crate::models::parts::beam::Rules::OpenAi),
                 ((keys, values), logits),
                 (limit, c.eos),
                 |_, _| {},

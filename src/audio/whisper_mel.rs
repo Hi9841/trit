@@ -45,24 +45,29 @@ impl WhisperMel {
 
     /// `FRAMES x mels` for up to 30 s of audio, zero padded to 30 s.
     pub fn compute(&self, audio: &[f32]) -> Vec<f32> {
-        let audio = &audio[..audio.len().min(WINDOW_SAMPLES)];
+        self.compute_frames(&audio[..audio.len().min(WINDOW_SAMPLES)], FRAMES)
+    }
+
+    /// `frames x mels` for `audio` zero padded to `frames` hops (Qwen3-ASR:
+    /// `audio.len() / HOP` frames, no padding to 30 s).
+    pub fn compute_frames(&self, audio: &[f32], frames: usize) -> Vec<f32> {
         // Frames that touch audio; later frames see only padding and are
         // all equal to the frame of silence.
-        let live = ((audio.len() + N_FFT / 2).div_ceil(HOP) + 1).min(FRAMES);
-        let mut frames = Buf::scratch(live * N_FFT);
+        let live = ((audio.len() + N_FFT / 2).div_ceil(HOP) + 1).min(frames);
+        let mut windows = Buf::scratch(live * N_FFT);
         let sample = |i: isize| -> f32 {
             // Reflect at the start (torch.stft center=True); the end is
             // padding, so samples past the audio are zero.
             let i = if i < 0 { -i } else { i } as usize;
             audio.get(i).copied().unwrap_or(0.0)
         };
-        team::chunks_mut(&mut frames, N_FFT, |f, row| {
+        team::chunks_mut(&mut windows, N_FFT, |f, row| {
             let start = (f * HOP) as isize - (N_FFT / 2) as isize;
             for (n, value) in row.iter_mut().enumerate() {
                 *value = sample(start + n as isize);
             }
         });
-        let spectrum = fgemm::matmul(&frames, live, N_FFT, &self.basis, 2 * BINS);
+        let spectrum = fgemm::matmul(&windows, live, N_FFT, &self.basis, 2 * BINS);
         let mut power = Buf::scratch(live * BINS);
         team::chunks_mut(&mut power, BINS, |f, row| {
             let pairs = &spectrum[f * 2 * BINS..(f + 1) * 2 * BINS];
@@ -71,7 +76,7 @@ impl WhisperMel {
             }
         });
         let mel = fgemm::matmul(&power, live, BINS, &self.filters, self.mels);
-        let mut out = vec![LOG_FLOOR.log10(); FRAMES * self.mels];
+        let mut out = vec![LOG_FLOOR.log10(); frames * self.mels];
         for (o, m) in out.iter_mut().zip(mel.iter()) {
             *o = m.max(LOG_FLOOR).log10();
         }

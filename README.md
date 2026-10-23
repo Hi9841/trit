@@ -293,6 +293,7 @@ checkpoints of the same families load the same way.
 | parakeet-redux | moondream/parakeet-redux | Parakeet TDT, 1.58-bit | 25 European | 178 |
 | parakeet-tdt-0.6b-v3 | nvidia/parakeet-tdt-0.6b-v3 | Parakeet TDT | 25 European | 2508 |
 | parakeet-ctc-0.6b | nvidia/parakeet-ctc-0.6b | Parakeet CTC | English | 2436 |
+| parakeet-rnnt-0.6b | nvidia/parakeet-rnnt-0.6b | Parakeet RNNT | English | 2467 |
 | canary-1b-v2 | nvidia/canary-1b-v2 | Canary (FastConformer + transformer decoder) | 25 European | 3916 |
 | whisper-tiny | openai/whisper-tiny | Whisper | 99 | 151 |
 | whisper-base.en | openai/whisper-base.en | Whisper | English | 290 |
@@ -302,6 +303,8 @@ checkpoints of the same families load the same way.
 | distil-large-v3.5 | distil-whisper/distil-large-v3.5 | Whisper | English | 3026 |
 | moonshine-tiny | UsefulSensors/moonshine-tiny | Moonshine | English | 108 |
 | moonshine-base | UsefulSensors/moonshine-base | Moonshine | English | 246 |
+| wav2vec2-base-960h | facebook/wav2vec2-base-960h | wav2vec 2.0 (CTC) | English | 378 |
+| qwen3-asr-0.6b | Qwen/Qwen3-ASR-0.6B | Qwen3-ASR | 30 | 1876 |
 | s1-mini | superwhisper/s1-mini | Qwen3 text model (cleanup) | English | 1503 |
 
 Download only the files Trit reads:
@@ -328,7 +331,9 @@ Trit looks for a model in this order:
 | Whisper (multilingual) | 99 | Forces that language; without it, the model detects the language from the first 30 s |
 | Whisper `.en`, Distil large-v3.5 | English | Ignored |
 | Parakeet TDT v3, Redux | 25 European | Cannot be forced; `en` keeps the output to English tokens |
-| Parakeet CTC | English | `en` as above |
+| Parakeet CTC, RNNT | English | `en` as above |
+| wav2vec 2.0 | English | Ignored |
+| Qwen3-ASR | 30 | Forces that language; without it, the model names the language it hears |
 | Canary 1B v2 | 25 European | The spoken language; English when none is given (Canary does not detect it) |
 | Moonshine | English | Ignored |
 
@@ -422,13 +427,11 @@ weights in every mode.
 | `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`) |
 | `src/audio/` | WAV reader, NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), windows for long audio |
 | `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen) |
-| `src/models/parakeet/` | FastConformer encoder, TDT and CTC heads, the sound-checked dictionary (`dictionary.rs`), the logit dictionary of Canary and Moonshine (`bias.rs`) |
-| `src/models/canary.rs` | Canary: the Parakeet encoder and a transformer decoder |
-| `src/models/whisper/` | Whisper encoder and decoder, language detection |
-| `src/models/moonshine.rs` | Moonshine |
-| `src/models/qwen3.rs` | Qwen3 decoder (S1-mini) |
-| `src/models/transformer.rs` | Shared pieces: norms, GELU, rotary positions, attention, conv columns |
-| `src/models/beam.rs` | Beam search for the decoder families |
+| `src/models/mod.rs` | `FAMILIES`: one row per `model_type` (its loader and thread spread), and the `Family` trait |
+| `src/models/config.rs` | The `config.json` reader that every family uses |
+| `src/models/layers.rs` | Shared layers: norms, GELU, rotary positions, attention, conv columns |
+| `src/models/parts/` | Building blocks that the config picks: the FastConformer encoder (`fastconformer.rs`), the TDT and RNNT head (`transducer.rs`), CTC (`ctc.rs`), beam search (`beam.rs`), the Qwen3 language model (`qwen3.rs`), the sound-checked dictionary (`dictionary.rs`), and the logit dictionary (`logit_bias.rs`) |
+| `src/models/families/` | One file per checkpoint family. It reads the family's files and wires the parts: Parakeet, Canary, Whisper, Moonshine, wav2vec 2.0, Qwen3-ASR |
 | `ffi/` | `trit-ffi`: the C ABI |
 | `bindings/` | Python, C#, Node |
 

@@ -25,7 +25,7 @@ pub use catalog::{known, Known, CATALOG};
 pub use cleanup::{Cleaner, Context, Structure, Style, Styling, CLEANUP_REPO};
 pub use cpu::gemm::Precision;
 pub use cpu::{cpu_path, threads, Spread};
-pub use models::parakeet::BiasWeights;
+pub use models::parts::logit_bias::BiasWeights;
 pub use models::MODEL_TYPES;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -33,7 +33,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SAMPLE_RATE: u32 = 16_000;
 /// The Hugging Face repository of the default model.
 pub const MODEL_REPO: &str = "moondream/parakeet-redux";
-/// The files every model folder holds; a family may need more.
+/// The files every model folder holds; a family may need more. A large
+/// model may hold `model.safetensors.index.json` and its shards instead of
+/// `model.safetensors`.
 pub const MODEL_FILES: [&str; 2] = ["config.json", "model.safetensors"];
 
 /// How to transcribe. `Options::default()` lets the model choose.
@@ -277,7 +279,10 @@ pub fn find_cleanup_model(explicit: Option<&Path>) -> Option<PathBuf> {
         .find(|dir| is_model(dir))
 }
 
-/// True when `dir` holds every file of `MODEL_FILES`.
+/// True when `dir` holds every file of `MODEL_FILES` (the weights as one
+/// file or as shards).
 pub fn is_model(dir: &Path) -> bool {
-    MODEL_FILES.iter().all(|file| dir.join(file).is_file())
+    let weights =
+        dir.join(cpu::tensors::WEIGHTS).is_file() || dir.join(cpu::tensors::SHARD_INDEX).is_file();
+    dir.join("config.json").is_file() && weights
 }

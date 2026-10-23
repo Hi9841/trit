@@ -1,10 +1,12 @@
 //! Qwen3 decoder-only language model (Hugging Face `Qwen3ForCausalLM`):
 //! RMS norms, per-head q and k norms, grouped-query attention with rotary
 //! positions, and a SwiGLU MLP. Trit uses it for text models that work on
-//! a transcript, such as Superwhisper S1-mini.
+//! a transcript, such as Superwhisper S1-mini, and as the text decoder of
+//! Qwen3-ASR.
 
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::transformer::{add_into, argmax, attention, linear, stacked, RmsNorm, Rotary};
+use crate::models::config::Json;
+use crate::models::layers::{add_into, argmax, attention, linear, stacked, RmsNorm, Rotary};
 use crate::Precision;
 use std::path::Path;
 
@@ -22,18 +24,13 @@ struct Config {
 }
 
 impl Config {
-    fn parse(text: &str) -> Result<Self, String> {
-        let json: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| format!("config.json is not JSON: {e}"))?;
-        let num = |key: &str| -> Result<usize, String> {
-            json[key]
-                .as_u64()
-                .map(|v| v as usize)
-                .ok_or_else(|| format!("config.json has no {key}"))
-        };
+    /// The keys under `at` (`""`, or `thinker_config.text_config.` in Qwen3-ASR).
+    fn parse(json: &Json, at: &str) -> Result<Self, String> {
+        let key = |name: &str| format!("{at}{name}");
+        let num = |name: &str| json.num(&key(name));
         let heads = num("num_attention_heads")?;
         let kv_heads = num("num_key_value_heads")?;
-        if json["model_type"].as_str() != Some("qwen3") || !heads.is_multiple_of(kv_heads) {
+        if json.str(&key("model_type")) != Some("qwen3") || !heads.is_multiple_of(kv_heads) {
             return Err("config.json does not describe a Qwen3 model this engine runs".into());
         }
         Ok(Self {
@@ -44,9 +41,9 @@ impl Config {
             kv_heads,
             head_dim: num("head_dim")?,
             vocab: num("vocab_size")?,
-            eps: json["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
-            rope_base: json["rope_theta"].as_f64().unwrap_or(1_000_000.0) as f32,
-            tied: json["tie_word_embeddings"].as_bool().unwrap_or(false),
+            eps: json.float(&key("rms_norm_eps")).unwrap_or(1e-6) as f32,
+            rope_base: json.float(&key("rope_theta")).unwrap_or(1_000_000.0) as f32,
+            tied: json.flag(&key("tie_word_embeddings")).unwrap_or(false),
         })
     }
 }
@@ -86,17 +83,27 @@ impl Qwen3 {
     pub fn load(dir: &Path, precision: Precision) -> Result<Self, String> {
         let text = std::fs::read_to_string(dir.join("config.json"))
             .map_err(|e| format!("cannot read config.json: {e}"))?;
-        let c = Config::parse(&text)?;
-        let t = Tensors::open_with(&dir.join("model.safetensors"), precision)?;
+        let t = Tensors::open_dir(dir, precision)?;
+        Self::from_tensors(&t, &Json::parse(&text)?, ("", ""))
+    }
+
+    /// The model whose config is under `config_at` and whose tensor names
+    /// start with `prefix` (`thinker.` in Qwen3-ASR).
+    pub fn from_tensors(
+        t: &Tensors,
+        json: &Json,
+        (config_at, prefix): (&str, &str),
+    ) -> Result<Self, String> {
+        let c = Config::parse(json, config_at)?;
         let (d, hd) = (c.d, c.head_dim);
         let layers = team::map(c.layers, |i| -> Result<Layer, String> {
-            let p = format!("model.layers.{i}");
+            let p = format!("{prefix}model.layers.{i}");
             let a = |n: &str| format!("{p}.self_attn.{n}");
             let m = |n: &str| format!("{p}.mlp.{n}");
             Ok(Layer {
-                norm_attn: RmsNorm::load(&t, &format!("{p}.input_layernorm"), d, c.eps)?,
+                norm_attn: RmsNorm::load(t, &format!("{p}.input_layernorm"), d, c.eps)?,
                 qkv: Dense::load(
-                    &t,
+                    t,
                     &[
                         (&a("q_proj"), c.heads * hd),
                         (&a("k_proj"), c.kv_heads * hd),
@@ -104,25 +111,26 @@ impl Qwen3 {
                     ],
                     d,
                 )?,
-                q_norm: RmsNorm::load(&t, &a("q_norm"), hd, c.eps)?,
-                k_norm: RmsNorm::load(&t, &a("k_norm"), hd, c.eps)?,
-                out: linear(&t, &a("o_proj"), d, c.heads * hd)?,
-                norm_mlp: RmsNorm::load(&t, &format!("{p}.post_attention_layernorm"), d, c.eps)?,
-                gate_up: stacked(&t, &[&m("gate_proj"), &m("up_proj")], c.ffn, d)?,
-                down: linear(&t, &m("down_proj"), d, c.ffn)?,
+                q_norm: RmsNorm::load(t, &a("q_norm"), hd, c.eps)?,
+                k_norm: RmsNorm::load(t, &a("k_norm"), hd, c.eps)?,
+                out: linear(t, &a("o_proj"), d, c.heads * hd)?,
+                norm_mlp: RmsNorm::load(t, &format!("{p}.post_attention_layernorm"), d, c.eps)?,
+                gate_up: stacked(t, &[&m("gate_proj"), &m("up_proj")], c.ffn, d)?,
+                down: linear(t, &m("down_proj"), d, c.ffn)?,
             })
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-        let head = if c.tied || !t.has("lm_head.weight") {
+        let head_name = format!("{prefix}lm_head.weight");
+        let head = if c.tied || !t.has(&head_name) {
             None
         } else {
-            Some(Dense::table(&t, "lm_head.weight", c.vocab, d)?)
+            Some(Dense::table(t, &head_name, c.vocab, d)?)
         };
         Ok(Self {
             layers,
-            norm: RmsNorm::load(&t, "model.norm", d, c.eps)?,
-            embed: Dense::table(&t, "model.embed_tokens.weight", c.vocab, d)?,
+            norm: RmsNorm::load(t, &format!("{prefix}model.norm"), d, c.eps)?,
+            embed: Dense::table(t, &format!("{prefix}model.embed_tokens.weight"), c.vocab, d)?,
             head,
             rotary: Rotary::halves(hd, c.rope_base),
             config: c,
@@ -174,7 +182,38 @@ impl Qwen3 {
             .map(|l| cache(prefix.map(|p| &p.values[l])))
             .collect();
         // The rest of the prompt goes through as one batch; then one token per step.
-        let mut logits = self.forward(&prompt[done..], done, &mut keys, &mut values);
+        let logits = self.forward(&prompt[done..], done, &mut keys, &mut values);
+        self.greedy(
+            logits,
+            prompt.len(),
+            (&mut keys, &mut values),
+            max_new,
+            stop,
+        )
+    }
+
+    /// Greedy tokens after a prompt given as embeddings (`rows x width`,
+    /// some rows from another model, such as audio frames), until a `stop`
+    /// token or `max_new` tokens.
+    pub fn generate_rows(&self, rows: Buf, max_new: usize, stop: &[usize]) -> Vec<usize> {
+        let c = &self.config;
+        let length = rows.len() / c.d;
+        let capacity = (length + max_new) * c.kv_heads * c.head_dim;
+        let mut keys = vec![Vec::with_capacity(capacity); c.layers];
+        let mut values = vec![Vec::with_capacity(capacity); c.layers];
+        let logits = self.forward_rows(rows, 0, &mut keys, &mut values);
+        self.greedy(logits, length, (&mut keys, &mut values), max_new, stop)
+    }
+
+    /// Greedy tokens from `logits`, the next position being `position`.
+    fn greedy(
+        &self,
+        mut logits: Buf,
+        position: usize,
+        (keys, values): (&mut [Vec<f32>], &mut [Vec<f32>]),
+        max_new: usize,
+        stop: &[usize],
+    ) -> Vec<usize> {
         let mut out = Vec::new();
         while out.len() < max_new {
             let token = argmax(&logits);
@@ -182,14 +221,24 @@ impl Qwen3 {
                 break;
             }
             out.push(token);
-            logits = self.forward(
-                &[token],
-                prompt.len() + out.len() - 1,
-                &mut keys,
-                &mut values,
-            );
+            logits = self.forward(&[token], position + out.len() - 1, keys, values);
         }
         out
+    }
+
+    /// The width of a token embedding.
+    pub fn width(&self) -> usize {
+        self.config.d
+    }
+
+    /// The embeddings of `tokens`, one row each.
+    pub fn embed(&self, tokens: &[usize]) -> Buf {
+        let d = self.config.d;
+        let mut x = Buf::scratch(tokens.len() * d);
+        for (row, &token) in x.chunks_exact_mut(d).zip(tokens) {
+            self.embed.row(token, row);
+        }
+        x
     }
 
     /// Runs `tokens` at positions `first..`, extends the caches, and returns
@@ -201,13 +250,20 @@ impl Qwen3 {
         keys: &mut [Vec<f32>],
         values: &mut [Vec<f32>],
     ) -> Buf {
+        self.forward_rows(self.embed(tokens), first, keys, values)
+    }
+
+    /// `forward` from embeddings, `rows x width`.
+    fn forward_rows(
+        &self,
+        mut x: Buf,
+        first: usize,
+        keys: &mut [Vec<f32>],
+        values: &mut [Vec<f32>],
+    ) -> Buf {
         let c = &self.config;
-        let (d, hd, m) = (c.d, c.head_dim, tokens.len());
+        let (d, hd, m) = (c.d, c.head_dim, x.len() / c.d);
         let (qd, kv) = (c.heads * hd, c.kv_heads * hd);
-        let mut x = Buf::scratch(m * d);
-        for (row, &token) in x.chunks_exact_mut(d).zip(tokens) {
-            self.embed.row(token, row);
-        }
         for (l, layer) in self.layers.iter().enumerate() {
             let normed = layer.norm_attn.apply(&x);
             let mut qkv = layer.qkv.forward(&normed, m);

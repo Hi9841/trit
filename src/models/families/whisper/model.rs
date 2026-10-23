@@ -4,7 +4,8 @@
 //! the Hugging Face `WhisperForConditionalGeneration` files.
 
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::transformer::{
+use crate::models::config::Json;
+use crate::models::layers::{
     add_into, attention, attention_with, conv_columns, linear, stacked, Gelu, HeadMajor, Norm,
 };
 
@@ -31,15 +32,8 @@ pub struct Config {
 const GELU: Gelu = Gelu::Exact;
 
 impl Config {
-    pub fn parse(text: &str) -> Result<Self, String> {
-        let json: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| format!("config.json is not JSON: {e}"))?;
-        let num = |key: &str| -> Result<usize, String> {
-            json[key]
-                .as_u64()
-                .map(|v| v as usize)
-                .ok_or_else(|| format!("config.json has no {key}"))
-        };
+    pub fn parse(json: &Json) -> Result<Self, String> {
+        let num = |key: &str| json.num(key);
         let config = Self {
             d: num("d_model")?,
             encoder_layers: num("encoder_layers")?,
@@ -55,7 +49,7 @@ impl Config {
         };
         if !config.d.is_multiple_of(config.encoder_heads)
             || !config.d.is_multiple_of(config.decoder_heads)
-            || json["scale_embedding"].as_bool() == Some(true)
+            || json.flag("scale_embedding") == Some(true)
         {
             return Err("config.json describes a Whisper shape this engine does not run".into());
         }

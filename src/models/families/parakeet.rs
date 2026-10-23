@@ -1,13 +1,12 @@
-//! Parakeet: FastConformer encoder with a TDT decoder (NVIDIA Parakeet TDT,
-//! Moondream Parakeet Redux). The network follows the Apache-2.0 Hugging
+//! Parakeet: FastConformer encoder with a TDT, RNNT, or CTC decoder (NVIDIA
+//! Parakeet, Moondream Parakeet Redux). The network follows the Apache-2.0 Hugging
 //! Face Parakeet implementation; the files are read as published.
 
-pub mod bias;
-mod dictionary;
-pub(crate) mod model;
+use crate::models::parts::{dictionary, fastconformer as model, logit_bias as bias};
 
 use crate::audio::mel::MelFrontend;
 use crate::cpu::tensors::Tensors;
+use crate::models::config::Json;
 use crate::text::sentencepiece::Tokenizer;
 use crate::{Options, Precision, Segment};
 use parking_lot::RwLock;
@@ -36,9 +35,9 @@ const FRAME_SECONDS: f32 = 0.08;
 const PAUSE_SECONDS: f32 = 1.0;
 
 impl Parakeet {
-    pub fn load(dir: &Path, config: &str, precision: Precision) -> Result<Self, String> {
+    pub fn load(dir: &Path, config: &Json, precision: Precision) -> Result<Self, String> {
         let config = model::Config::parse(config)?;
-        let tensors = Tensors::open_with(&dir.join("model.safetensors"), precision)?;
+        let tensors = Tensors::open_dir(dir, precision)?;
         let frontend = MelFrontend::new(config.mels);
         let model = model::Parakeet::load(&tensors, config)?;
         // The weight file is no longer needed; free it before the position
@@ -56,10 +55,11 @@ impl Parakeet {
         })
     }
 
-    /// `parakeet_tdt` or `parakeet_ctc`.
+    /// `parakeet_tdt`, `parakeet_rnnt`, or `parakeet_ctc`.
     pub fn kind(&self) -> &'static str {
         match self.model.config.head {
             model::HeadKind::Ctc => "parakeet_ctc",
+            model::HeadKind::Rnnt => "parakeet_rnnt",
             _ => "parakeet_tdt",
         }
     }

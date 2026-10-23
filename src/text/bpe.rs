@@ -29,6 +29,51 @@ enum Split {
 }
 
 impl Bpe {
+    /// The tokenizer of a model folder: `tokenizer.json`, or the older
+    /// `vocab.json`, `merges.txt`, and `tokenizer_config.json` (Qwen3-ASR).
+    pub fn open_dir(dir: &Path) -> Result<Self, String> {
+        let json = dir.join("tokenizer.json");
+        if json.is_file() {
+            return Self::open(&json);
+        }
+        let read = |name: &str| {
+            std::fs::read_to_string(dir.join(name))
+                .map_err(|e| format!("cannot read {}: {e}", dir.join(name).display()))
+        };
+        let vocab: serde_json::Value = serde_json::from_str(&read("vocab.json")?)
+            .map_err(|e| format!("vocab.json is not JSON: {e}"))?;
+        let merges = read("merges.txt")?;
+        let config: serde_json::Value = serde_json::from_str(&read("tokenizer_config.json")?)
+            .map_err(|e| format!("tokenizer_config.json is not JSON: {e}"))?;
+        let added = config["added_tokens_decoder"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(id, token)| {
+                let content = token["content"].as_str()?.to_string();
+                Some((
+                    id.parse().ok()?,
+                    content,
+                    token["special"].as_bool().unwrap_or(true),
+                ))
+            })
+            .collect();
+        let merges = merges
+            .lines()
+            .filter(|line| !line.starts_with("#version"))
+            .filter_map(|line| line.split_once(' '))
+            .map(|(a, b)| (a.to_string(), b.to_string()));
+        let qwen = config["tokenizer_class"]
+            .as_str()
+            .is_some_and(|class| class.starts_with("Qwen"));
+        Self::build(
+            vocab.as_object().ok_or("vocab.json is not a map")?,
+            merges,
+            added,
+            if qwen { Split::Qwen } else { Split::Gpt2 },
+        )
+    }
+
     pub fn open(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -37,10 +82,55 @@ impl Bpe {
         let vocab = json["model"]["vocab"]
             .as_object()
             .ok_or("tokenizer.json has no model.vocab")?;
+        let added = json["added_tokens"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|added| {
+                let id = added["id"].as_u64()? as usize;
+                let content = added["content"].as_str()?.to_string();
+                Some((id, content, added["special"].as_bool().unwrap_or(true)))
+            })
+            .collect();
+        // Either ["a", "b"] or "a b".
+        let merges = json["model"]["merges"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|merge| match merge {
+                serde_json::Value::Array(parts) => parts
+                    .first()
+                    .and_then(|a| a.as_str())
+                    .zip(parts.get(1).and_then(|b| b.as_str()))
+                    .map(|(a, b)| (a.to_string(), b.to_string())),
+                serde_json::Value::String(text) => text
+                    .split_once(' ')
+                    .map(|(a, b)| (a.to_string(), b.to_string())),
+                _ => None,
+            });
+        let qwen = json["pre_tokenizer"]
+            .to_string()
+            .contains(r"[^\\r\\n\\p{L}\\p{N}]?\\p{L}+");
+        Self::build(
+            vocab,
+            merges,
+            added,
+            if qwen { Split::Qwen } else { Split::Gpt2 },
+        )
+    }
+
+    /// From the vocabulary (token as stand-ins to id), the merges in rank
+    /// order, and the added tokens `(id, text, special)`.
+    fn build(
+        vocab: &serde_json::Map<String, serde_json::Value>,
+        merges: impl Iterator<Item = (String, String)>,
+        added: Vec<(usize, String, bool)>,
+        split: Split,
+    ) -> Result<Self, String> {
         let byte_of = unicode_to_byte();
         let mut entries: Vec<(usize, Vec<u8>, bool, String)> = Vec::with_capacity(vocab.len());
         for (token, id) in vocab {
-            let id = id.as_u64().ok_or("tokenizer.json has a bad id")? as usize;
+            let id = id.as_u64().ok_or("the vocabulary has a bad id")? as usize;
             let bytes = token
                 .chars()
                 .map(|c| byte_of.get(&c).copied().unwrap_or(b'?'))
@@ -48,19 +138,9 @@ impl Bpe {
             entries.push((id, bytes, false, token.clone()));
         }
         let mut specials = Vec::new();
-        for added in json["added_tokens"].as_array().into_iter().flatten() {
-            let (Some(id), Some(content)) = (added["id"].as_u64(), added["content"].as_str())
-            else {
-                continue;
-            };
-            let special = added["special"].as_bool().unwrap_or(true);
-            specials.push((content.to_string(), id as usize));
-            entries.push((
-                id as usize,
-                content.as_bytes().to_vec(),
-                special,
-                content.to_string(),
-            ));
+        for (id, content, special) in added {
+            specials.push((content.clone(), id));
+            entries.push((id, content.as_bytes().to_vec(), special, content));
         }
         specials.sort_by_key(|(text, _)| std::cmp::Reverse(text.len()));
         let size = entries.iter().map(|e| e.0 + 1).max().unwrap_or(0);
@@ -72,39 +152,17 @@ impl Bpe {
             special[id] = is_special;
             ids.insert(text, id);
         }
-        let mut merges = HashMap::new();
-        for (rank, merge) in json["model"]["merges"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            // Either ["a", "b"] or "a b".
-            let pair = match merge {
-                serde_json::Value::Array(parts) => parts
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .zip(parts.get(1).and_then(|b| b.as_str()))
-                    .map(|(a, b)| (a.to_string(), b.to_string())),
-                serde_json::Value::String(text) => text
-                    .split_once(' ')
-                    .map(|(a, b)| (a.to_string(), b.to_string())),
-                _ => None,
-            };
-            if let Some(pair) = pair {
-                merges.entry(pair).or_insert(rank);
-            }
+        let mut ranks = HashMap::new();
+        for (rank, pair) in merges.enumerate() {
+            ranks.entry(pair).or_insert(rank);
         }
-        let qwen = json["pre_tokenizer"]
-            .to_string()
-            .contains(r"[^\\r\\n\\p{L}\\p{N}]?\\p{L}+");
         Ok(Self {
             pieces,
             special,
             ids,
-            merges,
+            merges: ranks,
             specials,
-            split: if qwen { Split::Qwen } else { Split::Gpt2 },
+            split,
         })
     }
 
