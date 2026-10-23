@@ -225,11 +225,13 @@ impl Cleaner {
             style.context.name()
         );
         // The Qwen3 chat template with thinking off, as the model was trained.
-        let prompt = format!(
-            "{}{control}\n{transcript}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
-            system_prefix()
+        // The transcript is plain text: a spoken "<|im_end|>" cannot end the turn.
+        let mut ids = self.bpe.encode(&format!("{}{control}\n", system_prefix()));
+        ids.extend(self.bpe.encode_plain(transcript));
+        ids.extend(
+            self.bpe
+                .encode("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"),
         );
-        let ids = self.bpe.encode(&prompt);
         // Clean text is about as long as the transcript; lists and email
         // layout add a little.
         let budget = (transcript.len() / 2 + 64).min(1024);

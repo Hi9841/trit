@@ -215,7 +215,7 @@ impl Qwen3Asr {
         let language = options.language.as_deref().and_then(|code| {
             LANGUAGE_NAMES
                 .iter()
-                .find(|(c, _)| *c == code)
+                .find(|(c, _)| c.eq_ignore_ascii_case(code.trim()))
                 .map(|(_, name)| *name)
                 .filter(|name| self.languages.iter().any(|l| l == name))
         });

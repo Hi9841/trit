@@ -103,7 +103,7 @@ impl Whisper {
             self.tokens
                 .languages
                 .iter()
-                .find(|(c, _)| c == code)
+                .find(|(c, _)| c.eq_ignore_ascii_case(code.trim()))
                 .map(|(_, id)| *id)
         });
         let mut pieces = Vec::new();

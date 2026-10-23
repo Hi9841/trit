@@ -98,7 +98,7 @@ impl Options {
     /// Options for one language, for example `Options::language("en")`.
     pub fn language(code: &str) -> Self {
         Self {
-            language: Some(code.to_string()),
+            language: Some(code.trim().to_ascii_lowercase()),
             ..Self::default()
         }
     }

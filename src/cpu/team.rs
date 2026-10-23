@@ -8,7 +8,8 @@
 
 use parking_lot::{Condvar, Mutex};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,8 @@ struct Shared {
     next: AtomicUsize,
     /// Workers that have not finished the current job yet.
     busy: AtomicUsize,
+    /// A task of the current job panicked on a worker.
+    panicked: AtomicBool,
     parked: AtomicUsize,
     lock: Mutex<()>,
     wake: Condvar,
@@ -54,6 +57,7 @@ impl Team {
             job: AtomicPtr::new(std::ptr::null_mut()),
             next: AtomicUsize::new(0),
             busy: AtomicUsize::new(0),
+            panicked: AtomicBool::new(false),
             parked: AtomicUsize::new(0),
             lock: Mutex::new(()),
             wake: Condvar::new(),
@@ -105,11 +109,20 @@ impl Team {
             let _lock = s.lock.lock();
             s.wake.notify_all();
         }
-        run_tasks(s, &job);
+        // The workers read `job` from this stack frame: a panic here must
+        // wait for them before it unwinds the frame.
+        let caller = catch_unwind(AssertUnwindSafe(|| run_tasks(s, &job)));
         while s.busy.load(Ordering::Acquire) != 0 {
             std::hint::spin_loop();
         }
         INSIDE.set(false);
+        if let Err(panic) = caller {
+            resume_unwind(panic);
+        }
+        // A worker's panic goes to the caller, where the C ABI catches it.
+        if s.panicked.swap(false, Ordering::Relaxed) {
+            panic!("a speech worker thread panicked");
+        }
     }
 }
 
@@ -153,7 +166,10 @@ fn work(s: &Shared) {
         }
         // SAFETY: the job pointer was published before the generation changed.
         let job = unsafe { &*s.job.load(Ordering::Relaxed) };
-        run_tasks(s, job);
+        // A worker that dies without the decrement would hang the caller.
+        if catch_unwind(AssertUnwindSafe(|| run_tasks(s, job))).is_err() {
+            s.panicked.store(true, Ordering::Relaxed);
+        }
         s.busy.fetch_sub(1, Ordering::Release);
     }
 }
@@ -243,6 +259,12 @@ fn set_affinity(_mask: usize) -> usize {
 /// memory a thread's allocator keeps. Each task waits until every thread of
 /// its team holds one, so no thread takes two.
 pub fn on_every_thread(run: impl Fn() + Sync) {
+    // Inside a task the team runs inline on this one thread, and the tasks
+    // below would wait for each other forever.
+    if INSIDE.get() {
+        run();
+        return;
+    }
     for team in TEAM.iter().filter_map(OnceLock::get) {
         let threads = team.workers + 1;
         let started = AtomicUsize::new(0);

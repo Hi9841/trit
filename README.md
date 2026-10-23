@@ -100,7 +100,7 @@ Flags of `transcribe`:
 |---|---|---|
 | `--model <dir or name>` | parakeet-redux | The speech model |
 | `--language <code>` | detect | ISO 639-1 code (`en`, `de`, `fr`) |
-| `--dictionary <file>` | none | Terms to favor, one per line (every family) |
+| `--dictionary <file>` | none | Terms to favor, one per line (not CTC models: they skip every term) |
 | `--task transcribe\|translate` | `transcribe` | `translate` writes English (multilingual Whisper, Canary) |
 | `--timestamps` | off | Timed segments too: sentences for Parakeet, windows for the others |
 | `--precision auto\|int8\|f16\|f32` | `auto` | How the weights are held; see [Precision](#precision) |

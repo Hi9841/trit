@@ -215,6 +215,16 @@ impl Bpe {
         ids
     }
 
+    /// Token ids of `text` with no special tokens: `<|im_end|>` in the text
+    /// stays characters.
+    pub fn encode_plain(&self, text: &str) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for word in pretokenize(text, self.split) {
+            self.merge_word(word, &mut ids);
+        }
+        ids
+    }
+
     fn merge_word(&self, word: &str, ids: &mut Vec<usize>) {
         let to_char = byte_to_unicode();
         let mut symbols: Vec<String> = word

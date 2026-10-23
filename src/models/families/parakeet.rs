@@ -65,6 +65,11 @@ impl Parakeet {
     }
 
     pub fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
+        // Only the TDT head scores terms: a CTC head favors none, so every
+        // term is skipped and the English ban stays whole.
+        if matches!(self.model.config.head, model::HeadKind::Ctc) {
+            return terms.to_vec();
+        }
         let (terms, skipped) = dictionary::Dictionary::build(&self.tokenizer, terms, weights);
         let used = terms.as_ref().map(|d| d.pieces()).unwrap_or_default();
         *self.blocked.write() = self
@@ -141,7 +146,10 @@ impl Parakeet {
             return (Vec::new(), Vec::new());
         };
         // Parakeet cannot be told a language; it can only be kept to English.
-        let english = options.language.as_deref() == Some("en");
+        let english = options
+            .language
+            .as_deref()
+            .is_some_and(|code| code.trim().eq_ignore_ascii_case("en"));
         let blocked = self.blocked.read();
         let blocked: &[usize] = if english { &blocked } else { &[] };
         let dictionary = self.dictionary.read();
