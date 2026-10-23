@@ -421,7 +421,7 @@ weights in every mode.
 | `src/cleanup.rs` | `Cleaner`: S1-mini prompt and styles |
 | `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`) |
 | `src/audio/` | WAV reader, NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), windows for long audio |
-| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen), the foreign pieces (from `scripts/foreign_pieces.py`) |
+| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen) |
 | `src/models/parakeet/` | FastConformer encoder, TDT and CTC heads, the sound-checked dictionary (`dictionary.rs`), the logit dictionary of Canary and Moonshine (`bias.rs`) |
 | `src/models/canary.rs` | Canary: the Parakeet encoder and a transformer decoder |
 | `src/models/whisper/` | Whisper encoder and decoder, language detection |

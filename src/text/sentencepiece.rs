@@ -6,9 +6,6 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub const WORD_START: char = '\u{2581}';
-/// Latin pieces of the Parakeet v3 vocabulary that common words of 23 other
-/// languages use and common English words do not (`scripts/foreign_pieces.py`).
-const FOREIGN_PIECES: &str = include_str!("foreign-pieces.txt");
 
 pub struct Tokenizer {
     pieces: Vec<String>,
@@ -97,20 +94,16 @@ impl Tokenizer {
             .collect()
     }
 
-    /// Ids of pieces that English does not use: Cyrillic, Greek, and
-    /// accented Latin from the model's other languages, and the Latin pieces
-    /// that only other languages use ("▁beaucoup", "▁bardzo"). TDT is English
-    /// only, so the decoder never picks them.
+    /// Ids of pieces with letters English does not use: Cyrillic, Greek, and
+    /// accented Latin from the model's other languages. The rule reads only
+    /// the characters of each piece; there is no list of words or pieces.
     pub fn non_english(&self) -> Vec<usize> {
         let english = |c: char| c.is_ascii() || matches!(c, WORD_START | '£' | '€');
-        let foreign: std::collections::HashSet<&str> = FOREIGN_PIECES.lines().collect();
         self.pieces
             .iter()
             .zip(&self.special)
             .enumerate()
-            .filter(|(_, (piece, special))| {
-                !**special && (!piece.chars().all(english) || foreign.contains(piece.as_str()))
-            })
+            .filter(|(_, (piece, special))| !**special && !piece.chars().all(english))
             .map(|(id, _)| id)
             .collect()
     }

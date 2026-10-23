@@ -77,7 +77,7 @@ Do the steps in order. Each step ends on a check.
 There are no unit tests. The checks are:
 
 - **TDT's model:** the ratchet in `desktop/bench/engine-budget.json`: clean
-  81 errors, other 172, tech with developer terms 13. A change must not
+  81 errors, other 172, tech 34, all without a dictionary. A change must not
   raise one of them.
 - **Other families:** the error totals over the 456 clips. After a change,
   rerun the affected engines with `runtimes.py`, then
@@ -108,9 +108,17 @@ There are no unit tests. The checks are:
 
 ### Rules the code does not show
 
+- **No word lists.** Trit and TDT decode with the model alone: no list of
+  words, pieces, or terms ships in the engine or the app, and no bench runs
+  with one, so Trit is scored the same way as every other runtime. Rules
+  that read the model's own vocabulary are allowed ("pieces with accented
+  letters"); a file of chosen words is not. Failure seen: a 580 KB English
+  word list, a 1,132-piece foreign list, and 130 built-in developer terms
+  shipped and gave Trit help no other runtime had. CI fails on
+  `include_str!` in `trit/src` or `desktop/src`, and on text files there.
+
 - `skill/SKILL.md` comes from `trit skill`. Change the text in `src/main.rs` (`HOME_HELP`, `TRANSCRIBE_HELP`, `CLEAN_HELP`, `skill_text`) and `src/catalog.rs`, then run `trit skill > skill/SKILL.md`. CI fails when it is stale.
 - The desktop app depends on this crate by path (`desktop/Cargo.toml`) and passes `Options::language("en")`. A public API change must build there too: `cargo build --manifest-path ../desktop/Cargo.toml`.
 - Read the model files as published. Converting at load (F32 or BF16 to f16) is the only change allowed; the files on disk stay as Hugging Face ships them.
-- `src/text/foreign-pieces.txt` comes from `scripts/foreign_pieces.py` (wordfreq). Do not edit it by hand.
 - S1-mini's system prompt and control line are its trained input format (`src/cleanup.rs`). Keep them word for word.
 - On this Windows computer, a debug build of `libmimalloc-sys` can fail with MSVC error D8050. Use `--release` for clippy.
