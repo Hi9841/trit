@@ -109,3 +109,37 @@ Encoder int8 dense: ~10.6 G int8 MAC in 11.7 ms = ~20 % of VNNI peak.
   p = 0.0074; J1 tiny 61.7 vs 59.9 ms, ratio 0.952, p = 0.03; J4 Redux 34.8 vs 34.7 ms,
   p = 0.66. 0 texts differ on all three (231, 124, 81 errors on both sides).
 - Decision: KEEP (commit `cdec553`).
+
+### I-004 TDT beam search (Parakeet Redux and v3), 2026-10-23
+
+- Hypothesis: a frame-synchronous beam over TDT paths (top tokens x every
+  duration, paths with the same tokens merged) lowers word errors of
+  Parakeet Redux, TDT's model.
+- Result (trit CLI, whole clips, errors clean/other/tech/tts16, median ms):
+  Redux greedy 78/180/35/8 = 301 (27-44 ms); beam 2: 300 (108-133 ms);
+  beam 4: 301 (276-350 ms); beam 8: 301 (435-539 ms). Parakeet v3 greedy
+  207 (31-40 ms), beam 4: 202 (262-333 ms).
+- Decision: REVERT. No gain on Redux; 2.4 % on v3 at 8x the time is not
+  worth about 190 lines. The patch is kept outside the repo.
+
+### I-005 app path: parts of at least 10 s between pause cuts, 2026-10-23
+
+- Hypothesis: the app cuts a take at the first 500 ms pause after 3 s and
+  transcribes each part alone; the cuts inside sentences cost words.
+- Result (app path, word errors clean/other/tech/tts16): Redux 3 s
+  81/185/34/8 = 308, 10 s 82/173/34/6 = 295, whole clips 293. v3 215 -> 208.
+  Wait after release, 20 longest test-other clips at real speed (median):
+  Redux 34 -> 80 ms, v3 39 -> 91 ms; 15 s parts: 90 / 97 ms, no fewer errors.
+- Decision: REVERT. The owner judged 46 ms more wait not worth 4 % fewer errors;
+  next: keep 3 s parts and give each part the audio before its cut as context.
+
+### I-006 app path: the audio before a cut as context for the next part, 2026-10-23
+
+- Hypothesis: keep 3 s parts, but decode each part with 1 to 4 s of the
+  audio before its cut (started at the quietest 10 ms) and write only the
+  words after the cut (new Options::context).
+- Result (app path, errors all sets): Redux 308 -> 303; v3 215 -> 222.
+  A context that starts inside a word made v3 write nothing for a whole
+  part; the quiet start fixed that, but v3 stayed worse.
+- Decision: REVERT. Too small and mixed for a new public option. Patch kept
+  outside the repo.
