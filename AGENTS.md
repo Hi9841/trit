@@ -77,7 +77,7 @@ Do the steps in order. Each step ends on a check.
 There are no unit tests. The checks are:
 
 - **TDT's model:** the ratchet in `desktop/bench/engine-budget.json`: clean
-  81 errors, other 172, tech with developer terms 17. A change must not
+  81 errors, other 172, tech with developer terms 13. A change must not
   raise one of them.
 - **Other families:** the error totals over the 456 clips. After a change,
   rerun the affected engines with `runtimes.py`, then

@@ -377,10 +377,11 @@ weights in every mode.
 - **Dictionary:** Parakeet TDT decodes greedy, then finds runs of words
   spelled close to a term ("Perakeet", "trip run time", "wire shark") and
   scores the words and the term over the same frames with the joint
-  network. The term replaces the words when it loses by less than
-  `BiasWeights::prior` (8 log-probability units). Canary and Moonshine
-  raise the logits of the terms' tokens while they decode; with terms set
-  they decode greedy. Whisper puts the terms in a previous-text prompt, as
+  network. The term replaces the words when it loses by less than 4 + 2
+  log-probability units per letter of the term, less for a far spelling:
+  the decoder finds long names unlikely. Canary and Moonshine raise the
+  logits of the terms' tokens while they decode; with terms set they
+  decode greedy. Whisper puts the terms in a previous-text prompt, as
   OpenAI's `initial_prompt`.
 - **English:** with `language: "en"`, Parakeet never writes pieces that
   only other languages use.

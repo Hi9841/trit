@@ -1182,7 +1182,7 @@ impl Tdt {
                         .iter()
                         .map(Vec::as_slice)
                         .collect(),
-                    dictionary.prior,
+                    dictionary.limit(candidate),
                 ),
             };
             let words =

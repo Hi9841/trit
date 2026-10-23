@@ -4,8 +4,9 @@
 //! to a term (a few letters apart, or the same letters split or cased
 //! another way) is a candidate. The joint network scores the words it heard
 //! and the term over the same frames (`Tdt::score`), and the term
-//! replaces the words when it loses by less than `prior`. Speech that does
-//! not sound like the term keeps its own words, however close the spelling.
+//! replaces the words when it loses by less than `Dictionary::limit`.
+//! Speech that does not sound like the term keeps its own words, however
+//! close the spelling.
 
 use crate::models::parakeet::bias::BiasWeights;
 use crate::text::sentencepiece::{Tokenizer, WORD_START};
@@ -28,6 +29,13 @@ const MAX_CANDIDATES: usize = 16;
 /// capital is written when the model gives the capital nearly the same
 /// log-probability: "figma" becomes "Figma", but "go" stays "go".
 pub const CAPITAL_PRIOR: f32 = 3.0;
+/// The decoder finds every rare name unlikely, the more so the longer it is:
+/// a term said right loses to the words heard by about 2 per letter ("Deno"
+/// 6, "Trit Runtime" 13). A far spelling gets less room. Fitted on the names,
+/// tech, accent, and LibriSpeech sets (`desktop/bench/terms.py`).
+const LIMIT_BASE: f32 = 4.0;
+const LIMIT_PER_LETTER: f32 = 2.0;
+const LIMIT_PER_DISTANCE: f32 = 30.0;
 
 pub struct Dictionary {
     terms: Vec<Term>,
@@ -36,8 +44,6 @@ pub struct Dictionary {
     /// Per token id: lowercase letters and digits of the piece.
     keys: Vec<Vec<char>>,
     starts: Vec<bool>,
-    /// Log-probability a term may lose by to the words heard and still replace them.
-    pub prior: f32,
     /// How far the spelling heard may be from a term (0 the same, 1 nothing
     /// alike) for a sound check.
     distance: f32,
@@ -71,7 +77,7 @@ pub enum Check {
     None,
     /// Only first capitals differ: `CAPITAL_PRIOR` against the term as written.
     Capital,
-    /// Other spellings: `prior` against the best spelling of the term.
+    /// Other spellings: `Dictionary::limit` against the best spelling of the term.
     Sound,
 }
 
@@ -130,7 +136,6 @@ impl Dictionary {
             text,
             keys,
             starts: tokenizer.word_starts(),
-            prior: weights.prior,
             distance: weights.distance,
         };
         (
@@ -243,6 +248,13 @@ impl Dictionary {
     /// The tokens of a candidate's term as the user wrote it.
     pub fn written(&self, candidate: &Candidate) -> &[usize] {
         &self.terms[candidate.term].tokens
+    }
+
+    /// How much log-probability a sound-checked term may lose by to the
+    /// words heard and still replace them.
+    pub fn limit(&self, candidate: &Candidate) -> f32 {
+        let letters = self.terms[candidate.term].key.len() as f32;
+        LIMIT_BASE + LIMIT_PER_LETTER * letters - LIMIT_PER_DISTANCE * candidate.distance
     }
 
     /// The spellings of a candidate's term to score the sound with.
