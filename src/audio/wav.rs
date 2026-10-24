@@ -15,13 +15,13 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
     let mut offset = 12usize;
     while offset + 8 <= bytes.len() {
         let id = &bytes[offset..offset + 4];
-        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let size = le_u32(&bytes, offset + 4) as usize;
         let body = offset + 8;
         // A writer that streams sets the data size too large; read what is there.
         let end = (body + size).min(bytes.len());
         if id == b"fmt " && end - body >= 16 {
             let field = |at: usize| u16::from_le_bytes([bytes[body + at], bytes[body + at + 1]]);
-            let rate = u32::from_le_bytes(bytes[body + 4..body + 8].try_into().unwrap());
+            let rate = le_u32(&bytes, body + 4);
             format = Some((field(0), field(2), rate, field(14)));
         } else if id == b"data" {
             data = Some(&bytes[body..end]);
@@ -55,4 +55,9 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
         .chunks_exact(width * channels)
         .map(|frame| frame.chunks_exact(width).map(sample).sum::<f32>() / channels as f32)
         .collect())
+}
+
+/// The little-endian `u32` at `at`. The caller has checked that four bytes are there.
+fn le_u32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }

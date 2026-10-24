@@ -125,6 +125,12 @@ pub struct Cleaner {
     stop: Vec<usize>,
 }
 
+impl std::fmt::Debug for Cleaner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cleaner").finish_non_exhaustive()
+    }
+}
+
 impl Cleaner {
     /// Loads an S1-mini folder (`config.json`, `model.safetensors`, `tokenizer.json`).
     pub fn load(dir: &Path) -> Result<Self, String> {

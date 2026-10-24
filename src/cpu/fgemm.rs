@@ -162,6 +162,7 @@ impl OutPtr {
 }
 // SAFETY: tasks write disjoint output blocks; the buffer outlives the parallel scope.
 unsafe impl Send for OutPtr {}
+// SAFETY: as for `Send`: tasks write disjoint output blocks.
 unsafe impl Sync for OutPtr {}
 
 /// `out[i][j] = sum_k x[i][k] * w[j][k]`, parallel over 64 x 64 blocks.

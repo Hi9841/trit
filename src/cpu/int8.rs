@@ -18,6 +18,7 @@ use super::team;
 struct OutPtr(*mut f32);
 // SAFETY: tasks write disjoint output columns; the buffer outlives the step.
 unsafe impl Send for OutPtr {}
+// SAFETY: as for `Send`: tasks write disjoint output columns.
 unsafe impl Sync for OutPtr {}
 
 /// The product kernel. The activation quantizer follows `Isa`.

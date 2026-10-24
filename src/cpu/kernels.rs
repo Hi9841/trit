@@ -584,4 +584,5 @@ unsafe fn quantize_avx2(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
 struct OutPtr(*mut f32);
 // SAFETY: tasks write disjoint output elements; the buffer outlives the parallel scope.
 unsafe impl Send for OutPtr {}
+// SAFETY: as for `Send`: tasks write disjoint output elements.
 unsafe impl Sync for OutPtr {}

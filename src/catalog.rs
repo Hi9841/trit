@@ -3,6 +3,7 @@
 //! the ones known to work.
 
 /// One downloadable model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Known {
     /// Short name; also the folder name under `models/`.
     pub name: &'static str,

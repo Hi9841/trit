@@ -32,6 +32,12 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
 ] }
 
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
 [profile.release]
 codegen-units = 1
 lto = "fat"

@@ -316,8 +316,9 @@ impl<T> Clone for SendPtr<T> {
 }
 impl<T> Copy for SendPtr<T> {}
 // SAFETY: every task touches its own disjoint range.
-unsafe impl<T> Send for SendPtr<T> {}
-unsafe impl<T> Sync for SendPtr<T> {}
+unsafe impl<T: Send> Send for SendPtr<T> {}
+// SAFETY: as for `Send`: a task only reaches its own range, so no element is shared.
+unsafe impl<T: Send> Sync for SendPtr<T> {}
 
 impl<T> SendPtr<T> {
     pub fn new(data: &mut [T]) -> Self {
