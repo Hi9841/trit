@@ -10,9 +10,10 @@
 //   using var cleaner = new TritCleaner();                   // Superwhisper S1-mini
 //   Console.WriteLine(cleaner.Clean("so um send it friday no wait thursday"));
 //
-//   using var voice = new TritVoice();                       // Meta MMS-TTS English
-//   voice.SpeakWav("The build passed.", "speech.wav");
+//   using var voice = new TritVoice();                       // Kokoro-82M, else MMS-TTS English
+//   voice.SpeakWav("The build passed on March 3rd.", "speech.wav", voice: "bf_emma");
 //   float[] samples = voice.Speak("Ship it.", speed: 1.1f);  // at voice.SampleRate
+//   voice.SpeakStream(longText, part => { Play(part); return true; });  // each part as it is made
 //
 // Copy trit_ffi.dll (libtrit_ffi.so, libtrit_ffi.dylib) next to your program.
 // Build it with `cargo build --release -p trit-ffi` in the trit folder.
@@ -63,6 +64,10 @@ internal static partial class Native
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static unsafe partial float* trit_speak(IntPtr voice, string text, string? options, out nuint count);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial int trit_speak_wav(IntPtr voice, string text, string path, string? options);
     [LibraryImport(Lib)] public static unsafe partial void trit_free_samples(float* samples, nuint count);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static unsafe partial int trit_speak_stream(IntPtr voice, string text, string? options, delegate* unmanaged[Cdecl]<float*, nuint, IntPtr, int> callback, IntPtr userData);
+    [LibraryImport(Lib)] public static partial IntPtr trit_voice_list(IntPtr voice);
+    [LibraryImport(Lib)] public static partial IntPtr trit_voice_kind(IntPtr voice);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_phonemes(IntPtr voice, string text, string? options);
 }
 
 /// <summary>One loaded speech model. Load once and keep it.</summary>
@@ -198,30 +203,50 @@ public sealed class TritCleaner : IDisposable
     IntPtr Handle => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(TritCleaner));
 }
 
-/// <summary>A VITS voice (Meta MMS-TTS): text to speech. It reads letters; write numbers and symbols as words.</summary>
+/// <summary>A voice: Kokoro-82M (24 kHz, 28 English voices; reads numbers and symbols) or a VITS voice
+/// (Meta MMS-TTS, 16 kHz; reads letters only).</summary>
 public sealed class TritVoice : IDisposable
 {
     IntPtr _handle;
 
-    /// <summary>A voice folder, a `trit models` name ("mms-tts-eng"), or null for the default.</summary>
+    /// <summary>A voice folder, a `trit models` name ("kokoro-82m", "mms-tts-eng"), or null for the default
+    /// (Kokoro, then MMS-TTS).</summary>
     public TritVoice(string? model = null)
     {
         _handle = Native.trit_voice_load(model);
         if (_handle == IntPtr.Zero) throw Native.Error();
     }
 
-    /// <summary>The rate of the samples of <see cref="Speak"/> (16000 for MMS-TTS).</summary>
+    /// <summary>The rate of the samples of <see cref="Speak"/> (24000 Kokoro, 16000 MMS-TTS).</summary>
     public int SampleRate => Native.trit_voice_sample_rate(Handle);
 
-    /// <summary>Mono samples in -1..1 at <see cref="SampleRate"/>. speed: 1 is the voice's pace, 1.25 faster
-    /// (null: the voice's own); noise, noiseDuration: how much the voice and the timing vary (null: the
-    /// voice's own); one text and one seed give the same audio.</summary>
-    public float[] Speak(string text, float? speed = null, float? noise = null, float? noiseDuration = null,
-        ulong seed = 0)
+    /// <summary>"kokoro" or "vits".</summary>
+    public string Kind => Marshal.PtrToStringUTF8(Native.trit_voice_kind(Handle))!;
+
+    /// <summary>The voices of a Kokoro folder: af_/am_ American, bf_/bm_ British (none for VITS).</summary>
+    public string[] Voices
+    {
+        get
+        {
+            var text = Native.Text(Native.trit_voice_list(Handle));
+            return text.Length == 0 ? [] : text.Split('\n');
+        }
+    }
+
+    /// <summary>The phonemes Kokoro speaks for text, one line per pass, in the accent of voice.</summary>
+    public string Phonemes(string text, string? voice = null) =>
+        Native.Text(Native.trit_phonemes(Handle, text, Options(voice, null, null, null, 0, false)));
+
+    /// <summary>Mono samples in -1..1 at <see cref="SampleRate"/>. voice: Kokoro voice (null: af_heart; "a,b"
+    /// blends two); speed: 1 is the voice's pace, 1.25 faster (null: the voice's own); noise: how much the
+    /// voice varies; noiseDuration: VITS timing; one text and one seed give the same audio; phonemes: Kokoro,
+    /// the text is phonemes.</summary>
+    public float[] Speak(string text, string? voice = null, float? speed = null, float? noise = null,
+        float? noiseDuration = null, ulong seed = 0, bool phonemes = false)
     {
         unsafe
         {
-            float* samples = Native.trit_speak(Handle, text, Options(speed, noise, noiseDuration, seed), out nuint count);
+            float* samples = Native.trit_speak(Handle, text, Options(voice, speed, noise, noiseDuration, seed, phonemes), out nuint count);
             if (samples == null) throw Native.Error();
             try { return new ReadOnlySpan<float>(samples, checked((int)count)).ToArray(); }
             finally { Native.trit_free_samples(samples, count); }
@@ -229,24 +254,49 @@ public sealed class TritVoice : IDisposable
     }
 
     /// <summary><see cref="Speak"/> into a 16-bit mono WAV file.</summary>
-    public void SpeakWav(string text, string path, float? speed = null, float? noise = null,
-        float? noiseDuration = null, ulong seed = 0)
+    public void SpeakWav(string text, string path, string? voice = null, float? speed = null, float? noise = null,
+        float? noiseDuration = null, ulong seed = 0, bool phonemes = false)
     {
-        if (Native.trit_speak_wav(Handle, text, path, Options(speed, noise, noiseDuration, seed)) < 0)
+        if (Native.trit_speak_wav(Handle, text, path, Options(voice, speed, noise, noiseDuration, seed, phonemes)) < 0)
             throw Native.Error();
     }
 
+    [ThreadStatic] static Func<float[], bool>? _onPart;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    static unsafe int OnPart(float* samples, nuint count, IntPtr userData) =>
+        _onPart!(new ReadOnlySpan<float>(samples, checked((int)count)).ToArray()) ? 1 : 0;
+
+    /// <summary><see cref="Speak"/>, part by part: onPart gets each part (a sentence for VITS, a line or a
+    /// 510-phoneme pass for Kokoro) as soon as it is made; return false to stop.</summary>
+    public void SpeakStream(string text, Func<float[], bool> onPart, string? voice = null, float? speed = null,
+        float? noise = null, float? noiseDuration = null, ulong seed = 0, bool phonemes = false)
+    {
+        _onPart = onPart;
+        try
+        {
+            unsafe
+            {
+                if (Native.trit_speak_stream(Handle, text, Options(voice, speed, noise, noiseDuration, seed, phonemes), &OnPart, IntPtr.Zero) < 0)
+                    throw Native.Error();
+            }
+        }
+        finally { _onPart = null; }
+    }
+
     /// <summary>The options JSON of trit_speak.</summary>
-    static string Options(float? speed, float? noise, float? noiseDuration, ulong seed)
+    static string Options(string? voice, float? speed, float? noise, float? noiseDuration, ulong seed, bool phonemes)
     {
         using var buffer = new MemoryStream();
         using (var json = new Utf8JsonWriter(buffer))
         {
             json.WriteStartObject();
+            if (voice != null) json.WriteString("voice", voice);
             if (speed is float s) json.WriteNumber("speed", s);
             if (noise is float n) json.WriteNumber("noise", n);
             if (noiseDuration is float d) json.WriteNumber("noise_duration", d);
             json.WriteNumber("seed", seed);
+            json.WriteBoolean("phonemes", phonemes);
             json.WriteEndObject();
         }
         return System.Text.Encoding.UTF8.GetString(buffer.ToArray());

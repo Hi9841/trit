@@ -12,6 +12,7 @@ pub mod int8;
 pub mod kernels;
 pub mod team;
 pub mod tensors;
+mod torch_file;
 
 /// The kernels this CPU runs, for example `ternary avx512-vnni, int8
 /// vnni512, float avx512`: the ternary and int8 products (`avx512-vnni`,

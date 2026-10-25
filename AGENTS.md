@@ -2,8 +2,8 @@
 
 Trit is a CPU speech-to-text and text-to-speech engine in Rust with no
 inference library. It runs Parakeet, Canary, Whisper, and Moonshine
-checkpoints from Hugging Face, the S1-mini transcript cleaner, and VITS
-voices (Meta MMS-TTS). [README.md](README.md) is the reference:
+checkpoints from Hugging Face, the S1-mini transcript cleaner, and the
+Kokoro-82M and VITS (Meta MMS-TTS) voices. [README.md](README.md) is the reference:
 the API of each language, the models, and the options. This file gives the
 steps.
 
@@ -71,33 +71,41 @@ Do the steps in order. Each step ends on a check.
 | Format | `cargo fmt --all` |
 | Smoke test | `./target/release/trit doctor`, then `./target/release/trit transcribe <file.wav> --model <name>` |
 | Skill current? | `./target/release/trit skill --check skill/SKILL.md` |
-| Accuracy of the TDT model | `uv run bench/accuracy.py <abs path of bench-asr.exe> clean other tech --engine native` |
-| Voice against Transformers | `uv run --no-project --python 3.12 --with torch --with transformers --with numpy --with scipy --with whisper-normalizer --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match python bench/tts.py <trit.exe> <voice dir> <parakeet-redux dir>` |
+| Voices against their references | `python bench/tts.py kokoro <trit.exe> <kokoro dir> <parakeet-redux dir>` and `python bench/tts.py vits <trit.exe> <mms dir> <parakeet-redux dir>`, in the environment that `bench/tts.py` names |
+| Phonemes of a text | `./target/release/trit phonemes "<text>"` (`--british`, `--no-fallback`) |
 | Same model on other runtimes | `uv run --no-project --python 3.12 python bench/runtimes.py <engine>` |
 | Speed of one change | `uv run --no-project --python 3.12 --with numpy --with whisper-normalizer --with scipy python oploop/ab.py <model> <A.dll> <B.dll>` (interleaved A/B of two `trit_ffi` builds) |
 
 There are no unit tests. The checks are:
 
-- **TDT's model:** the ratchet in `bench/engine-budget.json`: clean
-  81 errors, other 172, tech 34, all without a dictionary. A change must not
-  raise one of them.
+- **TDT's model:** Parakeet Redux must keep clean 81 errors, other 172,
+  tech 34, all without a dictionary (`bench/runtimes.py trit --sets
+  clean,other,tech`). A change must not raise one of them. TDT checks the
+  same numbers with its own ratchet (`desktop/bench/engine-budget.json` in
+  the TDT repository).
 - **Other families:** the error totals over the 456 clips. After a change,
   rerun the affected engines with `runtimes.py`, then
   `python bench/wer_rule.py`. It must exit 0: Trit's default
   has the fewest errors, or a tie, for each model. The last full run is
   `bench/runtimes-results.jsonl`.
-- **Voice:** `bench/tts.py`. With the noise off, every clip has the
-  length of the reference and an SNR of 75 dB or more. Round-trip word
-  errors (noise off, and the sum of three seeds with noise) must not be
-  above the reference's. Last run: SNR 76.1 dB or more, errors 167
+- **Voices:** `bench/tts.py`. Kokoro: with the same phonemes and noise,
+  every clip has the reference's length, and the SNR stays where float
+  rounding puts it (last run: median 38.2 dB, lowest 31.0 dB; PyTorch's own
+  float32 against float64 is 25 to 37 dB); the round-trip word errors are
+  not above the reference's (last run: 70, 70, 70 against 71, 71, 70).
+  VITS: with the noise off, the same length and 75 dB or more; errors 167
   against 171, and 536 against 553.
+- **Phonemizer:** given the same tokens, Trit's phonemes equal misaki's
+  (`misaki` 0.9.4; run misaki with `g2p.nlp` returning Trit's tokens); last
+  check: 451 lines, 0 differences, American and British. The tagger's gap
+  to spaCy is separate: 3.0 % of phoneme words on the bench corpus.
 - **Speed:** a change is a gain only when `ab.py` shows p < 0.01 and the
   same text on every clip. Record it in `oploop/LEDGER.md`.
 
 ### Architecture
 
 - `src/lib.rs`: the public API (`Trit`, `Options`, `Cleaner`, `Voice`, `find_model`, `read_wav`, `write_wav`). One way to do each thing.
-- `src/speech.rs`: `Voice`, text to speech. It is not a `Family` (audio in, text out): it loads `models/families/vits.rs` directly, cuts text into sentences, and seeds the noise (`Voicing::seed`), so one text always gives the same audio. `src/text/characters.rs` is its tokenizer; `parts/conv.rs` holds its convolutions. The voice keeps f32 weights (`Precision` does not apply): HiFi-GAN writes every sample from them.
+- `src/tts/`: text to speech. `mod.rs` is `Voice`: it is not a `Family` (audio in, text out); it picks Kokoro (`kokoro/`: ALBERT, prosody, decoder, iSTFTNet generator) or VITS (`vits.rs`, `characters.rs`) from the folder's files, cuts text into passes, and seeds the noise (`Voicing::seed`), so one text always gives the same audio. `english/` is Kokoro's phonemizer, a port of misaki: `tokens.rs` (tokenizer and tag corrections), `tagger.rs` (NLTK's perceptron), `lexicon.rs` and `numbers.rs` (misaki's lexicon and num2words), `fallback.rs` (the BART for unknown words), `data/` (written by `tools/tts_data.py`). Voices keep f32 weights (`Precision` does not apply): the vocoder writes every sample from them. Kokoro's `.pth` is read by `cpu/torch_file.rs`; `parts/lstm.rs`, `parts/conv.rs`, and `audio/stft.rs` are its layers.
 - `src/models/mod.rs`: `FAMILIES` has one row per `model_type`: its loader and its worker spread (`Spread::OneCache` for short products, `AllCores` for Whisper). `MODEL_TYPES` comes from it. Every family implements `Family`. Every load and call enters the team of its spread; each spread has its own team.
 - `src/models/parts/`: building blocks that the config picks, shared across families. `fastconformer.rs` is the encoder of Parakeet and Canary; `transducer.rs` the TDT and RNNT head; `ctc.rs`, `beam.rs`, `qwen3.rs` (the language model of Qwen3-ASR and S1-mini). `dictionary.rs` is the TDT dictionary: terms replace close spellings when the joint network's score allows. `logit_bias.rs` is the logit dictionary of Canary and Moonshine.
 - `src/models/families/`: one file per checkpoint family; it reads the files and wires the parts. `layers.rs` holds the shared layers (norms, GELU, rotary, attention with grouped heads, conv columns); `config.rs` reads `config.json`.
@@ -117,16 +125,25 @@ There are no unit tests. The checks are:
 
 ### Rules the code does not show
 
-- **No word lists.** Trit and TDT decode with the model alone: no list of
-  words, pieces, or terms ships in the engine or the app, and no bench runs
-  with one, so Trit is scored the same way as every other runtime. Rules
-  that read the model's own vocabulary are allowed ("pieces with accented
-  letters"); a file of chosen words is not. Failure seen: a 580 KB English
-  word list, a 1,132-piece foreign list, and 130 built-in developer terms
-  shipped and gave Trit help no other runtime had. CI fails on
-  `include_str!` in `src/` and `ffi/`, and on text files in `src/`.
+- **No word lists in speech to text.** Speech to text decodes with the
+  model alone: no list of words, pieces, or terms ships in it, and no bench
+  runs with one, so Trit is scored the same way as every other runtime.
+  Rules that read the model's own vocabulary are allowed ("pieces with
+  accented letters"); a file of chosen words is not. Failure seen: a 580 KB
+  English word list, a 1,132-piece foreign list, and 130 built-in developer
+  terms shipped and gave Trit help no other runtime had. CI fails on
+  `include_str!` in `src/` and `ffi/`, and on text files in `src/`, outside
+  `src/tts/`.
+- **Text to speech may hold lists** (the owner's decision, 2026-10-25): a
+  voice needs text normalization and a pronunciation lexicon to say text.
+  Keep them in `src/tts/`, and their sources and licenses in
+  `THIRD_PARTY_NOTICES.md` and `src/tts/english/data/README.md`.
+- **The phonemizer follows misaki.** Port a misaki change function for
+  function, then rerun the phonemizer check. Where Trit differs on purpose,
+  say so in a comment: the tokens and tags (not spaCy), and the BART reads
+  only word-like groups.
 
-- `skill/SKILL.md` comes from `trit skill`. Change the text in `src/main.rs` (`HOME_HELP`, `TRANSCRIBE_HELP`, `CLEAN_HELP`, `skill_text`) and `src/catalog.rs`, then run `trit skill > skill/SKILL.md`. CI fails when it is stale.
+- `skill/SKILL.md` comes from `trit skill`. Change the text in `src/main.rs` (`HOME_HELP`, `TRANSCRIBE_HELP`, `CLEAN_HELP`, `SPEAK_HELP`, `PHONEMES_HELP`, `VOICES_HELP`, `skill_text`) and `src/catalog.rs`, then run `trit skill > skill/SKILL.md`. CI fails when it is stale.
 - TDT (https://github.com/Hi9841/tdt) depends on a tag of this repository and passes `Options::language("en")`. A public API change must build there too. In a TDT checkout: `cargo build --release --manifest-path desktop/Cargo.toml --config "patch.'https://github.com/Hi9841/trit'.trit.path='<this repository>'"`.
 - Read the model files as published. Converting at load (F32 or BF16 to f16) is the only change allowed; the files on disk stay as Hugging Face ships them.
 - S1-mini's system prompt and control line are its trained input format (`src/cleanup.rs`). Keep them word for word.

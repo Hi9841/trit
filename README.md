@@ -4,7 +4,8 @@ Trit is a speech-to-text and text-to-speech engine for the CPU. It runs
 Parakeet, Canary, Whisper, and Moonshine checkpoints as published on Hugging
 Face, with its own kernels: no Python, no PyTorch, no ONNX Runtime, no GPU.
 16 kHz audio in, text out. It can also clean a raw transcript with
-Superwhisper S1-mini, and speak text with a VITS voice (Meta MMS-TTS).
+Superwhisper S1-mini, and speak text with Kokoro-82M (28 English voices)
+or a VITS voice (Meta MMS-TTS).
 
 [TDT](https://github.com/Hi9841/tdt), an offline dictation app for Windows,
 uses Trit for all of its speech.
@@ -92,7 +93,9 @@ The agent skill for the CLI is [skill/SKILL.md](skill/SKILL.md).
 | `trit` | Home view: the binary, the models, the CPU path, next commands |
 | `trit transcribe <path>...` | Text of WAV files, or of every WAV file in a folder |
 | `trit clean "<text>"` | A raw transcript as clean written English (S1-mini) |
-| `trit speak "<text>"` | Speech of the text as a WAV file (MMS-TTS); see [Text to speech](#text-to-speech) |
+| `trit speak "<text>"` | Speech of the text as a WAV file (Kokoro or MMS-TTS); see [Text to speech](#text-to-speech) |
+| `trit phonemes "<text>"` | The phonemes Kokoro speaks for English text |
+| `trit voices` | The voices of a Kokoro folder |
 | `trit models` | The models Trit runs, where they are, how to get them |
 | `trit doctor` | Where Trit looks for models, and the fix for each problem |
 | `trit skill [--check <file>]` | The agent skill, made from the help text |
@@ -163,14 +166,18 @@ trit::release_memory();                                  // when the app goes id
 | `find_model(Option<&Path>)`, `find_cleanup_model(Option<&Path>)` | The model search in [Models](#models) |
 | `missing_model(Option<&Path>) -> String` | Why `find_model` found nothing, with the fix |
 | `read_wav(&Path) -> Result<Vec<f32>, String>` | A 16 kHz WAV file as mono samples |
-| `Voice::load(dir) -> Result<Voice, String>` | Loads a VITS voice (MMS-TTS) |
-| `Voice::speak(&self, &str) -> Vec<f32>` | Speech of the text, mono at `Voice::sample_rate()` |
-| `Voice::speak_with(&self, &str, &Voicing) -> Result<Vec<f32>, String>` | The same with `Voicing { speed, noise, noise_duration, seed }`; fails on a speed of 0 or less |
-| `Voice::reads(&self, &str) -> String` | The text as the voice reads it (what is not there is not spoken) |
-| `find_voice(Option<&Path>)`, `missing_voice(Option<&Path>)` | The voice search, and why it found nothing |
+| `Voice::load(dir) -> Result<Voice, String>` | Loads a voice: Kokoro-82M or VITS (MMS-TTS) |
+| `Voice::speak(&self, &str) -> Vec<f32>` | Speech of the text, mono at `Voice::sample_rate()` (24000 Kokoro, 16000 VITS) |
+| `Voice::speak_with(&self, &str, &Voicing) -> Result<Vec<f32>, String>` | The same with `Voicing { voice, phonemes, speed, noise, noise_duration, seed }` |
+| `Voice::speak_stream(&self, &str, &Voicing, &mut dyn FnMut(&[f32]) -> bool)` | The same, part by part; return false to stop |
+| `Voice::phonemes(&self, &str, &Voicing) -> Result<String, String>` | The phonemes Kokoro speaks, one line per pass |
+| `Voice::voices(&self) -> Vec<String>`, `Voice::kind(&self) -> &str` | The voices of a Kokoro folder; `kokoro` or `vits` |
+| `Voice::reads(&self, &str) -> String` | What the voice reads of the text |
+| `phonemize(&str, british, fallback) -> Result<String, String>` | English phonemes without a voice |
+| `find_voice(Option<&Path>)`, `missing_voice(Option<&Path>)`, `is_voice(&Path)` | The voice search, and why it found nothing |
 | `write_wav(&Path, &[f32], rate) -> Result<(), String>` | Mono samples as a 16-bit WAV file |
 | `CATALOG`, `known(name)`, `candidates(repo)` | The model catalog and the places of a repository |
-| `VOICE_REPO` | The default voice, `facebook/mms-tts-eng` |
+| `VOICE_REPO`, `VOICE_REPOS` | The default voice (`hexgrad/Kokoro-82M`), and the search order (Kokoro, MMS-TTS) |
 | `cpu_path() -> &str`, `threads(Spread) -> usize` | The kernel paths in use; the worker count |
 | `SAMPLE_RATE`, `MODEL_TYPES`, `VERSION` | Constants |
 
@@ -204,14 +211,16 @@ trit_free(engine);
 | `trit_set_dictionary(engine, const char *terms)` | Terms skipped, or -1. One term per line |
 | `trit_cleaner_load(const char *model)`, `trit_cleaner_load_with(model, precision)` | A cleaner, or NULL |
 | `trit_clean(cleaner, text, styling, structure, context)` | Clean text, or NULL. NULL settings take the default |
-| `trit_voice_load(const char *model)` | A voice, or NULL. A folder, a name, or NULL for `mms-tts-eng` |
-| `trit_voice_sample_rate(voice)` | The rate of the samples (16000), or -1 |
-| `trit_speak(voice, const char *text, const char *options, size_t *count)` | Mono floats and their count, or NULL. `options` is NULL or a JSON object with any of `speed`, `noise`, `noise_duration`, `seed` |
+| `trit_voice_load(const char *model)` | A voice, or NULL. A folder, a name, or NULL for `kokoro-82m`, then `mms-tts-eng` |
+| `trit_voice_sample_rate(voice)`, `trit_voice_kind(voice)` | The rate of the samples (24000 or 16000), or -1; `"kokoro"` or `"vits"` |
+| `trit_voice_list(voice)`, `trit_phonemes(voice, text, options)` | The voice names, one per line; the phonemes of the text. Free with `trit_free_text` |
+| `trit_speak(voice, const char *text, const char *options, size_t *count)` | Mono floats and their count, or NULL. `options` is NULL or a JSON object with any of `voice`, `phonemes`, `speed`, `noise`, `noise_duration`, `seed` |
+| `trit_speak_stream(voice, text, options, TritSamplesFn callback, void *user_data)` | 0, or -1. The callback gets each part; it returns 1 to go on, 0 to stop |
 | `trit_speak_wav(voice, text, const char *path, options)` | 0, or -1. A 16-bit mono WAV file |
 | `trit_release_memory(void)` | Gives memory that earlier calls freed back to the system |
 | `trit_last_error(void)` | The reason for the last failure on this thread |
 | `trit_free_text(char *)`, `trit_free(Trit *)`, `trit_cleaner_free(TritCleaner *)`, `trit_voice_free(TritVoice *)`, `trit_free_samples(float *, size_t count)` | Free. NULL is a no-op |
-| `trit_version(void)` | `"0.2.0"` |
+| `trit_version(void)` | `"0.3.0"` |
 
 Rules: strings are UTF-8. `language` is an ISO 639-1 code or NULL. Free
 every returned text with `trit_free_text`, and the samples of `trit_speak`
@@ -246,9 +255,12 @@ trit.release_memory()                             # when the app goes idle
 cleaner = trit.Cleaner()                          # S1-mini
 print(cleaner.clean("so um send it friday no wait thursday", context="email"))
 
-voice = trit.Voice()                              # mms-tts-eng
-voice.speak_wav("The build passed.", "done.wav")
+voice = trit.Voice()                              # kokoro-82m, else mms-tts-eng
+voice.speak_wav("The build passed on March 3rd.", "done.wav", voice="bf_emma")
 samples = voice.speak("Ship it.", speed=1.1, seed=3)  # array("f") at voice.sample_rate
+for part in voice.stream(long_text):              # each pass as soon as it is made
+    play(part)
+print(voice.voices, voice.phonemes("I read it."))
 ```
 
 Errors raise `trit.TritError` with the cause and the fix. `Trit`,
@@ -274,9 +286,10 @@ engine.SetDictionary("Kubernetes", "PostgreSQL");
 using var cleaner = new TritCleaner();
 Console.WriteLine(cleaner.Clean("so um send it friday no wait thursday"));
 
-using var voice = new TritVoice();                       // mms-tts-eng
-voice.SpeakWav("The build passed.", "done.wav");
+using var voice = new TritVoice();                       // kokoro-82m, else mms-tts-eng
+voice.SpeakWav("The build passed on March 3rd.", "done.wav", voice: "bf_emma");
 float[] samples = voice.Speak("Ship it.", speed: 1.1f);  // at voice.SampleRate
+voice.SpeakStream(longText, part => { Play(part); return true; });
 ```
 
 Errors throw `TritException`. The options of each call are `language`,
@@ -304,9 +317,10 @@ const cleaner = new Cleaner();
 console.log(cleaner.clean("so um send it friday no wait thursday", { styling: "formal" }));
 cleaner.close();
 
-const voice = new Voice();                             // mms-tts-eng
-voice.speakWav("The build passed.", "done.wav");
+const voice = new Voice();                             // kokoro-82m, else mms-tts-eng
+voice.speakWav("The build passed on March 3rd.", "done.wav", { voice: "bf_emma" });
 const samples = voice.speak("Ship it.", { speed: 1.1 });  // Float32Array at voice.sampleRate
+voice.speakStream(longText, (part) => { play(part); return true; });
 voice.close();
 ```
 
@@ -336,6 +350,8 @@ checkpoints of the same families load the same way.
 | wav2vec2-base-960h | facebook/wav2vec2-base-960h | wav2vec 2.0 (CTC) | English | 378 |
 | qwen3-asr-0.6b | Qwen/Qwen3-ASR-0.6B | Qwen3-ASR | 30 | 1876 |
 | s1-mini | superwhisper/s1-mini | Qwen3 text model (cleanup) | English | 1503 |
+| kokoro-82m | hexgrad/Kokoro-82M | Kokoro voice (text to speech), 28 English voices | English (US, GB) | 327 |
+| graphemes_to_phonemes_en_us, _en_gb | PeterReid/graphemes_to_phonemes_en_us, _gb | The phonemizer's fallback for unknown words | English | 3 |
 | mms-tts-eng | facebook/mms-tts-eng | VITS voice (text to speech) | English | 145 |
 
 Download only the files Trit reads:
@@ -387,46 +403,111 @@ Input that is only fillers gives an empty string. English only.
 
 ## Text to speech
 
-[Meta MMS-TTS](https://huggingface.co/facebook/mms-tts-eng) is a VITS voice:
-a transformer reads the letters, a stochastic duration predictor gives each
-letter its length, a flow turns a noisy prior into a spectrogram latent, and
-HiFi-GAN writes 16 kHz audio. 36 M parameters, f32. Trit runs it as
-Transformers' `VitsModel` does, step for step.
+Trit speaks with two kinds of voice:
+
+| Voice | Model | Rate | Reads | Voices |
+|---|---|---|---|---|
+| `kokoro-82m` (the default) | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M): StyleTTS 2 with an iSTFTNet vocoder, 82 M parameters | 24 kHz | English text: words, numbers, money, times, dates, symbols | 28: `af_`/`am_` American, `bf_`/`bm_` British |
+| `mms-tts-eng` | [Meta MMS-TTS](https://huggingface.co/facebook/mms-tts-eng): VITS, 36 M parameters | 16 kHz | Letters only | 1 (the other MMS languages load too) |
 
 ```powershell
-hf download facebook/mms-tts-eng config.json tokenizer_config.json vocab.json model.safetensors --local-dir models/mms-tts-eng
-./target/release/trit speak "Restart the pod, then check the logs." --out pod.wav
+hf download hexgrad/Kokoro-82M config.json kokoro-v1_0.pth voices/af_heart.pt voices/bf_emma.pt --local-dir models/kokoro-82m
+hf download PeterReid/graphemes_to_phonemes_en_us config.json generation_config.json model.safetensors --local-dir models/graphemes_to_phonemes_en_us
+./target/release/trit speak "The build passed on March 3rd, and it cost $3.50." --out done.wav
+./target/release/trit speak "Good morning from London." --voice bf_emma
+./target/release/trit voices
 ```
+
+`trit models` prints the command that gets all 28 English voices.
+
+### How Kokoro reads text
+
+Kokoro speaks phonemes. Trit's phonemizer (`src/tts/english/`) is a port of
+[misaki](https://github.com/hexgrad/misaki) 0.9.4, the phonemizer that the
+`kokoro` package uses, function for function:
+
+- **Lexicons:** misaki's gold and silver dictionaries, American and British
+  (about 180,000 words each), with misaki's rules for -s, -ed, and -ing,
+  stress, and capitals. They ship in the binary, deflated (4 MB).
+- **Numbers and symbols:** cardinals, ordinals, years, decimals, money in
+  dollars, pounds, and euros, times, `%`, `&`, `+`, `@`, and addresses
+  ("take dot wav"), as misaki reads them with num2words.
+- **Tags:** misaki asks spaCy which words are verbs, nouns, and so on
+  ("read" and "read", "the object" and "to object"). Trit tags with NLTK's
+  averaged perceptron, on Penn Treebank tokens (`ca n't`), with a few
+  corrections for orders and addresses.
+- **Unknown words:** a small BART (`PeterReid/graphemes_to_phonemes_en_us`
+  and `_gb`, the fallback of misaki's main branch) gives phonemes to a word
+  that no dictionary holds. Without it, such words are not spoken.
+- **Your own pronunciation:** misaki's markup works: `[Kokoro](/kˈOkəɹO/)`
+  gives a word its phonemes, `[record](-1)` lowers its stress.
+- **Passes:** Kokoro reads at most 510 phonemes in one pass. Trit cuts the
+  text at line breaks, then at sentence ends, as the `kokoro` package does.
+
+`trit phonemes "<text>"` and `Voice::phonemes` show the phonemes; `--phonemes`
+(`Voicing::phonemes`) speaks phonemes that you give.
+
+### Settings
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `speed` | 1 (the voice's `speaking_rate`) | Speaking rate: 1.25 is a quarter faster |
-| `noise` | 0.667 (the voice's `noise_scale`) | How much the voice varies; 0 is the flattest |
-| `noise_duration` | 0.8 (the voice's `noise_scale_duration`) | How much the timing varies |
+| `voice` | `af_heart` | Kokoro voice; `"af_bella,af_sky"` is the mean of two |
+| `speed` | 1 | Speaking rate: 1.25 is a quarter faster |
+| `noise` | Kokoro 1, VITS 0.667 | Kokoro: the noise of the vocoder's source. VITS: `noise_scale`, how much the voice varies; 0 is the flattest |
+| `noise_duration` | 0.8 | VITS only: how much the timing varies |
 | `seed` | 0 | The seed of the noise: one text and one seed give the same audio |
+| `phonemes` | false | Kokoro: the text is phonemes, one pass per line |
 
-- **Letters only:** the voice reads the characters of its `vocab.json`
-  (English: a to z, digits 0 to 6, space, apostrophe, hyphen). Trit has no
-  phonemizer and no word list. It drops other characters, so write numbers
-  and symbols as words. `Voice::reads` and the `reads:` line of
-  `trit speak` show what the voice reads.
-- **Sentences:** Trit cuts the text after `.`, `!`, `?`, `;`, `:` and at
-  line breaks, speaks each part, and puts 0.3 s of silence between parts.
-  A part longer than 400 characters is cut at its last comma or space.
-- **Blanks:** the id of the blank goes between all characters, as MMS was
-  trained. Transformers' tokenizer drops the blanks around a "k" at the
-  very start or end of a text; there the two runtimes differ.
-- **Same as the reference:** with the noise off, the audio of Trit and of
-  Transformers is the same to 76 dB or more (near the limit of 16-bit WAV) on the
-  56 sentences of `bench/corpus.txt` and `tech-corpus.txt`, on the
-  AVX-512, AVX2, and scalar paths. Spoken by each runtime and transcribed by
-  Parakeet Redux, the sentences give no more word errors with Trit (noise
-  off: 167 Trit, 171 Transformers; noise on, three seeds: 536 Trit, 553
-  Transformers). `bench/tts.py` runs this check.
-- **Other voices:** any one-speaker MMS-TTS checkpoint that reads letters
-  (`phonemize: false`) loads. For a language with `is_uroman: true`, give
-  romanized text. Voices with several speakers and VITS models that need a
-  phonemizer do not load.
+`Voice::speak_stream` (`trit_speak_stream`, `Voice.stream` in Python,
+`SpeakStream` in C#, `speakStream` in Node) gives each part as soon as it is
+made: a pass for Kokoro, a sentence for VITS. Play can start before the
+rest is spoken.
+
+### Same as the reference
+
+`bench/tts.py` checks each voice against its reference runtime, on the 56
+sentences of `bench/corpus.txt` and `bench/tech-corpus.txt` (859 words).
+Both runtimes speak; Parakeet Redux transcribes both.
+
+- **Kokoro, the engine:** the `kokoro` package's `KModel` and Trit speak the
+  same phonemes with the same noise (Trit's noise, reproduced in the bench).
+  Every clip has the same length; the median SNR is 38 dB. That is float
+  rounding, which the model amplifies: against exact float64 math, Trit is
+  as close as PyTorch's own float32 (25.7 against 25.4 dB on the longest
+  sentence, 37.0 against 36.6 dB on a short one).
+- **Kokoro, the round trip:** text to speech with each full pipeline
+  (`kokoro` with misaki, spaCy, and espeak; Trit), then transcribed: 70, 70,
+  and 70 word errors with Trit over three seeds, 71, 71, and 70 with the
+  reference.
+- **The phonemizer:** given the same tokens, Trit's phonemes are misaki's,
+  character for character (451 test lines with numbers, money, and markup;
+  American and British). With its own tagger and the BART for unknown words,
+  3.0 % of the phoneme words differ from misaki with spaCy and espeak.
+- **VITS:** with the noise off, the audio is the same to 76 dB or more
+  (near the limit of 16-bit WAV) on the AVX-512, AVX2, and scalar paths. The
+  round trip gives 167 word errors with Trit and 171 with Transformers
+  (noise off), and 536 against 553 (noise on, three seeds). Both runtimes
+  get the same ids: Transformers' tokenizer drops the blanks around a "k"
+  at the very start or end of a text, which MMS was not trained with.
+
+### Limits
+
+- Kokoro's other languages (Spanish, French, Hindi, Italian, Japanese,
+  Portuguese, Chinese) need their own phonemizers. Their voices load; give
+  them phonemes with `phonemes`.
+- The tagger is not spaCy's. A word whose sound changes with its role
+  ("read", "record", "that") can get the other sound. Mark it:
+  `[read](/ɹˈɛd/)`.
+- Trit does not apply Unicode NFKC to the text, as misaki does; ASCII and
+  common text are the same under it.
+- A VITS voice reads letters only (MMS English: a to z, digits 0 to 6,
+  apostrophe, hyphen); write numbers as words. Sentences get 0.3 s of
+  silence between them. One-speaker MMS checkpoints that read letters
+  (`phonemize: false`) load; a language with `is_uroman: true` needs
+  romanized text.
+- Text to speech is the one part of Trit with lists of words: the
+  lexicons, the number words, and the tagger's weights. A voice needs them
+  to say text. Speech to text has none.
 
 ## Precision
 
@@ -486,7 +567,7 @@ weights in every mode.
 |---|---|
 | `TRIT_MODEL` | The speech model folder, when the caller names none |
 | `TRIT_CLEANUP_MODEL` | The S1-mini folder, when the caller names none |
-| `TRIT_VOICE` | The voice folder, when the caller names none |
+| `TRIT_VOICE` | The voice folder, when the caller names none (else Kokoro, then MMS-TTS) |
 | `TRIT_THREADS` | The worker count; turns pinning off |
 | `TRIT_ISA` | `scalar`, `avx2`, or `avxvnni` forces another kernel path, for tests |
 | `TRIT_LIB` | The library path, for the Python and Node bindings |
@@ -499,10 +580,10 @@ weights in every mode.
 | `src/main.rs` | The `trit` CLI |
 | `src/catalog.rs` | The model catalog |
 | `src/cleanup.rs` | `Cleaner`: S1-mini prompt and styles |
-| `src/speech.rs` | `Voice`: text to speech, sentence cuts, `Voicing` |
-| `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`) |
-| `src/audio/` | WAV reader and writer, NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), windows for long audio |
-| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen), characters (VITS) |
+| `src/tts/` | Text to speech: `Voice` and `Voicing` (`mod.rs`), Kokoro (`kokoro/`), VITS (`vits.rs`), the English phonemizer (`english/`: tokenizer, tagger, lexicon, numbers, BART fallback, data) |
+| `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`), PyTorch checkpoint reader (`torch_file.rs`) |
+| `src/audio/` | WAV reader and writer, STFT and its inverse (`stft.rs`), NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), windows for long audio |
+| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen) |
 | `src/models/mod.rs` | `FAMILIES`: one row per `model_type` (its loader and thread spread), and the `Family` trait |
 | `src/models/config.rs` | The `config.json` reader that every family uses |
 | `src/models/layers.rs` | Shared layers: norms, GELU, rotary positions, attention, conv columns |
@@ -519,4 +600,6 @@ or use it to make money.
 
 Each model has its own license: Parakeet and Canary CC-BY-4.0, Whisper and
 Moonshine MIT, S1-mini Apache-2.0 with a naming clause, MMS-TTS
-CC-BY-NC-4.0 (noncommercial). Follow it when you ship the model.
+CC-BY-NC-4.0 (noncommercial), Kokoro-82M and the G2P fallback Apache-2.0.
+Follow it when you ship the model. The phonemizer's lexicons (misaki, Apache-2.0) and
+tagger (MIT) ship in Trit: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

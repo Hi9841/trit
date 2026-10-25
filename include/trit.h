@@ -33,7 +33,7 @@ typedef struct Trit Trit;
 typedef struct TritCleaner TritCleaner;
 typedef struct TritVoice TritVoice;
 
-/* The engine version, for example "0.2.0". Static; do not free. */
+/* The engine version, for example "0.3.0". Static; do not free. */
 const char *trit_version(void);
 
 /* The error of the last failed call on this thread, or "" after a success.
@@ -134,29 +134,56 @@ void trit_cleaner_free(TritCleaner *cleaner);
 char *trit_clean(const TritCleaner *cleaner, const char *text, const char *styling,
                  const char *structure, const char *context);
 
-/* Loads a voice (text to speech): a VITS folder (Meta MMS-TTS) or a name
- * from `trit models` ("mms-tts-eng"). NULL reads TRIT_VOICE, then searches
- * ./models/mms-tts-eng and the Hugging Face cache. NULL on failure. */
+/* Loads a voice (text to speech): Kokoro-82M (24 kHz, 28 English voices)
+ * or a VITS folder (Meta MMS-TTS, 16 kHz), or a name from `trit models`
+ * ("kokoro-82m", "mms-tts-eng"). NULL reads TRIT_VOICE, then searches
+ * ./models and the Hugging Face cache for kokoro-82m, then mms-tts-eng.
+ * NULL on failure. */
 TritVoice *trit_voice_load(const char *model_dir);
 
 /* Frees a voice. NULL is a no-op. */
 void trit_voice_free(TritVoice *voice);
 
-/* The rate of the samples of trit_speak (16000 for MMS-TTS); -1 for NULL. */
+/* The rate of the samples of trit_speak (24000 Kokoro, 16000 MMS-TTS); -1 for NULL. */
 int trit_voice_sample_rate(const TritVoice *voice);
 
+/* "kokoro" or "vits"; NULL for NULL. Static; do not free. */
+const char *trit_voice_kind(const TritVoice *voice);
+
+/* The voices of a Kokoro folder, one name per line ("" for VITS): af_ and
+ * am_ American, bf_ and bm_ British. NULL on failure. Free with trit_free_text(). */
+char *trit_voice_list(const TritVoice *voice);
+
+/* The phonemes a Kokoro voice speaks for `text`, one line per pass, with
+ * the accent of the options' voice; `options` as for trit_speak. NULL on
+ * failure. Free with trit_free_text(). */
+char *trit_phonemes(const TritVoice *voice, const char *text, const char *options);
+
 /* Speaks `text`: mono floats in -1 to 1 at trit_voice_sample_rate(), their
- * number in *count. The voice reads letters; write numbers and symbols as
- * words. Sentences get a short pause between them.
+ * number in *count. Kokoro reads English text (numbers and symbols too);
+ * a VITS voice reads letters only.
  * `options`: NULL or a JSON object; every key is optional:
+ *   "voice":          Kokoro: a name of trit_voice_list (default "af_heart");
+ *                     "af_bella,af_sky" blends two
+ *   "phonemes":       Kokoro: true when the text is phonemes, one pass per line
  *   "speed":          speaking rate; 1 is the voice's pace, 1.25 faster
- *   "noise":          how much the voice varies (the voice's own: 0.667)
- *   "noise_duration": how much the timing varies (the voice's own: 0.8)
+ *   "noise":          how much the voice varies (VITS 0.667, Kokoro 1)
+ *   "noise_duration": VITS: how much the timing varies (0.8)
  *   "seed":           0 (default) or more; one text and one seed give the
  *                     same audio
  * Returns the samples, or NULL on failure. Free with trit_free_samples(). */
 float *trit_speak(const TritVoice *voice, const char *text, const char *options,
                   size_t *count);
+
+/* The callback of trit_speak_stream: the samples of one part (valid during
+ * the call only) and your pointer. Return 1 to go on, 0 to stop. */
+typedef int (*TritSamplesFn)(const float *samples, size_t count, void *user_data);
+
+/* trit_speak part by part: `callback` gets each part (a sentence for VITS,
+ * a line or a 510-phoneme pass for Kokoro) as soon as it is made, so play
+ * can start before the rest is spoken. Returns 0, or -1 on failure. */
+int trit_speak_stream(const TritVoice *voice, const char *text, const char *options,
+                      TritSamplesFn callback, void *user_data);
 
 /* trit_speak into a 16-bit mono WAV file at `path`. Returns 0, or -1. */
 int trit_speak_wav(const TritVoice *voice, const char *text, const char *path,

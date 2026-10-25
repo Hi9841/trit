@@ -1,10 +1,10 @@
 # Build
-target/
+/target/
 dist/
 *.pdb
 
 # Models (see `trit models`)
-models/
+/models/
 
 # Bindings and the site
 bindings/node/node_modules/

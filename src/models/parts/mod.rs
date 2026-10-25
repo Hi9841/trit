@@ -9,5 +9,6 @@ pub mod ctc;
 pub mod dictionary;
 pub mod fastconformer;
 pub mod logit_bias;
+pub mod lstm;
 pub mod qwen3;
 pub mod transducer;

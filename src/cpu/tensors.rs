@@ -55,6 +55,43 @@ impl Tensors {
         Self::open_files(&paths, precision)
     }
 
+    /// Opens PyTorch checkpoints (`.pth`, `.pt`): `(path, prefix)` pairs,
+    /// where each tensor's name starts with the prefix (`"voices.af_heart"`).
+    /// Dense layers are stored as `precision` says.
+    pub fn open_torch(files: &[(&Path, &str)], precision: Precision) -> Result<Self, String> {
+        let mut opened = Vec::with_capacity(files.len());
+        let mut entries = HashMap::new();
+        for (path, prefix) in files {
+            let error = |e: std::io::Error| format!("Could not read {}: {e}", path.display());
+            let file = File::open(path).map_err(error)?;
+            let total = file.metadata().map_err(error)?.len() as usize;
+            let found = super::torch_file::tensors(&file, total)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            for tensor in found {
+                let name = match (prefix.is_empty(), tensor.name.is_empty()) {
+                    (true, _) => tensor.name,
+                    (false, true) => prefix.to_string(),
+                    (false, false) => format!("{prefix}.{}", tensor.name),
+                };
+                entries.insert(
+                    name,
+                    Entry {
+                        dtype: tensor.dtype.to_string(),
+                        file: opened.len(),
+                        start: tensor.start,
+                        end: tensor.end,
+                    },
+                );
+            }
+            opened.push(file);
+        }
+        Ok(Self {
+            files: opened,
+            entries,
+            precision,
+        })
+    }
+
     fn open_files(paths: &[&Path], precision: Precision) -> Result<Self, String> {
         let mut files = Vec::with_capacity(paths.len());
         let mut entries = HashMap::new();
@@ -263,7 +300,7 @@ fn parse_header(
 }
 
 /// Positional read of the whole buffer; safe to call from several threads.
-fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+pub(super) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::FileExt;

@@ -10,12 +10,13 @@ export const NAME = "Trit";
 export const version = /^version = "([^"]+)"/m.exec(readRepo("Cargo.toml"))?.[1] ?? "";
 
 /** One line, for titles and link previews. */
-export const tagline = "Speech to text on the CPU. No GPU, no Python.";
+export const tagline = "Speech to text and text to speech on the CPU. No GPU, no Python.";
 
 /** The "What is Trit" paragraph. */
 export const whatIs =
-  "Trit is a speech-to-text engine for the CPU. It runs Parakeet, Canary, Whisper and Moonshine models " +
-  "from Hugging Face on its own Rust kernels, with no GPU, Python or PyTorch.";
+  "Trit is a speech-to-text and text-to-speech engine for the CPU. It runs Parakeet, Canary, Whisper and " +
+  "Moonshine models, and the Kokoro and MMS-TTS voices, from Hugging Face on its own Rust kernels, with no GPU, " +
+  "Python or PyTorch.";
 
 const leads = benches.map(lead);
 const runtimes = new Set(benches.flatMap((b) => b.runs.map((r) => r.runtime)));

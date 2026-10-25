@@ -12,9 +12,10 @@
 //   const cleaner = new Cleaner();                       // Superwhisper S1-mini
 //   console.log(cleaner.clean("so um send it friday no wait thursday"));
 //
-//   const voice = new Voice();                           // Meta MMS-TTS English
-//   voice.speakWav("The build passed.", "speech.wav");
+//   const voice = new Voice();                           // Kokoro-82M, else MMS-TTS English
+//   voice.speakWav("The build passed on March 3rd.", "speech.wav", { voice: "bf_emma" });
 //   const samples = voice.speak("Ship it.", { speed: 1.1 });  // Float32Array at voice.sampleRate
+//   voice.speakStream(longText, (part) => { play(part); return true; });  // each part as it is made
 //
 // The library is found at TRIT_LIB, next to this file, or in ../../target/release.
 // Build it with `cargo build --release -p trit-ffi` in the trit folder.
@@ -36,6 +37,7 @@ if (!found) {
 }
 
 const lib = koffi.load(found);
+const SamplesFn = koffi.proto("int TritSamplesFn(const float *samples, size_t count, void *user_data)");
 
 const c = {
   version: lib.func("const char *trit_version(void)"),
@@ -57,6 +59,10 @@ const c = {
   speak: lib.func("void *trit_speak(void *voice, const char *text, const char *options, _Out_ size_t *count)"),
   speakWav: lib.func("int trit_speak_wav(void *voice, const char *text, const char *path, const char *options)"),
   freeSamples: lib.func("void trit_free_samples(void *samples, size_t count)"),
+  speakStream: lib.func("int trit_speak_stream(void *voice, const char *text, const char *options, TritSamplesFn *callback, void *user_data)"),
+  voiceList: lib.func("void *trit_voice_list(void *voice)"),
+  voiceKind: lib.func("const char *trit_voice_kind(void *voice)"),
+  phonemes: lib.func("void *trit_phonemes(void *voice, const char *text, const char *options)"),
 };
 
 export class TritError extends Error {}
@@ -204,8 +210,10 @@ export class Cleaner {
 }
 
 /** The options JSON of trit_speak. */
-function voicing({ speed = null, noise = null, noiseDuration = null, seed = 0 } = {}) {
-  const json = { seed };
+function voicing({ voice = null, speed = null, noise = null, noiseDuration = null, seed = 0, phonemes = false } = {}) {
+  const json = { seed, phonemes };
+
+  if (voice !== null) json.voice = voice;
 
   if (speed !== null) json.speed = speed;
 
@@ -216,33 +224,53 @@ function voicing({ speed = null, noise = null, noiseDuration = null, seed = 0 } 
   return JSON.stringify(json);
 }
 
-/** A VITS voice (Meta MMS-TTS): text to speech. It reads letters; write numbers and symbols as words. */
+/**
+ * A voice: Kokoro-82M (24 kHz, 28 English voices; reads numbers and symbols) or a VITS voice
+ * (Meta MMS-TTS, 16 kHz; reads letters only).
+ */
 export class Voice {
   #handle;
 
-  /** @param {string | null} model a folder, a `trit models` name ("mms-tts-eng"), or null for the default. */
+  /** @param {string | null} model a folder, a `trit models` name ("kokoro-82m", "mms-tts-eng"), or null for the default. */
   constructor(model = null) {
     this.#handle = c.voiceLoad(model);
 
     if (!this.#handle) throw new TritError(c.lastError());
   }
 
-  /** @returns {number} the rate of the samples of `speak` (16000 for MMS-TTS). */
+  /** @returns {number} the rate of the samples of `speak` (24000 Kokoro, 16000 MMS-TTS). */
   get sampleRate() {
     return c.voiceSampleRate(this.#live());
   }
 
+  /** @returns {string} "kokoro" or "vits". */
+  get kind() {
+    return c.voiceKind(this.#live());
+  }
+
+  /** @returns {string[]} the voices of a Kokoro folder: af_/am_ American, bf_/bm_ British ([] for VITS). */
+  get voices() {
+    const list = text(c.voiceList(this.#live()));
+
+    return list ? list.split("\n") : [];
+  }
+
+  /** @returns {string} the phonemes Kokoro speaks for `text`, one line per pass, in the accent of `voice`. */
+  phonemes(input, voice = null) {
+    return text(c.phonemes(this.#live(), input, voicing({ voice })));
+  }
+
   /**
-   * @param {string} text
-   * @param {{speed?: number, noise?: number, noiseDuration?: number, seed?: number}} settings
-   *   speed: 1 is the voice's pace, 1.25 faster (default: the voice's own). noise, noiseDuration:
-   *   how much the voice and the timing vary (default: the voice's own). One text and one seed
-   *   give the same audio.
+   * @param {string} input
+   * @param {{voice?: string, speed?: number, noise?: number, noiseDuration?: number, seed?: number, phonemes?: boolean}} settings
+   *   voice: Kokoro voice (default af_heart; "af_bella,af_sky" blends two). speed: 1 is the voice's pace,
+   *   1.25 faster. noise: how much the voice varies; noiseDuration: VITS timing. One text and one seed
+   *   give the same audio. phonemes: Kokoro, the text is phonemes.
    * @returns {Float32Array} mono samples in -1..1 at `sampleRate`.
    */
-  speak(text, settings = {}) {
+  speak(input, settings = {}) {
     const count = [0];
-    const pointer = c.speak(this.#live(), text, voicing(settings), count);
+    const pointer = c.speak(this.#live(), input, voicing(settings), count);
 
     if (!pointer) throw new TritError(c.lastError());
 
@@ -254,8 +282,25 @@ export class Voice {
   }
 
   /** `speak` into a 16-bit mono WAV file. */
-  speakWav(text, file, settings = {}) {
-    if (c.speakWav(this.#live(), text, file, voicing(settings)) < 0) throw new TritError(c.lastError());
+  speakWav(input, file, settings = {}) {
+    if (c.speakWav(this.#live(), input, file, voicing(settings)) < 0) throw new TritError(c.lastError());
+  }
+
+  /**
+   * `speak`, part by part: `onPart(samples)` gets each part (a sentence for VITS, a line or a
+   * 510-phoneme pass for Kokoro) as soon as it is made; return false to stop.
+   */
+  speakStream(input, onPart, settings = {}) {
+    const callback = koffi.register(
+      (samples, count) => (onPart(Float32Array.from(koffi.decode(samples, "float", Number(count)))) === false ? 0 : 1),
+      koffi.pointer(SamplesFn),
+    );
+
+    try {
+      if (c.speakStream(this.#live(), input, voicing(settings), callback, null) < 0) throw new TritError(c.lastError());
+    } finally {
+      koffi.unregister(callback);
+    }
   }
 
   close() {

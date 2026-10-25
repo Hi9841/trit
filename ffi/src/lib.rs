@@ -78,7 +78,7 @@ fn owned_text(text: String) -> *mut c_char {
         .into_raw()
 }
 
-/// The engine version, for example "0.2.0". Static; do not free.
+/// The engine version, for example "0.3.0". Static; do not free.
 #[no_mangle]
 pub extern "C" fn trit_version() -> *const c_char {
     static VERSION: OnceLock<CString> = OnceLock::new();
@@ -513,10 +513,10 @@ pub unsafe extern "C" fn trit_clean(
     })
 }
 
-/// Loads a voice (text to speech: a VITS folder such as Meta MMS-TTS), or a
-/// voice by its `trit models` name; NULL reads `TRIT_VOICE`, then searches
-/// the default places for `mms-tts-eng`. Returns NULL on failure. Free with
-/// `trit_voice_free`.
+/// Loads a voice (text to speech: Kokoro-82M or a VITS folder such as Meta
+/// MMS-TTS), or a voice by its `trit models` name; NULL reads `TRIT_VOICE`,
+/// then searches the default places for `kokoro-82m`, then `mms-tts-eng`.
+/// Returns NULL on failure. Free with `trit_voice_free`.
 ///
 /// # Safety
 /// `model_dir` is NULL or a NUL-terminated UTF-8 path.
@@ -554,8 +554,8 @@ unsafe fn voice_arg<'a>(voice: *const Voice) -> Result<&'a Voice, String> {
         .ok_or_else(|| "voice is NULL; call trit_voice_load first".to_string())
 }
 
-/// The rate of the samples that `trit_speak` returns (16000 for MMS-TTS),
-/// or -1 for a NULL voice.
+/// The rate of the samples that `trit_speak` returns (24000 for Kokoro,
+/// 16000 for MMS-TTS), or -1 for a NULL voice.
 ///
 /// # Safety
 /// `voice` is NULL or a pointer from `trit_voice_load` that was not freed.
@@ -564,7 +564,7 @@ pub unsafe extern "C" fn trit_voice_sample_rate(voice: *const Voice) -> c_int {
     guard(-1, || Ok(voice_arg(voice)?.sample_rate() as c_int))
 }
 
-const VOICE_KEYS: &str = "speed, noise, noise_duration, seed";
+const VOICE_KEYS: &str = "speed, noise, noise_duration, seed, voice, phonemes";
 
 /// Voicing from a JSON object; NULL or "" is the voice's own settings.
 ///
@@ -592,6 +592,14 @@ unsafe fn json_voicing(options: *const c_char) -> Result<Voicing, String> {
             "noise" => voicing.noise = Some(number()?),
             "noise_duration" => voicing.noise_duration = Some(number()?),
             "seed" => voicing.seed = value.as_u64().ok_or_else(wrong)?,
+            "voice" => {
+                voicing.voice = match value {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(name) => Some(name.clone()),
+                    _ => return Err(wrong()),
+                }
+            }
+            "phonemes" => voicing.phonemes = value.as_bool().ok_or_else(wrong)?,
             _ => return Err(format!("unknown option {key}; valid options: {VOICE_KEYS}")),
         }
     }
@@ -600,10 +608,12 @@ unsafe fn json_voicing(options: *const c_char) -> Result<Voicing, String> {
 
 /// Speaks `text`: mono samples at `trit_voice_sample_rate`, in -1 to 1;
 /// `*count` gets their number. `options` is NULL or a JSON object with any
-/// of: `speed` (1 is the voice's pace), `noise` (how much the voice
-/// varies), `noise_duration` (how much the timing varies), `seed` (one text
-/// and one seed give the same audio; default 0). Returns NULL on failure.
-/// Free the samples with `trit_free_samples`.
+/// of: `voice` (Kokoro: a name of `trit_voice_list`, default af_heart;
+/// "a,b" blends), `phonemes` (Kokoro: the text is phonemes), `speed` (1 is
+/// the voice's pace), `noise` (how much the voice varies), `noise_duration`
+/// (VITS: how much the timing varies), `seed` (one text and one seed give
+/// the same audio; default 0). Returns NULL on failure. Free the samples
+/// with `trit_free_samples`.
 ///
 /// # Safety
 /// `voice` is from `trit_voice_load`; `text` is a NUL-terminated UTF-8
@@ -650,6 +660,86 @@ pub unsafe extern "C" fn trit_speak_wav(
             voice.sample_rate(),
         )?;
         Ok(0)
+    })
+}
+
+/// The callback of `trit_speak_stream`: the samples of one part, and the
+/// caller's pointer. Return 1 to go on, 0 to stop.
+pub type TritSamplesFn =
+    extern "C" fn(samples: *const f32, count: usize, user_data: *mut std::ffi::c_void) -> c_int;
+
+/// `trit_speak` part by part: `callback` gets the samples of each part (a
+/// sentence for VITS, a line or a 510-phoneme pass for Kokoro) as soon as
+/// it is made. The samples are valid during the call only. Returns 0, or -1
+/// on failure (not when the callback stops).
+///
+/// # Safety
+/// As for `trit_speak`; `callback` is a valid function; `user_data` is
+/// passed as it is.
+#[no_mangle]
+pub unsafe extern "C" fn trit_speak_stream(
+    voice: *const Voice,
+    text: *const c_char,
+    options: *const c_char,
+    callback: Option<TritSamplesFn>,
+    user_data: *mut std::ffi::c_void,
+) -> c_int {
+    guard(-1, || {
+        let voice = voice_arg(voice)?;
+        let callback = callback.ok_or("callback is NULL")?;
+        let text = text_arg(text, "text")?;
+        let voicing = json_voicing(options)?;
+        voice.speak_stream(text, &voicing, &mut |part| {
+            callback(part.as_ptr(), part.len(), user_data) != 0
+        })?;
+        Ok(0)
+    })
+}
+
+/// The voices of a Kokoro folder, one name per line ("" for a VITS voice).
+/// Returns NULL on failure. Free with `trit_free_text`.
+///
+/// # Safety
+/// `voice` is NULL or a pointer from `trit_voice_load` that was not freed.
+#[no_mangle]
+pub unsafe extern "C" fn trit_voice_list(voice: *const Voice) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        Ok(owned_text(voice_arg(voice)?.voices().join("\n")))
+    })
+}
+
+/// "kokoro" or "vits"; NULL for a NULL voice. Static; do not free.
+///
+/// # Safety
+/// `voice` is NULL or a pointer from `trit_voice_load` that was not freed.
+#[no_mangle]
+pub unsafe extern "C" fn trit_voice_kind(voice: *const Voice) -> *const c_char {
+    match voice.as_ref().map(Voice::kind) {
+        Some("kokoro") => c"kokoro".as_ptr(),
+        Some(_) => c"vits".as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// The phonemes a Kokoro voice speaks for `text`, one line per pass, with
+/// the accent of `options`' voice (a VITS voice gives the letters it
+/// reads). Returns NULL on failure. Free with `trit_free_text`.
+///
+/// # Safety
+/// `voice` is from `trit_voice_load`; `text` is a NUL-terminated UTF-8
+/// string; `options` is NULL or a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn trit_phonemes(
+    voice: *const Voice,
+    text: *const c_char,
+    options: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let voice = voice_arg(voice)?;
+        Ok(owned_text(voice.phonemes(
+            text_arg(text, "text")?,
+            &json_voicing(options)?,
+        )?))
     })
 }
 

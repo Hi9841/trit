@@ -76,7 +76,8 @@ fn bias(t: &Tensors, name: &str, out: usize) -> Result<Vec<f32>, String> {
     }
 }
 
-/// A convolution with stride 1 and "same" padding: `frames` in, `frames` out.
+/// A convolution: "same" padding and stride 1 (`load`), or any stride and
+/// padding (`load_strided`).
 pub struct Conv1d {
     /// `[tap][in][out]`: row `tap * inputs + c` holds the weights of input
     /// `c` at `tap` for every output, as the gathered columns are ordered.
@@ -86,6 +87,9 @@ pub struct Conv1d {
     pub outputs: usize,
     kernel: usize,
     dilation: usize,
+    stride: usize,
+    /// Zeros before the first frame and after the last.
+    pad: usize,
 }
 
 impl Conv1d {
@@ -97,6 +101,26 @@ impl Conv1d {
         name: &str,
         (inputs, outputs): (usize, usize),
         (kernel, dilation): (usize, usize),
+    ) -> Result<Self, String> {
+        let pad = dilation * (kernel - 1) / 2;
+        Self::build(t, name, (inputs, outputs), (kernel, dilation, 1, pad))
+    }
+
+    /// `load` with a stride and `pad` zeros on both sides (dilation 1).
+    pub fn load_strided(
+        t: &Tensors,
+        name: &str,
+        (inputs, outputs): (usize, usize),
+        (kernel, stride, pad): (usize, usize, usize),
+    ) -> Result<Self, String> {
+        Self::build(t, name, (inputs, outputs), (kernel, 1, stride, pad))
+    }
+
+    fn build(
+        t: &Tensors,
+        name: &str,
+        (inputs, outputs): (usize, usize),
+        (kernel, dilation, stride, pad): (usize, usize, usize, usize),
     ) -> Result<Self, String> {
         let stored = weight(t, name, outputs * inputs * kernel, outputs)?;
         let mut weight = vec![0.0f32; stored.len()];
@@ -115,7 +139,15 @@ impl Conv1d {
             outputs,
             kernel,
             dilation,
+            stride,
+            pad,
         })
+    }
+
+    /// The output frames for `frames` input frames.
+    pub fn out_frames(&self, frames: usize) -> usize {
+        (frames + 2 * self.pad).saturating_sub(self.dilation * (self.kernel - 1) + 1) / self.stride
+            + 1
     }
 
     /// A linear layer `name.weight` `[outputs][inputs]`: a kernel of 1.
@@ -123,19 +155,21 @@ impl Conv1d {
         Self::load(t, name, (inputs, outputs), (1, 1))
     }
 
-    /// The convolution of `x` (`frames x inputs`). With `slope`, the input
-    /// passes a leaky ReLU first (`max(v, slope * v)`; 0 is ReLU).
+    /// The convolution of `x` (`frames x inputs`): `out_frames(frames)` rows.
+    /// With `slope`, the input passes a leaky ReLU first (`max(v, slope * v)`;
+    /// 0 is ReLU).
     pub fn forward(&self, x: &[f32], frames: usize, slope: Option<f32>) -> Buf {
         let (cin, cout, kernel) = (self.inputs, self.outputs, self.kernel);
         debug_assert_eq!(x.len(), frames * cin);
-        let pad = self.dilation * (kernel - 1) / 2;
+        let (pad, stride) = (self.pad, self.stride);
         let width = kernel * cin;
-        let block = block_frames(frames);
-        let mut out = Buf::scratch(frames * cout);
+        let out_frames = self.out_frames(frames);
+        let block = block_frames(out_frames);
+        let mut out = Buf::scratch(out_frames * cout);
         let out_ptr = team::SendPtr::new(&mut out);
-        team::for_each(frames.div_ceil(block), |task| {
+        team::for_each(out_frames.div_ceil(block), |task| {
             let first = task * block;
-            let rows = block.min(frames - first);
+            let rows = block.min(out_frames - first);
             // SAFETY: the rows of this block belong to this task; `out` outlives the step.
             let out = unsafe { out_ptr.slice_mut(first * cout, rows * cout) };
             COLUMNS.with(|columns| {
@@ -146,7 +180,7 @@ impl Conv1d {
                 let columns = &mut columns[..rows * width];
                 for (r, row) in columns.chunks_exact_mut(width).enumerate() {
                     for (tap, part) in row.chunks_exact_mut(cin).enumerate() {
-                        let source = (first + r + tap * self.dilation)
+                        let source = ((first + r) * stride + tap * self.dilation)
                             .checked_sub(pad)
                             .filter(|s| *s < frames);
                         match source {
@@ -219,6 +253,72 @@ impl Depthwise {
                     else {
                         continue;
                     };
+                    let input = &x[s * channels..(s + 1) * channels];
+                    for (c, (o, v)) in row.iter_mut().zip(input).enumerate() {
+                        *o += v * self.weight[c * kernel + tap];
+                    }
+                }
+            }
+        });
+        out
+    }
+}
+
+/// A depthwise transposed convolution (`groups = channels`): `frames` in,
+/// `(frames - 1) * stride - 2 * pad + kernel + extra` out, where `extra` is
+/// PyTorch's `output_padding`.
+pub struct DepthwiseUpsample {
+    /// `[channel][kernel]`, as stored.
+    weight: Vec<f32>,
+    bias: Vec<f32>,
+    channels: usize,
+    kernel: usize,
+    stride: usize,
+    pad: usize,
+    extra: usize,
+}
+
+impl DepthwiseUpsample {
+    pub fn load(
+        t: &Tensors,
+        name: &str,
+        channels: usize,
+        (kernel, stride, pad, extra): (usize, usize, usize, usize),
+    ) -> Result<Self, String> {
+        Ok(Self {
+            weight: weight(t, name, channels * kernel, channels)?,
+            bias: bias(t, name, channels)?,
+            channels,
+            kernel,
+            stride,
+            pad,
+            extra,
+        })
+    }
+
+    pub fn out_frames(&self, frames: usize) -> usize {
+        ((frames - 1) * self.stride + self.kernel + self.extra).saturating_sub(2 * self.pad)
+    }
+
+    /// Output `y` gets input `s` through tap `y + pad - s * stride`.
+    pub fn forward(&self, x: &[f32], frames: usize) -> Buf {
+        let (channels, kernel, stride) = (self.channels, self.kernel, self.stride);
+        let out_frames = self.out_frames(frames);
+        let rows = block_frames(out_frames);
+        let mut out = Buf::scratch(out_frames * channels);
+        team::chunks_mut(&mut out, rows * channels, |task, block| {
+            let first = task * rows;
+            for (r, row) in block.chunks_exact_mut(channels).enumerate() {
+                let y = first + r + self.pad;
+                row.copy_from_slice(&self.bias);
+                for tap in 0..kernel {
+                    let Some(from) = y.checked_sub(tap).filter(|v| v % stride == 0) else {
+                        continue;
+                    };
+                    let s = from / stride;
+                    if s >= frames {
+                        continue;
+                    }
                     let input = &x[s * channels..(s + 1) * channels];
                     for (c, (o, v)) in row.iter_mut().zip(input).enumerate() {
                         *o += v * self.weight[c * kernel + tap];

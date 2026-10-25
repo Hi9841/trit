@@ -12,9 +12,11 @@
     cleaner = trit.Cleaner()                        # Superwhisper S1-mini
     print(cleaner.clean("so um send it friday no wait thursday"))
 
-    voice = trit.Voice()                            # Meta MMS-TTS English
-    voice.speak_wav("The build passed.", "speech.wav")
+    voice = trit.Voice()                            # Kokoro-82M, else MMS-TTS English
+    voice.speak_wav("The build passed on March 3rd.", "speech.wav", voice="bf_emma")
     samples = voice.speak("Ship it.", speed=1.1)    # array('f') at voice.sample_rate
+    for part in voice.stream(long_text):            # each part as soon as it is made
+        play(part)
 
 The library is found at TRIT_LIB, next to this file, or in ../../target/release.
 Build it with `cargo build --release -p trit-ffi` in the trit folder.
@@ -41,6 +43,9 @@ _NAMES = {"win32": "trit_ffi.dll", "darwin": "libtrit_ffi.dylib"}
 
 class TritError(RuntimeError):
     """A failed Trit call. The message names the cause and the fix."""
+
+
+_SAMPLES_FN = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_void_p)
 
 
 def _library() -> ctypes.CDLL:
@@ -75,6 +80,10 @@ def _library() -> ctypes.CDLL:
         "trit_speak": ([ptr, text, text, ctypes.POINTER(size)], floats),
         "trit_speak_wav": ([ptr, text, text, text], ctypes.c_int),
         "trit_free_samples": ([floats, size], None),
+        "trit_speak_stream": ([ptr, text, text, _SAMPLES_FN, ptr], ctypes.c_int),
+        "trit_voice_list": ([ptr], ptr),
+        "trit_voice_kind": ([ptr], text),
+        "trit_phonemes": ([ptr, text, text], ptr),
     }
     for fn, (args, result) in signatures.items():
         getattr(lib, fn).argtypes = args
@@ -261,11 +270,12 @@ class Cleaner:
 
 
 class Voice:
-    """A VITS voice (Meta MMS-TTS): text to speech. It reads letters; write
-    numbers and symbols as words."""
+    """A voice: Kokoro-82M (24 kHz, 28 English voices; reads numbers and
+    symbols) or a VITS voice (Meta MMS-TTS, 16 kHz; reads letters only)."""
 
     def __init__(self, model: str | os.PathLike | None = None):
-        """`model`: a folder, a `trit models` name ("mms-tts-eng"), or None for the default."""
+        """`model`: a folder, a `trit models` name ("kokoro-82m", "mms-tts-eng"),
+        or None for the default (Kokoro, then MMS-TTS)."""
         self._handle = None
         handle = _lib.trit_voice_load(_arg(model))
         if not handle:
@@ -274,17 +284,34 @@ class Voice:
 
     @property
     def sample_rate(self) -> int:
-        """The rate of the samples of `speak` (16000 for MMS-TTS)."""
+        """The rate of the samples of `speak` (24000 for Kokoro, 16000 for MMS-TTS)."""
         return _lib.trit_voice_sample_rate(self._live())
 
-    def speak(self, text: str, speed: float | None = None, noise: float | None = None,
-              noise_duration: float | None = None, seed: int = 0) -> array:
+    @property
+    def kind(self) -> str:
+        """"kokoro" or "vits"."""
+        return _lib.trit_voice_kind(self._live()).decode()
+
+    @property
+    def voices(self) -> list[str]:
+        """The voices of a Kokoro folder: af_/am_ American, bf_/bm_ British ([] for VITS)."""
+        text = _text(_lib.trit_voice_list(self._live()))
+        return text.split("\n") if text else []
+
+    def phonemes(self, text: str, voice: str | None = None) -> str:
+        """The phonemes Kokoro speaks for `text`, one line per pass, in the accent of `voice`."""
+        return _text(_lib.trit_phonemes(self._live(), text.encode(), _voicing(voice=voice)))
+
+    def speak(self, text: str, voice: str | None = None, speed: float | None = None, noise: float | None = None,
+              noise_duration: float | None = None, seed: int = 0, phonemes: bool = False) -> array:
         """Mono samples in -1..1 at `sample_rate`, as array('f').
+        `voice`: Kokoro voice (None: af_heart; "af_bella,af_sky" blends two).
         `speed`: 1 is the voice's pace, 1.25 faster (None: the voice's own).
-        `noise`, `noise_duration`: how much the voice and the timing vary
-        (None: the voice's own). One text and one `seed` give the same audio."""
+        `noise`: how much the voice varies; `noise_duration`: VITS timing.
+        One text and one `seed` give the same audio. `phonemes`: Kokoro,
+        the text is phonemes (one pass per line)."""
         count = ctypes.c_size_t()
-        options = _voicing(speed, noise, noise_duration, seed)
+        options = _voicing(voice, speed, noise, noise_duration, seed, phonemes)
         pointer = _lib.trit_speak(self._live(), text.encode(), options, ctypes.byref(count))
         if not pointer:
             raise _error()
@@ -295,12 +322,60 @@ class Voice:
         finally:
             _lib.trit_free_samples(pointer, count)
 
-    def speak_wav(self, text: str, path: str | os.PathLike, speed: float | None = None,
-                  noise: float | None = None, noise_duration: float | None = None, seed: int = 0) -> None:
+    def speak_wav(self, text: str, path: str | os.PathLike, voice: str | None = None, speed: float | None = None,
+                  noise: float | None = None, noise_duration: float | None = None, seed: int = 0,
+                  phonemes: bool = False) -> None:
         """`speak` into a 16-bit mono WAV file."""
-        options = _voicing(speed, noise, noise_duration, seed)
+        options = _voicing(voice, speed, noise, noise_duration, seed, phonemes)
         if _lib.trit_speak_wav(self._live(), text.encode(), os.fsencode(path), options) < 0:
             raise _error()
+
+    def stream(self, text: str, voice: str | None = None, speed: float | None = None, noise: float | None = None,
+               noise_duration: float | None = None, seed: int = 0, phonemes: bool = False):
+        """`speak`, part by part: yields array('f') for each part (a sentence
+        for VITS, a line or a 510-phoneme pass for Kokoro) as soon as it is
+        made. Stop iterating to stop speaking."""
+        import queue
+        import threading
+
+        parts: queue.Queue = queue.Queue(maxsize=4)
+        done = object()
+        stop = threading.Event()
+        failure: list[TritError] = []
+
+        @_SAMPLES_FN
+        def on_part(samples, count, _user):
+            if stop.is_set():
+                return 0
+            chunk = array("f")
+            chunk.frombytes(ctypes.string_at(samples, count * 4))
+            parts.put(chunk)
+            return 0 if stop.is_set() else 1
+
+        options = _voicing(voice, speed, noise, noise_duration, seed, phonemes)
+
+        def run():
+            try:
+                if _lib.trit_speak_stream(self._live(), text.encode(), options, on_part, None) < 0:
+                    failure.append(_error())
+            finally:
+                parts.put(done)
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        try:
+            while (item := parts.get()) is not done:
+                yield item
+        finally:
+            stop.set()
+            while worker.is_alive():
+                try:
+                    parts.get(timeout=0.05)
+                except queue.Empty:
+                    pass
+            worker.join()
+        if failure:
+            raise failure[0]
 
     def _live(self):
         if not self._handle:
@@ -322,9 +397,9 @@ class Voice:
         self.close()
 
 
-def _voicing(speed, noise, noise_duration, seed) -> bytes:
-    options = {"seed": seed}
-    for key, value in (("speed", speed), ("noise", noise), ("noise_duration", noise_duration)):
+def _voicing(voice=None, speed=None, noise=None, noise_duration=None, seed=0, phonemes=False) -> bytes:
+    options = {"seed": seed, "phonemes": phonemes}
+    for key, value in (("voice", voice), ("speed", speed), ("noise", noise), ("noise_duration", noise_duration)):
         if value is not None:
             options[key] = value
     return json.dumps(options).encode()

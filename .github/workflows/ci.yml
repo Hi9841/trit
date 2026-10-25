@@ -20,10 +20,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: No word lists
         shell: bash
-        # Speech to text decodes with the model alone (AGENTS.md).
+        # Speech to text decodes with the model alone (AGENTS.md). Text to
+        # speech (src/tts) may hold lists: text normalization and the lexicon.
         run: |
-          if git grep -n 'include_str!' -- src ffi \
-            || git ls-files -- src | grep -E '\.(txt|json|csv|tsv)$'; then
+          if git grep -n 'include_str!' -- src ffi ':!src/tts' \
+            || git ls-files -- src ':!src/tts' | grep -E '\.(txt|json|csv|tsv)$'; then
             echo "error: a word list ships in the speech-to-text engine; it decodes with the model alone"
             exit 1
           fi

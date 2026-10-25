@@ -2,6 +2,7 @@
 //! long recordings cut into windows.
 
 pub mod mel;
+pub mod stft;
 pub mod wav;
 pub mod whisper_mel;
 

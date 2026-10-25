@@ -16,8 +16,8 @@ mod audio;
 mod catalog;
 mod cleanup;
 mod models;
-mod speech;
 mod text;
+mod tts;
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,7 @@ pub use cpu::gemm::Precision;
 pub use cpu::{cpu_path, threads, Spread};
 pub use models::parts::logit_bias::BiasWeights;
 pub use models::MODEL_TYPES;
-pub use speech::{Voice, Voicing, VOICE_REPO};
+pub use tts::{phonemize, Voice, Voicing, VOICE_REPO, VOICE_REPOS};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `transcribe` takes mono samples at this rate.
@@ -243,6 +243,10 @@ pub fn model_candidates() -> Vec<PathBuf> {
 /// snapshots of the Hugging Face cache.
 pub fn candidates(repo: &str) -> Vec<PathBuf> {
     let name = repo.rsplit('/').next().unwrap_or(repo);
+    // The catalog's folder name too, where it differs (Kokoro-82M is models/kokoro-82m).
+    let names: Vec<&str> = std::iter::once(name)
+        .chain(known(repo).map(|k| k.name).filter(|n| *n != name))
+        .collect();
     let mut roots = vec![PathBuf::from("models"), PathBuf::from("../models")];
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
@@ -255,7 +259,10 @@ pub fn candidates(repo: &str) -> Vec<PathBuf> {
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         roots.push(PathBuf::from(local).join("TDT").join("models"));
     }
-    let mut dirs: Vec<PathBuf> = roots.into_iter().map(|root| root.join(name)).collect();
+    let mut dirs: Vec<PathBuf> = roots
+        .iter()
+        .flat_map(|root| names.iter().map(move |name| root.join(name)))
+        .collect();
     let hub = std::env::var_os("HF_HOME")
         .map(|home| PathBuf::from(home).join("hub"))
         .or_else(|| {
@@ -291,20 +298,29 @@ pub fn find_cleanup_model(explicit: Option<&Path>) -> Option<PathBuf> {
 
 /// The voice folder: `explicit` if given (a folder, or a `CATALOG` name
 /// found in the places of `candidates`), else `TRIT_VOICE`, else the first
-/// complete `mms-tts-eng` folder of `candidates(VOICE_REPO)`.
+/// complete folder of `VOICE_REPOS` (Kokoro-82M, then MMS-TTS English).
 pub fn find_voice(explicit: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = explicit {
-        if is_model(dir) {
+        if is_voice(dir) {
             return Some(dir.to_path_buf());
         }
         let entry = known(&dir.to_string_lossy())?;
-        return candidates(entry.repo).into_iter().find(|d| is_model(d));
+        return candidates(entry.repo).into_iter().find(|d| is_voice(d));
     }
     if let Some(dir) = std::env::var_os("TRIT_VOICE") {
         let dir = PathBuf::from(dir);
-        return is_model(&dir).then_some(dir);
+        return is_voice(&dir).then_some(dir);
     }
-    candidates(VOICE_REPO).into_iter().find(|dir| is_model(dir))
+    VOICE_REPOS
+        .iter()
+        .flat_map(|repo| candidates(repo))
+        .find(|dir| is_voice(dir))
+}
+
+/// True when `dir` holds a voice: a VITS folder (as `is_model`) or a
+/// Kokoro folder (`config.json` with `istftnet` and a `.pth` checkpoint).
+pub fn is_voice(dir: &Path) -> bool {
+    is_model(dir) || tts::is_kokoro(dir)
 }
 
 /// Why `find_voice(explicit)` found nothing, with the command that fixes it.

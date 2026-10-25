@@ -1,11 +1,11 @@
 ---
 name: trit
-description: Transcribe speech from WAV files to text on the CPU, offline, with the Trit engine and a Parakeet, Canary, Whisper, or Moonshine model, in any language the model speaks; clean a raw transcript with S1-mini; speak text into a WAV file with the MMS-TTS voice. Use when an agent must turn a recording into text or text into speech, or add speech to text or text to speech to an app in Rust, C, C++, Python, C#, Node, or Bun.
+description: Transcribe speech from WAV files to text on the CPU, offline, with the Trit engine and a Parakeet, Canary, Whisper, or Moonshine model, in any language the model speaks; clean a raw transcript with S1-mini; speak text into a WAV file with Kokoro (28 English voices) or MMS-TTS. Use when an agent must turn a recording into text or text into speech, or add speech to text or text to speech to an app in Rust, C, C++, Python, C#, Node, or Bun.
 ---
 
 # Trit
 
-Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; 16 kHz WAV in, text out. Text to speech with a VITS voice (MMS-TTS).
+Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; 16 kHz WAV in, text out. Text to speech with Kokoro-82M (28 English voices) and MMS-TTS.
 
 ## Commands
 
@@ -13,7 +13,8 @@ Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine mod
 - `trit models` to list the speech models (Parakeet, Canary, Whisper, Moonshine) and get one
 - `trit transcribe <folder> --model <name> --format json` for every WAV file in a folder
 - `trit clean "<raw transcript>"` to rewrite text as clean written English (S1-mini)
-- `trit speak "<text>" --out speech.wav` to speak text with the MMS-TTS voice
+- `trit speak "<text>" --out speech.wav` to speak text (Kokoro: 28 English voices; MMS-TTS)
+- `trit phonemes "<text>"` to see the phonemes Kokoro speaks for text
 - `trit doctor` to check the models and the CPU
 - `trit skill --check <file>` to check a copy of this skill
 
@@ -63,20 +64,50 @@ examples:
 ## speak
 
 ```text
-usage: trit speak <text>... [--out <file.wav>] [--model <dir>] [--speed <x>] [--noise <x>] [--noise-duration <x>] [--seed <n>] [--format toon|json]
-  Speaks text with a VITS voice (Meta MMS-TTS) and writes a mono 16-bit WAV file. The voice
-  reads letters: write numbers and symbols as words (digits 7 to 9 are not in its alphabet).
-  <text>          the text; several arguments join with spaces; sentences get a short pause
+usage: trit speak <text>... [--out <file.wav>] [--model <dir>] [--voice <name>] [--phonemes] [--speed <x>] [--noise <x>] [--noise-duration <x>] [--seed <n>] [--format toon|json]
+  Speaks text into a mono 16-bit WAV file: Kokoro-82M (24 kHz, 28 English voices, numbers and
+  symbols read; the default when found) or a VITS voice (Meta MMS-TTS, 16 kHz, reads letters only).
+  <text>          the text; several arguments join with spaces
   --out <file>    the WAV file to write (default: speech.wav)
-  --model <dir>   voice folder or `trit models` name (default: TRIT_VOICE, models/mms-tts-eng, the Hugging Face cache)
+  --model <dir>   voice folder or `trit models` name (default: TRIT_VOICE, then kokoro-82m, then mms-tts-eng)
+  --voice <name>  Kokoro voice: af_heart (default), bm_george, ...; see `trit voices`; a,b blends two
+  --phonemes      Kokoro: the text is phonemes (as `trit phonemes` writes them), one pass per line
   --speed <x>     speaking rate: 1 is the voice's pace (default), 1.25 faster, 0.8 slower
-  --noise <x>     how much the voice varies (default: the voice's, 0.667 for MMS-TTS); 0 is flat
-  --noise-duration <x>  how much the timing varies (default: the voice's, 0.8)
+  --noise <x>     how much the voice varies: VITS noise_scale (default 0.667); Kokoro source noise (default 1)
+  --noise-duration <x>  VITS: how much the timing varies (default 0.8)
   --seed <n>      seed of the noise (default 0); one text and one seed give the same audio
   --format        toon (default), json
 examples:
-  trit speak "The build passed. Ship it."
-  trit speak "Good morning" --out morning.wav --speed 0.9
+  trit speak "The build passed on March 3rd, 2026." --out done.wav
+  trit speak "Good morning from London." --voice bf_emma
+  trit speak "Ship it." --model mms-tts-eng --speed 0.9
+```
+
+## phonemes
+
+```text
+usage: trit phonemes <text>... [--british] [--no-fallback] [--file <path>]
+  The phonemes Kokoro speaks for English text: misaki's lexicon, numbers, and stress, one line
+  per line. Put a word's own phonemes in the text as [word](/phonemes/).
+  <text>          the text; several arguments join with spaces
+  --british       British English (the b… voices); default American (a… voices)
+  --no-fallback   no phonemes for words that no dictionary holds (default: the BART fallback
+                  PeterReid/graphemes_to_phonemes_en_us or _gb, when it is found)
+  --file <path>   read the text from a file (UTF-8)
+examples:
+  trit phonemes "The build passed on March 3rd."
+  trit phonemes "[Kokoro](/kˈOkəɹO/) speaks." --british
+```
+
+## voices
+
+```text
+usage: trit voices [--model <dir>]
+  Lists the voices of a Kokoro folder (the default voice folder when none is named), with
+  their accent: af/am American female/male, bf/bm British female/male.
+examples:
+  trit voices
+  trit speak "Hello." --voice bm_george
 ```
 
 ## Get a model
@@ -101,6 +132,9 @@ examples:
 | qwen3-asr-0.6b | qwen3_asr | 30 | 1876 |
 | wav2vec2-base-960h | wav2vec2 | en | 378 |
 | s1-mini | cleanup | en | 1503 |
+| kokoro-82m | kokoro | en (US, GB) | 327 |
+| graphemes_to_phonemes_en_us | g2p | en (US) | 3 |
+| graphemes_to_phonemes_en_gb | g2p | en (GB) | 3 |
 | mms-tts-eng | vits | en | 145 |
 
 Example: `hf download moondream/parakeet-redux config.json tokenizer.json model.safetensors --local-dir models/parakeet-redux`. The default model is parakeet-redux; `TRIT_MODEL=<dir>` sets another.

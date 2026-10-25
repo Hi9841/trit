@@ -9,8 +9,9 @@ pub struct Known {
     pub name: &'static str,
     /// Hugging Face repository.
     pub repo: &'static str,
-    /// `model_type` of its `config.json` (`vits` is a voice: text to
-    /// speech), or `cleanup` for S1-mini.
+    /// `model_type` of its `config.json`; `vits` and `kokoro` are voices
+    /// (text to speech), `g2p` the fallback of the English phonemizer, and
+    /// `cleanup` S1-mini.
     pub kind: &'static str,
     /// Languages it writes.
     pub languages: &'static str,
@@ -132,6 +133,27 @@ pub const CATALOG: &[Known] = &[
         mb: 1503,
     },
     Known {
+        name: "kokoro-82m",
+        repo: "hexgrad/Kokoro-82M",
+        kind: "kokoro",
+        languages: "en (US, GB)",
+        mb: 327,
+    },
+    Known {
+        name: "graphemes_to_phonemes_en_us",
+        repo: "PeterReid/graphemes_to_phonemes_en_us",
+        kind: "g2p",
+        languages: "en (US)",
+        mb: 3,
+    },
+    Known {
+        name: "graphemes_to_phonemes_en_gb",
+        repo: "PeterReid/graphemes_to_phonemes_en_gb",
+        kind: "g2p",
+        languages: "en (GB)",
+        mb: 3,
+    },
+    Known {
         name: "mms-tts-eng",
         repo: "facebook/mms-tts-eng",
         kind: "vits",
@@ -157,6 +179,39 @@ impl Known {
                 "vocab.json",
                 "model.safetensors",
             ],
+            "kokoro" => &[
+                "config.json",
+                "kokoro-v1_0.pth",
+                "voices/af_alloy.pt",
+                "voices/af_aoede.pt",
+                "voices/af_bella.pt",
+                "voices/af_heart.pt",
+                "voices/af_jessica.pt",
+                "voices/af_kore.pt",
+                "voices/af_nicole.pt",
+                "voices/af_nova.pt",
+                "voices/af_river.pt",
+                "voices/af_sarah.pt",
+                "voices/af_sky.pt",
+                "voices/am_adam.pt",
+                "voices/am_echo.pt",
+                "voices/am_eric.pt",
+                "voices/am_fenrir.pt",
+                "voices/am_liam.pt",
+                "voices/am_michael.pt",
+                "voices/am_onyx.pt",
+                "voices/am_puck.pt",
+                "voices/am_santa.pt",
+                "voices/bf_alice.pt",
+                "voices/bf_emma.pt",
+                "voices/bf_isabella.pt",
+                "voices/bf_lily.pt",
+                "voices/bm_daniel.pt",
+                "voices/bm_fable.pt",
+                "voices/bm_george.pt",
+                "voices/bm_lewis.pt",
+            ],
+            "g2p" => &["config.json", "generation_config.json", "model.safetensors"],
             "vits" => &[
                 "config.json",
                 "tokenizer_config.json",

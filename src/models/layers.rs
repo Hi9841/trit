@@ -21,9 +21,11 @@ pub struct Norm {
     weight: Vec<f32>,
     /// Zeros when the model has no bias.
     bias: Vec<f32>,
+    eps: f32,
 }
 
 impl Norm {
+    /// `name.weight` and `name.bias`, with epsilon 1e-5 (PyTorch's default).
     pub fn load(t: &Tensors, name: &str, d: usize) -> Result<Self, String> {
         let bias = format!("{name}.bias");
         Ok(Self {
@@ -33,7 +35,18 @@ impl Norm {
             } else {
                 vec![0.0; d]
             },
+            eps: LAYER_NORM_EPS,
         })
+    }
+
+    /// A norm from its weight and bias, with epsilon `eps`.
+    pub fn new(weight: Vec<f32>, bias: Vec<f32>, eps: f32) -> Self {
+        Self { weight, bias, eps }
+    }
+
+    /// The same norm with epsilon `eps` (ALBERT and BERT use 1e-12).
+    pub fn with_eps(self, eps: f32) -> Self {
+        Self { eps, ..self }
     }
 
     /// Rows of `x`, normalized; a row is `d` (the weight's size) values.
@@ -41,7 +54,13 @@ impl Norm {
         debug_assert_eq!(d, self.weight.len());
         let mut out = Buf::scratch(x.len());
         team::chunks_mut(&mut out, d, |index, o| {
-            normalize_row(&x[index * d..(index + 1) * d], &self.weight, &self.bias, o);
+            normalize_row(
+                &x[index * d..(index + 1) * d],
+                &self.weight,
+                &self.bias,
+                self.eps,
+                o,
+            );
         });
         out
     }
@@ -55,7 +74,7 @@ impl Norm {
             // SAFETY: each row of `x` belongs to the task of the same output row.
             let row = unsafe { rows.slice_mut(index * size, size) };
             add_scaled(row, &y[index * size..(index + 1) * size], scale);
-            normalize_row(row, &self.weight, &self.bias, o);
+            normalize_row(row, &self.weight, &self.bias, self.eps, o);
         });
         out
     }
@@ -63,9 +82,9 @@ impl Norm {
 
 multiversion! {
     /// `out = (row - mean) / sqrt(var + eps) * weight + bias`.
-    fn normalize_row(row: &[f32], weight: &[f32], bias: &[f32], out: &mut [f32]) {
+    fn normalize_row(row: &[f32], weight: &[f32], bias: &[f32], eps: f32, out: &mut [f32]) {
         let (mean, var) = moments(row);
-        let inv = 1.0 / (var + LAYER_NORM_EPS).sqrt();
+        let inv = 1.0 / (var + eps).sqrt();
         for (((o, v), w), b) in out.iter_mut().zip(row).zip(weight).zip(bias) {
             *o = (v - mean) * inv * w + b;
         }
