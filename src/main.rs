@@ -9,7 +9,7 @@ use std::time::Instant;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const DESCRIPTION: &str = "Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; 16 kHz WAV in, text out";
+const DESCRIPTION: &str = "Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; 16 kHz WAV in, text out. Text to speech with a VITS voice (MMS-TTS)";
 /// Longer transcripts in a list of several files are cut here; `--full` keeps them.
 const PREVIEW_CHARS: usize = 500;
 
@@ -47,6 +47,21 @@ usage: trit clean <text>... [--model <dir>] [--styling <s>] [--structure <s>] [-
 examples:
   trit clean \"so um send the report by friday no wait thursday\"
   trit clean \"hey sarah can you send the numbers thanks john\" --context email";
+
+const SPEAK_HELP: &str = "usage: trit speak <text>... [--out <file.wav>] [--model <dir>] [--speed <x>] [--noise <x>] [--noise-duration <x>] [--seed <n>] [--format toon|json]
+  Speaks text with a VITS voice (Meta MMS-TTS) and writes a mono 16-bit WAV file. The voice
+  reads letters: write numbers and symbols as words (digits 7 to 9 are not in its alphabet).
+  <text>          the text; several arguments join with spaces; sentences get a short pause
+  --out <file>    the WAV file to write (default: speech.wav)
+  --model <dir>   voice folder or `trit models` name (default: TRIT_VOICE, models/mms-tts-eng, the Hugging Face cache)
+  --speed <x>     speaking rate: 1 is the voice's pace (default), 1.25 faster, 0.8 slower
+  --noise <x>     how much the voice varies (default: the voice's, 0.667 for MMS-TTS); 0 is flat
+  --noise-duration <x>  how much the timing varies (default: the voice's, 0.8)
+  --seed <n>      seed of the noise (default 0); one text and one seed give the same audio
+  --format        toon (default), json
+examples:
+  trit speak \"The build passed. Ship it.\"
+  trit speak \"Good morning\" --out morning.wav --speed 0.9";
 
 const MODELS_HELP: &str = "\
 usage: trit models
@@ -94,12 +109,13 @@ fn main() -> ExitCode {
         }
         "transcribe" => transcribe(rest),
         "clean" => clean(rest),
+        "speak" => speak(rest),
         "models" => models(rest),
         "doctor" => doctor(rest),
         "skill" => skill(rest),
         other => usage_error(
             &format!("unknown command `{other}`"),
-            "commands: transcribe, clean, models, doctor, skill. Run `trit` for the home view",
+            "commands: transcribe, clean, speak, models, doctor, skill. Run `trit` for the home view",
         ),
     }
 }
@@ -216,11 +232,12 @@ fn home() {
     print_help(&help);
 }
 
-const HOME_HELP: [&str; 5] = [
+const HOME_HELP: [&str; 6] = [
     "Run `trit transcribe <file.wav>` to get the text of a recording",
     "Run `trit models` to list the speech models (Parakeet, Canary, Whisper, Moonshine) and get one",
     "Run `trit transcribe <folder> --model <name> --format json` for every WAV file in a folder",
     "Run `trit clean \"<raw transcript>\"` to rewrite text as clean written English (S1-mini)",
+    "Run `trit speak \"<text>\" --out speech.wav` to speak text with the MMS-TTS voice",
     "Run `trit doctor` to check the models and the CPU",
 ];
 
@@ -689,6 +706,125 @@ fn clean(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn speak(args: &[String]) -> ExitCode {
+    let parsed = match parse(
+        "speak",
+        args,
+        &[
+            "--out",
+            "--model",
+            "--speed",
+            "--noise",
+            "--noise-duration",
+            "--seed",
+            "--format",
+        ],
+        &[],
+    ) {
+        Ok(parsed) => parsed,
+        Err(code) => return code,
+    };
+    if parsed.help {
+        println!("{SPEAK_HELP}");
+        return ExitCode::SUCCESS;
+    }
+    let format = parsed.value("--format").unwrap_or("toon");
+    if !["toon", "json"].contains(&format) {
+        return usage_error(
+            &format!("unknown format `{format}`"),
+            "valid formats: toon, json",
+        );
+    }
+    if parsed.positional.is_empty() {
+        return usage_error(
+            "speak needs the text to speak",
+            "trit speak \"<text>\" [--out speech.wav]",
+        );
+    }
+    let text = parsed.positional.join(" ");
+    let number = |flag: &str| -> Result<Option<f32>, ExitCode> {
+        parsed
+            .value(flag)
+            .map(|value| {
+                value.parse::<f32>().map_err(|_| {
+                    usage_error(&format!("{flag} {value} is not a number"), SPEAK_EXAMPLE)
+                })
+            })
+            .transpose()
+    };
+    let voicing = (|| -> Result<trit::Voicing, ExitCode> {
+        Ok(trit::Voicing {
+            speed: number("--speed")?,
+            noise: number("--noise")?,
+            noise_duration: number("--noise-duration")?,
+            seed: match parsed.value("--seed").map(str::parse::<u64>) {
+                None => 0,
+                Some(Ok(seed)) => seed,
+                Some(Err(_)) => {
+                    return Err(usage_error(
+                        "--seed must be a whole number of 0 or more",
+                        SPEAK_EXAMPLE,
+                    ))
+                }
+            },
+        })
+    })();
+    let voicing = match voicing {
+        Ok(voicing) => voicing,
+        Err(code) => return code,
+    };
+    let out = PathBuf::from(parsed.value("--out").unwrap_or("speech.wav"));
+    let explicit = parsed.value("--model").map(Path::new);
+    let Some(dir) = trit::find_voice(explicit) else {
+        return error(
+            &trit::missing_voice(explicit),
+            "Run `trit models` to list the voices",
+        );
+    };
+    let voice = match trit::Voice::load(&dir) {
+        Ok(voice) => voice,
+        Err(e) => return error(&format!("cannot load the voice: {e}"), "Run `trit doctor`"),
+    };
+    let reads = voice.reads(&text);
+    if reads.is_empty() {
+        return error(
+            "the voice reads none of these characters",
+            "MMS-TTS English reads the letters a to z, digits 0 to 6, space, apostrophe, and hyphen",
+        );
+    }
+    let started = Instant::now();
+    let samples = match voice.speak_with(&text, &voicing) {
+        Ok(samples) => samples,
+        Err(e) => return usage_error(&e, SPEAK_EXAMPLE),
+    };
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    if let Err(e) = trit::write_wav(&out, &samples, voice.sample_rate()) {
+        return error(&e, "pass --out <file.wav> in a folder you can write");
+    }
+    let seconds = samples.len() as f64 / f64::from(voice.sample_rate());
+    let file = slashes(&out);
+    match format {
+        "json" => println!(
+            "{}",
+            serde_json::json!({"file": file, "seconds": hundredths(seconds as f32),
+                "ms": ms, "sample_rate": voice.sample_rate(), "reads": reads})
+        ),
+        _ => {
+            println!("file: {}", toon(&file));
+            println!("seconds: {seconds:.2}");
+            println!("ms: {ms:.0}");
+            println!("reads: {}", toon(&reads));
+            print_help(&[format!(
+                "Run `trit transcribe {}` to check what a speech model hears",
+                toon(&file)
+            )]);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+const SPEAK_EXAMPLE: &str = "trit speak \"<text>\" --speed 1.1 --noise 0.5 --seed 7";
+
 fn models(args: &[String]) -> ExitCode {
     let parsed = match parse("models", args, &[], &[]) {
         Ok(parsed) => parsed,
@@ -765,6 +901,10 @@ fn doctor(args: &[String]) -> ExitCode {
         Some(dir) => println!("cleanup_model: ok, {}", toon(&tilde(&dir))),
         None => println!("cleanup_model: not found (optional; for `trit clean` and --cleanup)"),
     }
+    match trit::find_voice(None) {
+        Some(dir) => println!("voice: ok, {}", toon(&tilde(&dir))),
+        None => println!("voice: not found (optional; for `trit speak`)"),
+    }
     println!("families: {}", trit::MODEL_TYPES.join(", "));
     println!("searched[{}]{{folder,status}}:", candidates.len() + 1);
     let env = std::env::var_os("TRIT_MODEL").map(PathBuf::from);
@@ -821,7 +961,7 @@ fn doctor(args: &[String]) -> ExitCode {
 /// cannot drift; `--check` fails when a committed copy is stale.
 fn skill_text() -> String {
     let mut text = String::new();
-    text.push_str("---\nname: trit\ndescription: Transcribe speech from WAV files to text on the CPU, offline, with the Trit engine and a Parakeet, Canary, Whisper, or Moonshine model, in any language the model speaks; clean a raw transcript with S1-mini. Use when an agent must turn a recording into text, or add speech to text to an app in Rust, C, C++, Python, C#, Node, or Bun.\n---\n\n");
+    text.push_str("---\nname: trit\ndescription: Transcribe speech from WAV files to text on the CPU, offline, with the Trit engine and a Parakeet, Canary, Whisper, or Moonshine model, in any language the model speaks; clean a raw transcript with S1-mini; speak text into a WAV file with the MMS-TTS voice. Use when an agent must turn a recording into text or text into speech, or add speech to text or text to speech to an app in Rust, C, C++, Python, C#, Node, or Bun.\n---\n\n");
     text.push_str("# Trit\n\n");
     text.push_str(DESCRIPTION);
     text.push_str(".\n\n## Commands\n\n");
@@ -834,6 +974,8 @@ fn skill_text() -> String {
     text.push_str(TRANSCRIBE_HELP);
     text.push_str("\n```\n\n## clean\n\n```text\n");
     text.push_str(CLEAN_HELP);
+    text.push_str("\n```\n\n## speak\n\n```text\n");
+    text.push_str(SPEAK_HELP);
     text.push_str("\n```\n\n## Get a model\n\n`trit models` lists the known models, where each is, and its download command. Pass a name or a folder to `--model`.\n\n| Name | Family | Languages | MB |\n|---|---|---|---:|\n");
     for entry in trit::CATALOG {
         text.push_str(&format!(

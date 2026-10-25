@@ -1,4 +1,4 @@
-"""Trit for Python: speech to text on the CPU, through the C ABI of trit-ffi.
+"""Trit for Python: speech to text and text to speech on the CPU, through the C ABI of trit-ffi.
 
     import trit
     engine = trit.Trit("whisper-large-v3-turbo")   # a folder, a `trit models` name, or None
@@ -11,6 +11,10 @@
 
     cleaner = trit.Cleaner()                        # Superwhisper S1-mini
     print(cleaner.clean("so um send it friday no wait thursday"))
+
+    voice = trit.Voice()                            # Meta MMS-TTS English
+    voice.speak_wav("The build passed.", "speech.wav")
+    samples = voice.speak("Ship it.", speed=1.1)    # array('f') at voice.sample_rate
 
 The library is found at TRIT_LIB, next to this file, or in ../../target/release.
 Build it with `cargo build --release -p trit-ffi` in the trit folder.
@@ -30,7 +34,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Self
 
-__all__ = ["Cleaner", "Segment", "Trit", "TritError", "release_memory", "version"]
+__all__ = ["Cleaner", "Segment", "Trit", "TritError", "Voice", "release_memory", "version"]
 
 _NAMES = {"win32": "trit_ffi.dll", "darwin": "libtrit_ffi.dylib"}
 
@@ -65,6 +69,12 @@ def _library() -> ctypes.CDLL:
         "trit_cleaner_load_with": ([text, text], ptr),
         "trit_cleaner_free": ([ptr], None),
         "trit_clean": ([ptr, text, text, text, text], ptr),
+        "trit_voice_load": ([text], ptr),
+        "trit_voice_free": ([ptr], None),
+        "trit_voice_sample_rate": ([ptr], ctypes.c_int),
+        "trit_speak": ([ptr, text, text, ctypes.POINTER(size)], floats),
+        "trit_speak_wav": ([ptr, text, text, text], ctypes.c_int),
+        "trit_free_samples": ([floats, size], None),
     }
     for fn, (args, result) in signatures.items():
         getattr(lib, fn).argtypes = args
@@ -248,3 +258,73 @@ class Cleaner:
 
     def __del__(self) -> None:
         self.close()
+
+
+class Voice:
+    """A VITS voice (Meta MMS-TTS): text to speech. It reads letters; write
+    numbers and symbols as words."""
+
+    def __init__(self, model: str | os.PathLike | None = None):
+        """`model`: a folder, a `trit models` name ("mms-tts-eng"), or None for the default."""
+        self._handle = None
+        handle = _lib.trit_voice_load(_arg(model))
+        if not handle:
+            raise _error()
+        self._handle = handle
+
+    @property
+    def sample_rate(self) -> int:
+        """The rate of the samples of `speak` (16000 for MMS-TTS)."""
+        return _lib.trit_voice_sample_rate(self._live())
+
+    def speak(self, text: str, speed: float | None = None, noise: float | None = None,
+              noise_duration: float | None = None, seed: int = 0) -> array:
+        """Mono samples in -1..1 at `sample_rate`, as array('f').
+        `speed`: 1 is the voice's pace, 1.25 faster (None: the voice's own).
+        `noise`, `noise_duration`: how much the voice and the timing vary
+        (None: the voice's own). One text and one `seed` give the same audio."""
+        count = ctypes.c_size_t()
+        options = _voicing(speed, noise, noise_duration, seed)
+        pointer = _lib.trit_speak(self._live(), text.encode(), options, ctypes.byref(count))
+        if not pointer:
+            raise _error()
+        try:
+            samples = array("f")
+            samples.frombytes(ctypes.string_at(pointer, count.value * 4))
+            return samples
+        finally:
+            _lib.trit_free_samples(pointer, count)
+
+    def speak_wav(self, text: str, path: str | os.PathLike, speed: float | None = None,
+                  noise: float | None = None, noise_duration: float | None = None, seed: int = 0) -> None:
+        """`speak` into a 16-bit mono WAV file."""
+        options = _voicing(speed, noise, noise_duration, seed)
+        if _lib.trit_speak_wav(self._live(), text.encode(), os.fsencode(path), options) < 0:
+            raise _error()
+
+    def _live(self):
+        if not self._handle:
+            raise TritError("voice is closed")
+        return self._handle
+
+    def close(self) -> None:
+        if self._handle:
+            _lib.trit_voice_free(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
+
+
+def _voicing(speed, noise, noise_duration, seed) -> bytes:
+    options = {"seed": seed}
+    for key, value in (("speed", speed), ("noise", noise), ("noise_duration", noise_duration)):
+        if value is not None:
+            options[key] = value
+    return json.dumps(options).encode()

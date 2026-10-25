@@ -1,6 +1,7 @@
-/* Trit: speech to text on the CPU. Runs Parakeet (TDT, CTC), Canary,
- * Whisper (tiny to large-v3, turbo, Distil-Whisper), and Moonshine
- * checkpoints from Hugging Face, and the S1-mini transcript cleaner.
+/* Trit: speech to text and text to speech on the CPU. Runs Parakeet (TDT,
+ * CTC), Canary, Whisper (tiny to large-v3, turbo, Distil-Whisper), and
+ * Moonshine checkpoints from Hugging Face, the S1-mini transcript cleaner,
+ * and VITS voices (Meta MMS-TTS).
  * C ABI of the trit-ffi library (trit_ffi.dll, libtrit_ffi.so, libtrit_ffi.dylib).
  *
  * Rules for every function:
@@ -8,6 +9,7 @@
  * - A call that fails returns NULL or -1. trit_last_error() then gives the
  *   reason and the fix, for the calling thread.
  * - Text that a function returns is yours: free it with trit_free_text().
+ *   Samples from trit_speak() are yours: free them with trit_free_samples().
  * - One engine is safe to use from several threads; calls share one worker
  *   team, so they do not finish sooner in parallel.
  *
@@ -29,8 +31,9 @@ extern "C" {
 
 typedef struct Trit Trit;
 typedef struct TritCleaner TritCleaner;
+typedef struct TritVoice TritVoice;
 
-/* The engine version, for example "0.1.0". Static; do not free. */
+/* The engine version, for example "0.2.0". Static; do not free. */
 const char *trit_version(void);
 
 /* The error of the last failed call on this thread, or "" after a success.
@@ -130,6 +133,37 @@ void trit_cleaner_free(TritCleaner *cleaner);
  * trit_free_text(). */
 char *trit_clean(const TritCleaner *cleaner, const char *text, const char *styling,
                  const char *structure, const char *context);
+
+/* Loads a voice (text to speech): a VITS folder (Meta MMS-TTS) or a name
+ * from `trit models` ("mms-tts-eng"). NULL reads TRIT_VOICE, then searches
+ * ./models/mms-tts-eng and the Hugging Face cache. NULL on failure. */
+TritVoice *trit_voice_load(const char *model_dir);
+
+/* Frees a voice. NULL is a no-op. */
+void trit_voice_free(TritVoice *voice);
+
+/* The rate of the samples of trit_speak (16000 for MMS-TTS); -1 for NULL. */
+int trit_voice_sample_rate(const TritVoice *voice);
+
+/* Speaks `text`: mono floats in -1 to 1 at trit_voice_sample_rate(), their
+ * number in *count. The voice reads letters; write numbers and symbols as
+ * words. Sentences get a short pause between them.
+ * `options`: NULL or a JSON object; every key is optional:
+ *   "speed":          speaking rate; 1 is the voice's pace, 1.25 faster
+ *   "noise":          how much the voice varies (the voice's own: 0.667)
+ *   "noise_duration": how much the timing varies (the voice's own: 0.8)
+ *   "seed":           0 (default) or more; one text and one seed give the
+ *                     same audio
+ * Returns the samples, or NULL on failure. Free with trit_free_samples(). */
+float *trit_speak(const TritVoice *voice, const char *text, const char *options,
+                  size_t *count);
+
+/* trit_speak into a 16-bit mono WAV file at `path`. Returns 0, or -1. */
+int trit_speak_wav(const TritVoice *voice, const char *text, const char *path,
+                   const char *options);
+
+/* Frees the samples of trit_speak; `count` is the count it gave. NULL is a no-op. */
+void trit_free_samples(float *samples, size_t count);
 
 #ifdef __cplusplus
 }

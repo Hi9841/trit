@@ -103,6 +103,12 @@ impl Model {
             .iter()
             .find(|row| row.model_type == kind)
             .ok_or_else(|| {
+                if kind == "vits" {
+                    return format!(
+                        "{} holds a `vits` voice (text to speech); load it with `Voice::load` or `trit speak`",
+                        dir.display()
+                    );
+                }
                 format!(
                     "{} holds a `{kind}` model; Trit runs {}",
                     dir.display(),

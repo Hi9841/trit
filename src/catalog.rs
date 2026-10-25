@@ -9,7 +9,8 @@ pub struct Known {
     pub name: &'static str,
     /// Hugging Face repository.
     pub repo: &'static str,
-    /// `model_type` of its `config.json`, or `cleanup` for S1-mini.
+    /// `model_type` of its `config.json` (`vits` is a voice: text to
+    /// speech), or `cleanup` for S1-mini.
     pub kind: &'static str,
     /// Languages it writes.
     pub languages: &'static str,
@@ -130,6 +131,13 @@ pub const CATALOG: &[Known] = &[
         languages: "en",
         mb: 1503,
     },
+    Known {
+        name: "mms-tts-eng",
+        repo: "facebook/mms-tts-eng",
+        kind: "vits",
+        languages: "en",
+        mb: 145,
+    },
 ];
 
 impl Known {
@@ -145,6 +153,12 @@ impl Known {
             "wav2vec2" => &[
                 "config.json",
                 "preprocessor_config.json",
+                "tokenizer_config.json",
+                "vocab.json",
+                "model.safetensors",
+            ],
+            "vits" => &[
+                "config.json",
                 "tokenizer_config.json",
                 "vocab.json",
                 "model.safetensors",

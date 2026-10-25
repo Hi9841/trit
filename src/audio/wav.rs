@@ -1,4 +1,5 @@
-//! WAV files to the 16 kHz mono samples that `Trit::transcribe` takes.
+//! WAV files: in, to the 16 kHz mono samples that `Trit::transcribe`
+//! takes; out, from the samples that `Voice::speak` gives.
 
 use std::path::Path;
 
@@ -55,6 +56,33 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
         .chunks_exact(width * channels)
         .map(|frame| frame.chunks_exact(width).map(sample).sum::<f32>() / channels as f32)
         .collect())
+}
+
+/// Writes mono `samples` (-1..1; beyond is clipped) as a 16-bit PCM WAV
+/// file at `rate` Hz.
+pub fn write_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> {
+    let data = u32::try_from(samples.len() * 2)
+        .ok()
+        .filter(|bytes| *bytes <= u32::MAX - 36)
+        .ok_or("the audio is too long for one WAV file")?;
+    let mut bytes = Vec::with_capacity(44 + samples.len() * 2);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 2).to_le_bytes()); // bytes per second
+    bytes.extend_from_slice(&2u16.to_le_bytes()); // bytes per frame
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    for sample in samples {
+        let value = (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// The little-endian `u32` at `at`. The caller has checked that four bytes are there.

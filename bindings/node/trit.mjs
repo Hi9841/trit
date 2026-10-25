@@ -1,6 +1,6 @@
-// Trit for Node and Bun: speech to text on the CPU, through the C ABI of trit-ffi.
+// Trit for Node and Bun: speech to text and text to speech on the CPU, through the C ABI of trit-ffi.
 //
-//   import { Trit, Cleaner } from "./trit.mjs";
+//   import { Trit, Cleaner, Voice } from "./trit.mjs";
 //   const engine = new Trit("whisper-large-v3-turbo");  // folder, `trit models` name, or null
 //   console.log(engine.kind);                            // "whisper"
 //   console.log(engine.transcribeWav("take.wav"));       // the model detects the language
@@ -11,6 +11,10 @@
 //
 //   const cleaner = new Cleaner();                       // Superwhisper S1-mini
 //   console.log(cleaner.clean("so um send it friday no wait thursday"));
+//
+//   const voice = new Voice();                           // Meta MMS-TTS English
+//   voice.speakWav("The build passed.", "speech.wav");
+//   const samples = voice.speak("Ship it.", { speed: 1.1 });  // Float32Array at voice.sampleRate
 //
 // The library is found at TRIT_LIB, next to this file, or in ../../target/release.
 // Build it with `cargo build --release -p trit-ffi` in the trit folder.
@@ -47,6 +51,12 @@ const c = {
   cleanerLoad: lib.func("void *trit_cleaner_load_with(const char *model_dir, const char *precision)"),
   cleanerFree: lib.func("void trit_cleaner_free(void *cleaner)"),
   clean: lib.func("void *trit_clean(void *cleaner, const char *text, const char *styling, const char *structure, const char *context)"),
+  voiceLoad: lib.func("void *trit_voice_load(const char *model_dir)"),
+  voiceFree: lib.func("void trit_voice_free(void *voice)"),
+  voiceSampleRate: lib.func("int trit_voice_sample_rate(void *voice)"),
+  speak: lib.func("void *trit_speak(void *voice, const char *text, const char *options, _Out_ size_t *count)"),
+  speakWav: lib.func("int trit_speak_wav(void *voice, const char *text, const char *path, const char *options)"),
+  freeSamples: lib.func("void trit_free_samples(void *samples, size_t count)"),
 };
 
 export class TritError extends Error {}
@@ -190,5 +200,72 @@ export class Cleaner {
   close() {
     if (this.#handle) c.cleanerFree(this.#handle);
     this.#handle = null;
+  }
+}
+
+/** The options JSON of trit_speak. */
+function voicing({ speed = null, noise = null, noiseDuration = null, seed = 0 } = {}) {
+  const json = { seed };
+
+  if (speed !== null) json.speed = speed;
+
+  if (noise !== null) json.noise = noise;
+
+  if (noiseDuration !== null) json.noise_duration = noiseDuration;
+
+  return JSON.stringify(json);
+}
+
+/** A VITS voice (Meta MMS-TTS): text to speech. It reads letters; write numbers and symbols as words. */
+export class Voice {
+  #handle;
+
+  /** @param {string | null} model a folder, a `trit models` name ("mms-tts-eng"), or null for the default. */
+  constructor(model = null) {
+    this.#handle = c.voiceLoad(model);
+
+    if (!this.#handle) throw new TritError(c.lastError());
+  }
+
+  /** @returns {number} the rate of the samples of `speak` (16000 for MMS-TTS). */
+  get sampleRate() {
+    return c.voiceSampleRate(this.#live());
+  }
+
+  /**
+   * @param {string} text
+   * @param {{speed?: number, noise?: number, noiseDuration?: number, seed?: number}} settings
+   *   speed: 1 is the voice's pace, 1.25 faster (default: the voice's own). noise, noiseDuration:
+   *   how much the voice and the timing vary (default: the voice's own). One text and one seed
+   *   give the same audio.
+   * @returns {Float32Array} mono samples in -1..1 at `sampleRate`.
+   */
+  speak(text, settings = {}) {
+    const count = [0];
+    const pointer = c.speak(this.#live(), text, voicing(settings), count);
+
+    if (!pointer) throw new TritError(c.lastError());
+
+    try {
+      return Float32Array.from(koffi.decode(pointer, "float", Number(count[0])));
+    } finally {
+      c.freeSamples(pointer, count[0]);
+    }
+  }
+
+  /** `speak` into a 16-bit mono WAV file. */
+  speakWav(text, file, settings = {}) {
+    if (c.speakWav(this.#live(), text, file, voicing(settings)) < 0) throw new TritError(c.lastError());
+  }
+
+  close() {
+    if (this.#handle) c.voiceFree(this.#handle);
+    this.#handle = null;
+  }
+
+  #live() {
+    if (!this.#handle) throw new TritError("voice is closed");
+
+    return this.#handle;
   }
 }

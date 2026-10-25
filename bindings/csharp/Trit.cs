@@ -1,4 +1,4 @@
-// Trit for .NET: speech to text on the CPU, through the C ABI of trit-ffi.
+// Trit for .NET: speech to text and text to speech on the CPU, through the C ABI of trit-ffi.
 //
 //   using var engine = new Trit("whisper-large-v3-turbo");  // folder, `trit models` name, or null
 //   Console.WriteLine(engine.Kind);                          // "whisper"
@@ -9,6 +9,10 @@
 //
 //   using var cleaner = new TritCleaner();                   // Superwhisper S1-mini
 //   Console.WriteLine(cleaner.Clean("so um send it friday no wait thursday"));
+//
+//   using var voice = new TritVoice();                       // Meta MMS-TTS English
+//   voice.SpeakWav("The build passed.", "speech.wav");
+//   float[] samples = voice.Speak("Ship it.", speed: 1.1f);  // at voice.SampleRate
 //
 // Copy trit_ffi.dll (libtrit_ffi.so, libtrit_ffi.dylib) next to your program.
 // Build it with `cargo build --release -p trit-ffi` in the trit folder.
@@ -53,6 +57,12 @@ internal static partial class Native
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_cleaner_load_with(string? model, string? precision);
     [LibraryImport(Lib)] public static partial void trit_cleaner_free(IntPtr cleaner);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_clean(IntPtr cleaner, string text, string? styling, string? structure, string? context);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_voice_load(string? model);
+    [LibraryImport(Lib)] public static partial void trit_voice_free(IntPtr voice);
+    [LibraryImport(Lib)] public static partial int trit_voice_sample_rate(IntPtr voice);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static unsafe partial float* trit_speak(IntPtr voice, string text, string? options, out nuint count);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial int trit_speak_wav(IntPtr voice, string text, string path, string? options);
+    [LibraryImport(Lib)] public static unsafe partial void trit_free_samples(float* samples, nuint count);
 }
 
 /// <summary>One loaded speech model. Load once and keep it.</summary>
@@ -186,4 +196,67 @@ public sealed class TritCleaner : IDisposable
     }
 
     IntPtr Handle => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(TritCleaner));
+}
+
+/// <summary>A VITS voice (Meta MMS-TTS): text to speech. It reads letters; write numbers and symbols as words.</summary>
+public sealed class TritVoice : IDisposable
+{
+    IntPtr _handle;
+
+    /// <summary>A voice folder, a `trit models` name ("mms-tts-eng"), or null for the default.</summary>
+    public TritVoice(string? model = null)
+    {
+        _handle = Native.trit_voice_load(model);
+        if (_handle == IntPtr.Zero) throw Native.Error();
+    }
+
+    /// <summary>The rate of the samples of <see cref="Speak"/> (16000 for MMS-TTS).</summary>
+    public int SampleRate => Native.trit_voice_sample_rate(Handle);
+
+    /// <summary>Mono samples in -1..1 at <see cref="SampleRate"/>. speed: 1 is the voice's pace, 1.25 faster
+    /// (null: the voice's own); noise, noiseDuration: how much the voice and the timing vary (null: the
+    /// voice's own); one text and one seed give the same audio.</summary>
+    public float[] Speak(string text, float? speed = null, float? noise = null, float? noiseDuration = null,
+        ulong seed = 0)
+    {
+        unsafe
+        {
+            float* samples = Native.trit_speak(Handle, text, Options(speed, noise, noiseDuration, seed), out nuint count);
+            if (samples == null) throw Native.Error();
+            try { return new ReadOnlySpan<float>(samples, checked((int)count)).ToArray(); }
+            finally { Native.trit_free_samples(samples, count); }
+        }
+    }
+
+    /// <summary><see cref="Speak"/> into a 16-bit mono WAV file.</summary>
+    public void SpeakWav(string text, string path, float? speed = null, float? noise = null,
+        float? noiseDuration = null, ulong seed = 0)
+    {
+        if (Native.trit_speak_wav(Handle, text, path, Options(speed, noise, noiseDuration, seed)) < 0)
+            throw Native.Error();
+    }
+
+    /// <summary>The options JSON of trit_speak.</summary>
+    static string Options(float? speed, float? noise, float? noiseDuration, ulong seed)
+    {
+        using var buffer = new MemoryStream();
+        using (var json = new Utf8JsonWriter(buffer))
+        {
+            json.WriteStartObject();
+            if (speed is float s) json.WriteNumber("speed", s);
+            if (noise is float n) json.WriteNumber("noise", n);
+            if (noiseDuration is float d) json.WriteNumber("noise_duration", d);
+            json.WriteNumber("seed", seed);
+            json.WriteEndObject();
+        }
+        return System.Text.Encoding.UTF8.GetString(buffer.ToArray());
+    }
+
+    public void Dispose()
+    {
+        Native.trit_voice_free(_handle);
+        _handle = IntPtr.Zero;
+    }
+
+    IntPtr Handle => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(TritVoice));
 }

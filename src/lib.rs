@@ -1,6 +1,6 @@
-//! Trit: speech to text on the CPU, with its own kernels and no inference
-//! library, no Python, and no GPU. It runs the models in `models/`; the
-//! files are read as published on Hugging Face.
+//! Trit: speech to text and text to speech on the CPU, with its own kernels
+//! and no inference library, no Python, and no GPU. It runs the models in
+//! `models/`; the files are read as published on Hugging Face.
 //!
 //! ```no_run
 //! let model = trit::find_model(None).expect("model not found");
@@ -16,17 +16,19 @@ mod audio;
 mod catalog;
 mod cleanup;
 mod models;
+mod speech;
 mod text;
 
 use std::path::{Path, PathBuf};
 
-pub use audio::wav::read_wav;
+pub use audio::wav::{read_wav, write_wav};
 pub use catalog::{known, Known, CATALOG};
 pub use cleanup::{Cleaner, Context, Structure, Style, Styling, CLEANUP_REPO};
 pub use cpu::gemm::Precision;
 pub use cpu::{cpu_path, threads, Spread};
 pub use models::parts::logit_bias::BiasWeights;
 pub use models::MODEL_TYPES;
+pub use speech::{Voice, Voicing, VOICE_REPO};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `transcribe` takes mono samples at this rate.
@@ -285,6 +287,44 @@ pub fn find_cleanup_model(explicit: Option<&Path>) -> Option<PathBuf> {
     candidates(CLEANUP_REPO)
         .into_iter()
         .find(|dir| is_model(dir))
+}
+
+/// The voice folder: `explicit` if given (a folder, or a `CATALOG` name
+/// found in the places of `candidates`), else `TRIT_VOICE`, else the first
+/// complete `mms-tts-eng` folder of `candidates(VOICE_REPO)`.
+pub fn find_voice(explicit: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dir) = explicit {
+        if is_model(dir) {
+            return Some(dir.to_path_buf());
+        }
+        let entry = known(&dir.to_string_lossy())?;
+        return candidates(entry.repo).into_iter().find(|d| is_model(d));
+    }
+    if let Some(dir) = std::env::var_os("TRIT_VOICE") {
+        let dir = PathBuf::from(dir);
+        return is_model(&dir).then_some(dir);
+    }
+    candidates(VOICE_REPO).into_iter().find(|dir| is_model(dir))
+}
+
+/// Why `find_voice(explicit)` found nothing, with the command that fixes it.
+pub fn missing_voice(explicit: Option<&Path>) -> String {
+    match explicit.map(|dir| (dir, known(&dir.to_string_lossy()))) {
+        Some((_, Some(entry))) => format!(
+            "{} is not on this computer; get it: {}",
+            entry.name,
+            entry.download_command()
+        ),
+        Some((dir, None)) => format!(
+            "{} is not a voice folder ({}) or a name from `trit models`",
+            dir.display(),
+            MODEL_FILES.join(", ")
+        ),
+        None => format!(
+            "no voice found; get it: {}",
+            known(VOICE_REPO).map_or_else(String::new, Known::download_command)
+        ),
+    }
 }
 
 /// True when `dir` holds every file of `MODEL_FILES` (the weights as one

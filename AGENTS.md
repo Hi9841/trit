@@ -1,8 +1,9 @@
 # Trit: agent guide
 
-Trit is a CPU speech-to-text engine in Rust with no inference library. It
-runs Parakeet, Canary, Whisper, and Moonshine checkpoints from Hugging Face,
-and the S1-mini transcript cleaner. [README.md](README.md) is the reference:
+Trit is a CPU speech-to-text and text-to-speech engine in Rust with no
+inference library. It runs Parakeet, Canary, Whisper, and Moonshine
+checkpoints from Hugging Face, the S1-mini transcript cleaner, and VITS
+voices (Meta MMS-TTS). [README.md](README.md) is the reference:
 the API of each language, the models, and the options. This file gives the
 steps.
 
@@ -71,6 +72,7 @@ Do the steps in order. Each step ends on a check.
 | Smoke test | `./target/release/trit doctor`, then `./target/release/trit transcribe <file.wav> --model <name>` |
 | Skill current? | `./target/release/trit skill --check skill/SKILL.md` |
 | Accuracy of the TDT model | `uv run bench/accuracy.py <abs path of bench-asr.exe> clean other tech --engine native` from `desktop/` |
+| Voice against Transformers | `uv run --no-project --python 3.12 --with torch --with transformers --with numpy --with scipy --with whisper-normalizer --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match python bench/tts.py <trit.exe> <voice dir> <parakeet-redux dir>` from `desktop/` |
 | Same model on other runtimes | `uv run --no-project --python 3.12 python bench/runtimes.py <engine>` from `desktop/` |
 | Speed of one change | `uv run --no-project --python 3.12 --with numpy --with whisper-normalizer --with scipy python ../oploop/ab.py <model> <A.dll> <B.dll>` from `desktop/` (interleaved A/B of two `trit_ffi` builds) |
 
@@ -84,12 +86,18 @@ There are no unit tests. The checks are:
   `python bench/wer_rule.py` from `desktop/`. It must exit 0: Trit's default
   has the fewest errors, or a tie, for each model. The last full run is
   `desktop/bench/runtimes-results.jsonl`.
+- **Voice:** `bench/tts.py`. With the noise off, every clip has the
+  length of the reference and an SNR of 75 dB or more. Round-trip word
+  errors (noise off, and the sum of three seeds with noise) must not be
+  above the reference's. Last run: SNR 76.1 dB or more, errors 167
+  against 171, and 536 against 553.
 - **Speed:** a change is a gain only when `ab.py` shows p < 0.01 and the
   same text on every clip. Record it in `oploop/LEDGER.md`.
 
 ### Architecture
 
-- `src/lib.rs`: the public API (`Trit`, `Options`, `Cleaner`, `find_model`, `read_wav`). One way to do each thing.
+- `src/lib.rs`: the public API (`Trit`, `Options`, `Cleaner`, `Voice`, `find_model`, `read_wav`, `write_wav`). One way to do each thing.
+- `src/speech.rs`: `Voice`, text to speech. It is not a `Family` (audio in, text out): it loads `models/families/vits.rs` directly, cuts text into sentences, and seeds the noise (`Voicing::seed`), so one text always gives the same audio. `src/text/characters.rs` is its tokenizer; `parts/conv.rs` holds its convolutions. The voice keeps f32 weights (`Precision` does not apply): HiFi-GAN writes every sample from them.
 - `src/models/mod.rs`: `FAMILIES` has one row per `model_type`: its loader and its worker spread (`Spread::OneCache` for short products, `AllCores` for Whisper). `MODEL_TYPES` comes from it. Every family implements `Family`. Every load and call enters the team of its spread; each spread has its own team.
 - `src/models/parts/`: building blocks that the config picks, shared across families. `fastconformer.rs` is the encoder of Parakeet and Canary; `transducer.rs` the TDT and RNNT head; `ctc.rs`, `beam.rs`, `qwen3.rs` (the language model of Qwen3-ASR and S1-mini). `dictionary.rs` is the TDT dictionary: terms replace close spellings when the joint network's score allows. `logit_bias.rs` is the logit dictionary of Canary and Moonshine.
 - `src/models/families/`: one file per checkpoint family; it reads the files and wires the parts. `layers.rs` holds the shared layers (norms, GELU, rotary, attention with grouped heads, conv columns); `config.rs` reads `config.json`.

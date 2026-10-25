@@ -1,6 +1,6 @@
 [package]
 name = "trit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Speech to text on the CPU for the 1.58-bit Parakeet Redux model, with no Python and no inference library"
 license = "PolyForm-Noncommercial-1.0.0"
