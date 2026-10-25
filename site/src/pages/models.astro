@@ -17,17 +17,17 @@ const families = [...new Set(catalog.map((m) => familyOf(m.kind)))].map((family)
 }));
 
 const updated = updatedOf([
-  "trit/site/src/pages/models.astro",
-  "trit/src/catalog.rs",
-  "trit/README.md",
-  "desktop/bench/benchmarks.json",
+  "site/src/pages/models.astro",
+  "src/catalog.rs",
+  "README.md",
+  "bench/benchmarks.json",
 ]);
 
 const largest = Math.max(...catalog.map((m) => m.mb));
 
 // From the README's Models section: everything after the table (where Trit looks for a model).
-const readme = sections(readRepo("trit/README.md")).find((s) => s.id === "models")?.body ?? "";
-const search = await render(readme.slice(readme.indexOf("Get one")), "trit/README.md");
+const readme = sections(readRepo("README.md")).find((s) => s.id === "models")?.body ?? "";
+const search = await render(readme.slice(readme.indexOf("Get one")), "README.md");
 ---
 
 <Base

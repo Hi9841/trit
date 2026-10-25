@@ -1,6 +1,6 @@
 # Trit site
 
-The one-page site of Trit, built with Astro. Run the commands in `trit/site/`.
+The one-page site of Trit, built with Astro. Run the commands in `site/`.
 
 | Task | Command |
 |---|---|
@@ -29,12 +29,12 @@ The one-page site of Trit, built with Astro. Run the commands in `trit/site/`.
   `max-width: var(--measure)` (52ch: at most about 78 Geist characters).
 - The pages read the repository at build time (`src/lib/data.ts`,
   `src/lib/repo.ts`), so a rebuild picks up every change there:
-  - `/models`: `trit/src/catalog.rs`, and the search order from the README.
-  - `/benchmarks`: `desktop/bench/runtimes-results.jsonl` for the tables, and
+  - `/models`: `src/catalog.rs`, and the search order from the README.
+  - `/benchmarks`: `bench/runtimes-results.jsonl` for the tables, and
     the summary table, cleanup, method and reproduce sections of
     `docs/engine-comparison.md`. It leaves out the report's sections 4 and 5
     and the summary's numbered notes: they describe an earlier Trit.
-  - `/docs`: `trit/README.md`, all sections except Contents and Performance.
+  - `/docs`: `README.md`, all sections except Contents and Performance.
 - The home page's numbers come from the same files; update them by hand.
 - Colours are tokens in `src/styles/global.css`: a light and a dark palette.
   The header button stores the choice in `localStorage`; without a choice the

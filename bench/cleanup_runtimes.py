@@ -2,7 +2,7 @@
 
 usage: uv run --no-project --python 3.12 python bench/cleanup_runtimes.py ENGINE|all [...] [--list]
 
-Run from desktop/. Inputs: the 56 sentences of bench/corpus.txt and
+Run from the repository root. Inputs: the 56 sentences of bench/corpus.txt and
 bench/tech-corpus.txt as a raw transcript (lowercase, no punctuation but
 apostrophes), plus the six examples of the S1-mini model card. The target
 is the written sentence. Every runtime gets the exact prompt the model was
@@ -19,9 +19,9 @@ import sys
 import time
 from pathlib import Path
 
-DESKTOP = Path(__file__).resolve().parents[1]
-MODELS = DESKTOP.parent / "models"
-OUT = DESKTOP / "target" / "runtimes"
+ROOT = Path(__file__).resolve().parents[1]
+MODELS = ROOT / "models"
+OUT = ROOT / "target" / "runtimes"
 THREADS = os.cpu_count() // 2
 
 SYSTEM = ("You are a text normalizer for speech-to-text transcripts. The input begins with a control "
@@ -73,7 +73,7 @@ def budget(raw: str) -> int:
 
 
 def load_trit(precision):
-    sys.path.insert(0, str(DESKTOP.parent / "trit" / "bindings" / "python"))
+    sys.path.insert(0, str(ROOT / "bindings" / "python"))
     import trit
 
     cleaner = trit.Cleaner(str(MODELS / "s1-mini"), precision=precision)
@@ -115,7 +115,7 @@ def load_llama(file):
 def cases():
     rows = []
     for name in ("corpus.txt", "tech-corpus.txt"):
-        for line in (DESKTOP / "bench" / name).read_text(encoding="utf-8").splitlines():
+        for line in (ROOT / "bench" / name).read_text(encoding="utf-8").splitlines():
             if "|" in line:
                 target = line.split("|", 1)[1].strip()
                 raw = re.sub(r"[^\w\s']", " ", target.lower())
@@ -185,7 +185,7 @@ def main():
         elif any(p.startswith("torch") for p in packages):
             command += ENV["torch"]
         command += ["python", __file__, name, "--child"]
-        code = subprocess.run(command, cwd=DESKTOP, check=False).returncode
+        code = subprocess.run(command, cwd=ROOT, check=False).returncode
         if code:
             print(f"  failed with exit code {code}", flush=True)
 

@@ -7,7 +7,7 @@ import { megabytes, redux, sizeOf } from "./data";
 
 const r1 = (n: number) => +n.toFixed(1);
 
-// The measured numbers the drawings write (desktop/bench/benchmarks.json).
+// The measured numbers the drawings write (bench/benchmarks.json).
 const ms = (x: number) => `${Math.round(x)} ms`;
 const time = { trit: ms(redux.trit.ms), photon: ms(redux.photon.ms), transformers: ms(redux.transformers.ms) };
 const memory = { trit: megabytes(redux.trit.run_mb), transformers: megabytes(redux.transformers.run_mb) };

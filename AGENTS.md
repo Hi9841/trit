@@ -20,7 +20,7 @@ Do the steps in order. Each step ends on a check.
 
    | Program | Way in |
    |---|---|
-   | Rust | `trit = { git = "https://github.com/Hi9841/tdt" }` in `Cargo.toml` |
+   | Rust | `trit = { git = "https://github.com/Hi9841/trit" }` in `Cargo.toml` |
    | Python | Copy `bindings/python/trit.py`; it needs the `trit-ffi` library |
    | C# | Add `bindings/csharp/Trit.cs`; it needs the `trit-ffi` library |
    | Node or Bun | Copy `bindings/node/trit.mjs` and add `koffi`; it needs the `trit-ffi` library |
@@ -29,7 +29,7 @@ Do the steps in order. Each step ends on a check.
 
    Check: you can name the file to copy or the dependency line.
 
-2. **Build** in `trit/`: `cargo build --release` for the CLI, and
+2. **Build** in the repository root: `cargo build --release` for the CLI, and
    `cargo build --release -p trit-ffi` for the library.
    Check: `target/release/trit` and `trit_ffi.dll` (`libtrit_ffi.so`,
    `libtrit_ffi.dylib`) exist.
@@ -62,7 +62,7 @@ Do the steps in order. Each step ends on a check.
 
 ## Change Trit
 
-### Commands (run in `trit/`)
+### Commands (run in the repository root)
 
 | Task | Command |
 |---|---|
@@ -71,21 +71,21 @@ Do the steps in order. Each step ends on a check.
 | Format | `cargo fmt --all` |
 | Smoke test | `./target/release/trit doctor`, then `./target/release/trit transcribe <file.wav> --model <name>` |
 | Skill current? | `./target/release/trit skill --check skill/SKILL.md` |
-| Accuracy of the TDT model | `uv run bench/accuracy.py <abs path of bench-asr.exe> clean other tech --engine native` from `desktop/` |
-| Voice against Transformers | `uv run --no-project --python 3.12 --with torch --with transformers --with numpy --with scipy --with whisper-normalizer --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match python bench/tts.py <trit.exe> <voice dir> <parakeet-redux dir>` from `desktop/` |
-| Same model on other runtimes | `uv run --no-project --python 3.12 python bench/runtimes.py <engine>` from `desktop/` |
-| Speed of one change | `uv run --no-project --python 3.12 --with numpy --with whisper-normalizer --with scipy python ../oploop/ab.py <model> <A.dll> <B.dll>` from `desktop/` (interleaved A/B of two `trit_ffi` builds) |
+| Accuracy of the TDT model | `uv run bench/accuracy.py <abs path of bench-asr.exe> clean other tech --engine native` |
+| Voice against Transformers | `uv run --no-project --python 3.12 --with torch --with transformers --with numpy --with scipy --with whisper-normalizer --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match python bench/tts.py <trit.exe> <voice dir> <parakeet-redux dir>` |
+| Same model on other runtimes | `uv run --no-project --python 3.12 python bench/runtimes.py <engine>` |
+| Speed of one change | `uv run --no-project --python 3.12 --with numpy --with whisper-normalizer --with scipy python oploop/ab.py <model> <A.dll> <B.dll>` (interleaved A/B of two `trit_ffi` builds) |
 
 There are no unit tests. The checks are:
 
-- **TDT's model:** the ratchet in `desktop/bench/engine-budget.json`: clean
+- **TDT's model:** the ratchet in `bench/engine-budget.json`: clean
   81 errors, other 172, tech 34, all without a dictionary. A change must not
   raise one of them.
 - **Other families:** the error totals over the 456 clips. After a change,
   rerun the affected engines with `runtimes.py`, then
-  `python bench/wer_rule.py` from `desktop/`. It must exit 0: Trit's default
+  `python bench/wer_rule.py`. It must exit 0: Trit's default
   has the fewest errors, or a tie, for each model. The last full run is
-  `desktop/bench/runtimes-results.jsonl`.
+  `bench/runtimes-results.jsonl`.
 - **Voice:** `bench/tts.py`. With the noise off, every clip has the
   length of the reference and an SNR of 75 dB or more. Round-trip word
   errors (noise off, and the sum of three seeds with noise) must not be
@@ -113,7 +113,7 @@ There are no unit tests. The checks are:
 2. Reuse the parts in `src/models/parts/` that the config names (a FastConformer checkpoint needs only a new head or none). Put what is new in `parts/` when another family can share it, else in `src/models/families/<family>.rs`, from `layers.rs`, `Dense::load` layers, and `Dense::table` token tables.
 3. Add one row to `FAMILIES` in `src/models/mod.rs` and implement `Family` for the new type.
 4. Add the checkpoints you ran to `src/catalog.rs`, then run `trit skill > skill/SKILL.md` and update the README tables.
-5. Check: the same text as the reference runtime on a few clips of `desktop/target/accuracy/tts16`.
+5. Check: the same text as the reference runtime on a few clips of `target/accuracy/tts16`.
 
 ### Rules the code does not show
 
@@ -124,10 +124,10 @@ There are no unit tests. The checks are:
   letters"); a file of chosen words is not. Failure seen: a 580 KB English
   word list, a 1,132-piece foreign list, and 130 built-in developer terms
   shipped and gave Trit help no other runtime had. CI fails on
-  `include_str!` in `trit/src` or `desktop/src`, and on text files there.
+  `include_str!` in `src/` and `ffi/`, and on text files in `src/`.
 
 - `skill/SKILL.md` comes from `trit skill`. Change the text in `src/main.rs` (`HOME_HELP`, `TRANSCRIBE_HELP`, `CLEAN_HELP`, `skill_text`) and `src/catalog.rs`, then run `trit skill > skill/SKILL.md`. CI fails when it is stale.
-- The desktop app depends on this crate by path (`desktop/Cargo.toml`) and passes `Options::language("en")`. A public API change must build there too: `cargo build --manifest-path ../desktop/Cargo.toml`.
+- TDT (https://github.com/Hi9841/tdt) depends on a tag of this repository and passes `Options::language("en")`. A public API change must build there too. In a TDT checkout: `cargo build --release --manifest-path desktop/Cargo.toml --config "patch.'https://github.com/Hi9841/trit'.trit.path='<this repository>'"`.
 - Read the model files as published. Converting at load (F32 or BF16 to f16) is the only change allowed; the files on disk stay as Hugging Face ships them.
 - S1-mini's system prompt and control line are its trained input format (`src/cleanup.rs`). Keep them word for word.
 - On this Windows computer, a debug build of `libmimalloc-sys` can fail with MSVC error D8050. Use `--release` for clippy.

@@ -107,4 +107,4 @@ Example: `hf download moondream/parakeet-redux config.json tokenizer.json model.
 
 ## Use it from code
 
-Read `trit/README.md`: the Rust API, the C ABI (`include/trit.h`), and bindings for Python, C#, and Node. Any other language with a C FFI uses `include/trit.h` directly.
+Read the README (https://github.com/Hi9841/trit): the Rust API, the C ABI (`include/trit.h`), and bindings for Python, C#, and Node. Any other language with a C FFI uses `include/trit.h` directly.

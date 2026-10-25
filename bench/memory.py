@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import psutil
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "trit" / "bindings" / "python"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bindings" / "python"))
 import trit
 
 

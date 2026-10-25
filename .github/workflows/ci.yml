@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: No word lists
+        shell: bash
+        # Speech to text decodes with the model alone (AGENTS.md).
+        run: |
+          if git grep -n 'include_str!' -- src ffi \
+            || git ls-files -- src | grep -E '\.(txt|json|csv|tsv)$'; then
+            echo "error: a word list ships in the speech-to-text engine; it decodes with the model alone"
+            exit 1
+          fi
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Build
+        run: cargo build --locked --release --workspace
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Skill
+        run: target/release/trit.exe skill --check skill/SKILL.md

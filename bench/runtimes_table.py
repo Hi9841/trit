@@ -11,13 +11,13 @@ import json
 import sys
 from pathlib import Path
 
-DESKTOP = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
 SETS = ["clean", "other", "tech", "tts16"]
 
 
 def main():
     latest = {}
-    for line in (DESKTOP / "target" / "runtimes" / "results.jsonl").read_text(encoding="utf-8").splitlines():
+    for line in (ROOT / "target" / "runtimes" / "results.jsonl").read_text(encoding="utf-8").splitlines():
         if line.strip():
             r = json.loads(line)
             if all(any(s["set"] == name for s in r["sets"]) for name in SETS):

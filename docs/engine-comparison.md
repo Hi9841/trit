@@ -11,8 +11,8 @@ Transformers and llama.cpp for S1-mini.
 The same page with charts: [engine-comparison.html](engine-comparison.html).
 Measured on 2026-10-21 on an AMD Ryzen 9 7950X3D (16 cores), 32 GB RAM, and
 Windows 11, CPU only. Raw results:
-[desktop/bench/runtimes-results.jsonl](../desktop/bench/runtimes-results.jsonl)
-and [desktop/bench/cleanup-results.jsonl](../desktop/bench/cleanup-results.jsonl).
+[bench/runtimes-results.jsonl](../bench/runtimes-results.jsonl)
+and [bench/cleanup-results.jsonl](../bench/cleanup-results.jsonl).
 
 ## 1. Summary
 
@@ -33,7 +33,7 @@ runtime's best setting. Lower is better; the lowest is bold.
 <!-- summary:end -->
 
 1. Trit's default has the fewest errors over all clips, or ties, for every
-   model. The check is `desktop/bench/wer_rule.py`.
+   model. The check is `bench/wer_rule.py`.
 2. Whisper and Moonshine decode with 5 beams by default, by the rules of
    Transformers. Every runtime with beam search ran it with 5 beams too;
    greedy rows of every runtime stay in the tables.
@@ -163,7 +163,7 @@ Trit is called through its Python binding with `language="en"`.
 - **Clips:** 200 LibriSpeech test-clean and 200 test-other (every 13th and
   14th utterance), 40 sentences with developer terms, and 16 everyday
   dictation sentences spoken by the Windows voices. The method of the sets is
-  in [desktop/bench/README.md](../desktop/bench/README.md).
+  in [bench/README.md](../bench/README.md).
 - **Same input:** every runtime gets the same 16 kHz float arrays. The quiet
   after the last word is cut to 150 ms, as the TDT app does.
 - **Same timer:** the model loads first and one warm-up clip runs. Then each
@@ -193,17 +193,17 @@ Trit is called through its Python binding with `language="en"`.
 
 | Part | Choice | Where |
 |---|---|---|
-| Models | Parakeet TDT and CTC (Redux included), Canary, Whisper, Moonshine; S1-mini (Qwen3) for cleanup. The family comes from `model_type` in `config.json` | `trit/src/models/` |
-| Weights | Read from `model.safetensors` as published; no conversion step | `trit/src/cpu/tensors.rs` |
-| Frontends | NeMo log-mel (Parakeet, Canary), Whisper log-mel, raw audio (Moonshine) | `trit/src/audio/` |
-| Ternary kernel | Redux: i8 activations, `vpdpbusd` on AVX-512 VNNI, `vpmaddubsw` on AVX2, scalar | `trit/src/cpu/kernels.rs` |
-| Int8 kernel | W8A8 for layers 384 wide or more: VNNI 512, VNNI 256, AVX2, scalar | `trit/src/cpu/int8.rs` |
-| Float kernels | f32 GEMM with FMA register tiles; f16 weights with F16C | `trit/src/cpu/fgemm.rs`, `trit/src/cpu/half.rs` |
-| Decoding | Beam 5 for Whisper and Moonshine (Transformers rules, all beams in one batch); greedy for Parakeet and Canary | `trit/src/models/beam.rs` |
-| Threads | Own teams of spinning workers: one per physical core of one L3 domain (Parakeet, S1-mini), all physical cores (Whisper) | `trit/src/cpu/team.rs` |
-| Dictionary | Trie of token paths with a logit bonus (Parakeet, Canary, Moonshine); a previous-text prompt (Whisper) | `trit/src/models/parakeet/bias.rs` |
-| Dependencies | `std`, `parking_lot`, `serde_json`, `miniz_oxide`, `mimalloc`. No inference library | `trit/Cargo.toml` |
-| Ways in | `trit` CLI, Rust crate, C ABI, Python, C#, Node and Bun | [trit/README.md](../trit/README.md) |
+| Models | Parakeet TDT and CTC (Redux included), Canary, Whisper, Moonshine; S1-mini (Qwen3) for cleanup. The family comes from `model_type` in `config.json` | `src/models/` |
+| Weights | Read from `model.safetensors` as published; no conversion step | `src/cpu/tensors.rs` |
+| Frontends | NeMo log-mel (Parakeet, Canary), Whisper log-mel, raw audio (Moonshine) | `src/audio/` |
+| Ternary kernel | Redux: i8 activations, `vpdpbusd` on AVX-512 VNNI, `vpmaddubsw` on AVX2, scalar | `src/cpu/kernels.rs` |
+| Int8 kernel | W8A8 for layers 384 wide or more: VNNI 512, VNNI 256, AVX2, scalar | `src/cpu/int8.rs` |
+| Float kernels | f32 GEMM with FMA register tiles; f16 weights with F16C | `src/cpu/fgemm.rs`, `src/cpu/half.rs` |
+| Decoding | Beam 5 for Whisper and Moonshine (Transformers rules, all beams in one batch); greedy for Parakeet and Canary | `src/models/beam.rs` |
+| Threads | Own teams of spinning workers: one per physical core of one L3 domain (Parakeet, S1-mini), all physical cores (Whisper) | `src/cpu/team.rs` |
+| Dictionary | Trie of token paths with a logit bonus (Parakeet, Canary, Moonshine); a previous-text prompt (Whisper) | `src/models/parakeet/bias.rs` |
+| Dependencies | `std`, `parking_lot`, `serde_json`, `miniz_oxide`, `mimalloc`. No inference library | `Cargo.toml` |
+| Ways in | `trit` CLI, Rust crate, C ABI, Python, C#, Node and Bun | [README.md](../README.md) |
 
 ## 5. Where Trit is behind
 
@@ -221,7 +221,7 @@ Trit is called through its Python binding with `language="en"`.
 
 ## 6. Reproduce
 
-From `desktop/`, after `cargo build --release -p trit-ffi` in `trit/`:
+From the repository root, after `cargo build --release -p trit-ffi`:
 
 ```powershell
 uv run --no-project --python 3.12 python bench/runtimes.py all
@@ -230,4 +230,4 @@ python bench/runtimes_report.py
 
 `bench/runtimes.py --list` shows every engine; a model name (for example
 `whisper-turbo`) runs all runtimes of that model. Details are in
-[desktop/bench/README.md](../desktop/bench/README.md).
+[bench/README.md](../bench/README.md).

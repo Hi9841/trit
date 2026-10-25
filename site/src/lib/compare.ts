@@ -30,7 +30,7 @@ export const ROWS: [keyof Facts, string][] = [
 
 export const trit: Facts = {
   name: "Trit",
-  url: "https://github.com/Hi9841/tdt",
+  url: "https://github.com/Hi9841/trit",
   license: "PolyForm Noncommercial 1.0.0",
   commercial: "On request",
   models: "Parakeet, Canary, Whisper, Moonshine",

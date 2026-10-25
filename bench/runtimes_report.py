@@ -1,17 +1,17 @@
 """The runtime comparison page, from the results of runtimes.py.
 
-usage: python bench/runtimes_report.py [RESULTS.jsonl] [--out ../docs/engine-comparison.html]
+usage: python bench/runtimes_report.py [RESULTS.jsonl] [--out docs/engine-comparison.html]
 
-Run from desktop/. Reads target/runtimes/results.jsonl by default; the last
+Run from the repository root. Reads target/runtimes/results.jsonl by default; the last
 result of each engine wins. Writes one self-contained HTML file, and the
-tables between the result markers of ../docs/engine-comparison.md.
+tables between the result markers of docs/engine-comparison.md.
 """
 
 import json
 import sys
 from pathlib import Path
 
-DESKTOP = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
 # The English CPU test: these models, on the CPU only.
 TEST_MODELS = ["parakeet-redux", "parakeet-v3", "whisper-base.en", "whisper-tiny", "moonshine-tiny", "moonshine-base"]
 
@@ -19,7 +19,7 @@ TEST_MODELS = ["parakeet-redux", "parakeet-v3", "whisper-base.en", "whisper-tiny
 def load(path: Path) -> list[dict]:
     """The last result of each engine, with the model and runtime names of
     runtimes.py, so older result lines read the same as new ones."""
-    sys.path.insert(0, str(DESKTOP / "bench"))
+    sys.path.insert(0, str(ROOT / "bench"))
     from runtimes import ENGINES, MODELS
 
     latest = {}
@@ -40,7 +40,7 @@ def load(path: Path) -> list[dict]:
 
 def load_cleanup(path: Path) -> list[dict]:
     """The last result of each S1-mini engine of cleanup_runtimes.py."""
-    sys.path.insert(0, str(DESKTOP / "bench"))
+    sys.path.insert(0, str(ROOT / "bench"))
     from cleanup_runtimes import ENGINES
 
     latest = {}
@@ -71,7 +71,7 @@ def total(r: dict) -> int:
 
 
 def site(results: list[dict], cleanup: list[dict]) -> dict:
-    """The numbers of the site's benchmarks page (trit/site), already filtered."""
+    """The numbers of the site's benchmarks page (site/), already filtered."""
     find = lambda r, name: next(s for s in r["sets"] if s["set"] == name)
     words = lambda r: sum(s["words"] for s in r["sets"])
     models = []
@@ -167,20 +167,20 @@ def markdown(results: list[dict]) -> str:
 
 def main() -> None:
     args = sys.argv[1:]
-    out = DESKTOP.parent / "docs" / "engine-comparison.html"
+    out = ROOT / "docs" / "engine-comparison.html"
     if "--out" in args:
         i = args.index("--out")
         out = Path(args[i + 1])
         del args[i: i + 2]
-    source = Path(args[0]) if args else DESKTOP / "target" / "runtimes" / "results.jsonl"
+    source = Path(args[0]) if args else ROOT / "target" / "runtimes" / "results.jsonl"
     results = load(source)
     cleanup = load_cleanup(source.parent / "cleanup.jsonl")
-    template = (DESKTOP / "bench" / "runtimes_report.html").read_text(encoding="utf-8")
+    template = (ROOT / "bench" / "runtimes_report.html").read_text(encoding="utf-8")
     page = template.replace("/*RESULTS*/[]", json.dumps(results, separators=(",", ":")))
     page = page.replace("/*CLEANUP*/[]", json.dumps(cleanup, separators=(",", ":")))
-    (DESKTOP / "bench" / "benchmarks.json").write_text(json.dumps(site(results, cleanup), indent=1), encoding="utf-8")
+    (ROOT / "bench" / "benchmarks.json").write_text(json.dumps(site(results, cleanup), indent=1), encoding="utf-8")
     out.write_text(page, encoding="utf-8")
-    doc = DESKTOP.parent / "docs" / "engine-comparison.md"
+    doc = ROOT / "docs" / "engine-comparison.md"
     text = doc.read_text(encoding="utf-8")
     if START in text and END in text:
         head, rest = text.split(START, 1)

@@ -1,0 +1,25 @@
+# Build
+target/
+dist/
+*.pdb
+
+# Models (see `trit models`)
+models/
+
+# Bindings and the site
+bindings/node/node_modules/
+site/node_modules/
+site/dist/
+site/.astro/
+
+# Python bytecode from the bench scripts
+__pycache__/
+
+# OpLoop: the pristine baseline and the A/B libraries, built locally
+oploop/baseline/
+oploop/results/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

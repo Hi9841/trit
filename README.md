@@ -6,9 +6,10 @@ Face, with its own kernels: no Python, no PyTorch, no ONNX Runtime, no GPU.
 16 kHz audio in, text out. It can also clean a raw transcript with
 Superwhisper S1-mini, and speak text with a VITS voice (Meta MMS-TTS).
 
-TDT, the dictation app in this repository, uses Trit for all of its speech.
+[TDT](https://github.com/Hi9841/tdt), an offline dictation app for Windows,
+uses Trit for all of its speech.
 Trit is free for noncommercial use only (see [License](#license)).
-The website, with benchmarks and a comparison: <https://hi9841.github.io/tdt/>.
+The website, with benchmarks and a comparison: <https://hi9841.github.io/trit/>.
 
 **Agents:** read [AGENTS.md](AGENTS.md) first. It gives the steps to put Trit
 into a program, and the rules to change Trit.
@@ -28,8 +29,8 @@ into a program, and the rules to change Trit.
 ## Quick start
 
 ```powershell
-git clone https://github.com/Hi9841/tdt
-cd tdt/trit
+git clone https://github.com/Hi9841/trit
+cd trit
 cargo build --release                       # the CLI and the Rust library
 hf download moondream/parakeet-redux --include "*.json" model.safetensors --local-dir models/parakeet-redux
 ./target/release/trit transcribe take.wav
@@ -65,7 +66,7 @@ Every integration, in every language, follows these rules.
 
 Measured on 456 English clips (LibriSpeech test-clean and test-other,
 developer terms, everyday dictation), AMD Ryzen 9 7950X3D, Trit's default
-settings. Full results: [docs/engine-comparison.md](../docs/engine-comparison.md).
+settings. Full results: [docs/engine-comparison.md](docs/engine-comparison.md).
 
 | Model | Size | Word error rate | Time per clip | Memory | Use it for |
 |---|---:|---:|---:|---:|---|
@@ -130,7 +131,7 @@ Trit is not on crates.io. Add it from git (or by path in a checkout):
 
 ```toml
 [dependencies]
-trit = { git = "https://github.com/Hi9841/tdt" }
+trit = { git = "https://github.com/Hi9841/trit" }
 ```
 
 ```rust
@@ -417,11 +418,11 @@ hf download facebook/mms-tts-eng config.json tokenizer_config.json vocab.json mo
   very start or end of a text; there the two runtimes differ.
 - **Same as the reference:** with the noise off, the audio of Trit and of
   Transformers is the same to 76 dB or more (near the limit of 16-bit WAV) on the
-  56 sentences of `desktop/bench/corpus.txt` and `tech-corpus.txt`, on the
+  56 sentences of `bench/corpus.txt` and `tech-corpus.txt`, on the
   AVX-512, AVX2, and scalar paths. Spoken by each runtime and transcribed by
   Parakeet Redux, the sentences give no more word errors with Trit (noise
   off: 167 Trit, 171 Transformers; noise on, three seeds: 536 Trit, 553
-  Transformers). `desktop/bench/tts.py` runs this check.
+  Transformers). `bench/tts.py` runs this check.
 - **Other voices:** any one-speaker MMS-TTS checkpoint that reads letters
   (`phonemize: false`) loads. For a language with `is_uroman: true`, give
   romanized text. Voices with several speakers and VITS models that need a
@@ -512,7 +513,7 @@ weights in every mode.
 
 ## License
 
-Trit is under the [PolyForm Noncommercial License 1.0.0](../LICENSE). You can
+Trit is under the [PolyForm Noncommercial License 1.0.0](LICENSE). You can
 use, change, and share it for any noncommercial purpose. You cannot sell it
 or use it to make money.
 

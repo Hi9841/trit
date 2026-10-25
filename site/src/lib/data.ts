@@ -1,7 +1,7 @@
 // The facts on the pages, read from the repository at build time.
 import { readRepo } from "./repo";
 
-// ---------- models: trit/src/catalog.rs ----------
+// ---------- models: src/catalog.rs ----------
 
 export interface Model {
   name: string;
@@ -30,7 +30,7 @@ export const downloadCommand = (m: Model) =>
 
 const KNOWN = /Known \{\s*name: "([^"]+)",\s*repo: "([^"]+)",\s*kind: "([^"]+)",\s*languages: "([^"]+)",\s*mb: (\d+),/g;
 
-export const catalog: Model[] = [...readRepo("trit/src/catalog.rs").matchAll(KNOWN)].map((m) => ({
+export const catalog: Model[] = [...readRepo("src/catalog.rs").matchAll(KNOWN)].map((m) => ({
   name: m[1],
   repo: m[2],
   kind: m[3],
@@ -40,8 +40,8 @@ export const catalog: Model[] = [...readRepo("trit/src/catalog.rs").matchAll(KNO
 
 export const DEFAULT_MODEL = "parakeet-redux";
 
-// ---------- benchmarks: desktop/bench/benchmarks.json ----------
-// Written by desktop/bench/runtimes_report.py from the raw results: CPU only,
+// ---------- benchmarks: bench/benchmarks.json ----------
+// Written by bench/runtimes_report.py from the raw results: CPU only,
 // the test's models, the engines the harness runs today.
 
 export interface Run {
@@ -82,7 +82,7 @@ export interface Cleanup {
 }
 
 const data: { date: string; models: Bench[]; cleanup: Cleanup[] } = JSON.parse(
-  readRepo("desktop/bench/benchmarks.json"),
+  readRepo("bench/benchmarks.json"),
 );
 
 export const benches: Bench[] = data.models.map((b) => ({ ...b, runs: [...b.runs].sort((x, y) => x.ms - y.ms) }));

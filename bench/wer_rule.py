@@ -16,8 +16,8 @@ import json
 import sys
 from pathlib import Path
 
-DESKTOP = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(DESKTOP / "bench"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "bench"))
 from runtimes import ENGINES
 
 SETS = ["clean", "other", "tech", "tts16"]
@@ -33,7 +33,7 @@ MODELS = {
 
 def main() -> int:
     latest = {}
-    for line in (DESKTOP / "target" / "runtimes" / "results.jsonl").read_text(encoding="utf-8").splitlines():
+    for line in (ROOT / "target" / "runtimes" / "results.jsonl").read_text(encoding="utf-8").splitlines():
         if line.strip():
             r = json.loads(line)
             name = r["engine"]

@@ -6,7 +6,7 @@
 
 usage: uv run bench/librispeech.py [COUNT]
 
-Run from desktop/. Downloads the test split of openslr/librispeech_asr from
+Run from the repository root. Downloads the test split of openslr/librispeech_asr from
 Hugging Face into target/accuracy-src, then takes every n-th utterance, so the
 clips spread over all speakers. Output: target/accuracy/clean and target/accuracy/other.
 """

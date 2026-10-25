@@ -9,8 +9,8 @@ import { links } from "../lib/links";
 import { readRepo, updatedOf } from "../lib/repo";
 import { idle, plugs } from "../lib/sketch";
 
-const README = "trit/README.md";
-const updated = updatedOf(["trit/site/src/pages/docs.astro", README, "trit/Cargo.toml"]);
+const README = "README.md";
+const updated = updatedOf(["site/src/pages/docs.astro", README, "Cargo.toml"]);
 
 // This page is the README. Its own contents list is replaced by the index on
 // the left, and its performance table by the Benchmarks page.
@@ -39,7 +39,7 @@ const groups = [
   { name: "Reference", items: rendered.filter((s) => REFERENCE.has(s.id)) },
 ];
 
-const version = /^version = "([^"]+)"/m.exec(readRepo("trit/Cargo.toml"))?.[1] ?? "";
+const version = /^version = "([^"]+)"/m.exec(readRepo("Cargo.toml"))?.[1] ?? "";
 ---
 
 <Base
@@ -53,7 +53,7 @@ const version = /^version = "([^"]+)"/m.exec(readRepo("trit/Cargo.toml"))?.[1] ?
       <p>
         Trit turns 16 kHz speech into text on the CPU. Call it from the <code>trit</code> command, the Rust crate, or a
         C ABI with bindings for Python, C#, Node and Bun. This page is{" "}
-        <a href={`${links.repo}/blob/main/trit/README.md`}>trit/README.md</a>, rendered.
+        <a href={`${links.repo}/blob/main/README.md`}>README.md</a>, rendered.
       </p>
       <Cmd command="cargo build --release" />
     </PageHead>

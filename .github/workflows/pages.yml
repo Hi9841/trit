@@ -1,0 +1,67 @@
+name: Pages
+
+# The Trit website (site/) on GitHub Pages: https://hi9841.github.io/trit/
+# It reads the repository at build time (README, catalog, benchmarks), so it
+# builds again when one of them changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - README.md
+      - Cargo.toml
+      - src/catalog.rs
+      - bench/benchmarks.json
+      - docs/engine-comparison.md
+      - LICENSE
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Each page shows the day its sources last changed, from git.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+      - id: pages
+        uses: actions/configure-pages@v5
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Lint
+        run: bunx oxlint
+      - name: Build
+        env:
+          SITE_URL: ${{ steps.pages.outputs.origin }}
+          SITE_BASE: ${{ steps.pages.outputs.base_path }}
+        run: node scripts/astro.mjs build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

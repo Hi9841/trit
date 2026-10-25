@@ -2,14 +2,14 @@
 
 usage: uv run --no-project --python 3.12 --with numpy bench/runtimes.py ENGINE|MODEL|all [...] [--sets clean,other,tech,tts16] [--list]
 
-Run from desktop/. ENGINE is one name from --list; MODEL runs every engine of
+Run from the repository root. ENGINE is one name from --list; MODEL runs every engine of
 that model (parakeet-redux, parakeet-v2, whisper-turbo, ...); `all` runs all.
 Each engine runs in its own process and its own uv environment, so packages
 never clash and peak memory is its own. Every engine gets the same 16 kHz
 arrays (quiet after the last word cut to 150 ms, as bench-asr does), one
 warm-up clip, and the same timer around one call per clip.
 Results append to target/runtimes/results.jsonl; transcripts go next to it.
-Build Trit first: cargo build --release -p trit-ffi (in ../trit).
+Build Trit first: cargo build --release -p trit-ffi.
 """
 
 import io
@@ -27,8 +27,8 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")  # library deprecation noise; results are on stdout
 
-DESKTOP = Path(__file__).resolve().parents[1]
-OUT = DESKTOP / "target" / "runtimes"
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "target" / "runtimes"
 CPU_THREADS = os.cpu_count() // 2  # physical cores; SMT siblings only add contention
 
 BASE = ["numpy", "psutil", "whisper-normalizer", "huggingface_hub"]
@@ -161,13 +161,13 @@ BEAM_LOADERS = {
 
 # Loaders. Each imports its own libraries and returns transcribe(samples) -> str.
 
-MODELS_DIR = DESKTOP.parent / "models"
+MODELS_DIR = ROOT / "models"
 
 
 def load_trit(model, precision="auto", beam=0):
     """Trit through its Python binding; `model` is a `trit models` name or
     None for the default. The language is English, as the test is."""
-    sys.path.insert(0, str(DESKTOP.parent / "trit" / "bindings" / "python"))
+    sys.path.insert(0, str(ROOT / "bindings" / "python"))
     import trit
 
     engine = trit.Trit(model, precision=precision)
@@ -465,7 +465,7 @@ def child(name: str, sets: list[str]) -> None:
     load_s = time.perf_counter() - started
     gc.collect()
     load_mb = psutil.Process().memory_info().rss / 2**20
-    clips = {s: sorted((DESKTOP / "target" / "accuracy" / s).glob("*.wav")) for s in sets}
+    clips = {s: sorted((ROOT / "target" / "accuracy" / s).glob("*.wav")) for s in sets}
     transcribe(read_clip(clips[sets[0]][0]))  # warm-up: first-call allocations, caches, CUDA kernels
     OUT.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -542,7 +542,7 @@ def main() -> None:
         if any(p.startswith("torch") for p in packages):
             command += ENV_ARGS["torch"]
         command += ["python", __file__, name, "--child", "--sets", ",".join(sets)]
-        code = subprocess.run(command, cwd=DESKTOP, check=False).returncode
+        code = subprocess.run(command, cwd=ROOT, check=False).returncode
         if code:
             print(f"  failed with exit code {code}", flush=True)
 

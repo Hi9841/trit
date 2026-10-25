@@ -32,7 +32,7 @@ pub const CAPITAL_PRIOR: f32 = 3.0;
 /// The decoder finds every rare name unlikely, the more so the longer it is:
 /// a term said right loses to the words heard by about 2 per letter ("Deno"
 /// 6, "Trit Runtime" 13). A far spelling gets less room. Fitted on the names,
-/// tech, accent, and LibriSpeech sets (`desktop/bench/terms.py`).
+/// tech, accent, and LibriSpeech sets (`desktop/bench/terms.py` in the TDT repository).
 const LIMIT_BASE: f32 = 4.0;
 const LIMIT_PER_LETTER: f32 = 2.0;
 const LIMIT_PER_DISTANCE: f32 = 30.0;

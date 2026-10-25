@@ -78,7 +78,7 @@ Encoder int8 dense: ~10.6 G int8 MAC in 11.7 ms = ~20 % of VNNI peak.
 
 - Journey: J1, J2 (also J3, J4 v3, J5)
 - Profile: encoder int8 dense 2342 ms of 15543 (15 %) on tiny.
-- Hypothesis: `Int8::forward` (`trit/src/cpu/int8.rs`) makes one task per 32 outputs and
+- Hypothesis: `Int8::forward` (`src/cpu/int8.rs`) makes one task per 32 outputs and
   each task runs all frames. A 384-wide output (tiny attention out, fc2) gives 12 tasks for
   16 threads: 4 idle. Tasks over (frame chunk x output block) keep all threads busy;
   each output keeps the same sum in the same order. Expected: encoder dense about 25 %
@@ -99,7 +99,7 @@ Encoder int8 dense: ~10.6 G int8 MAC in 11.7 ms = ~20 % of VNNI peak.
 ### I-003 no zero fill of the reused quantized buffer
 
 - Journey: J1, J2 (also J4 Redux and v3: the ternary and int8 products share `Quantized`)
-- Profile: `Quantized::new` (`trit/src/cpu/kernels.rs:428`) 820 ms of 2000 ms int8 time on tiny.
+- Profile: `Quantized::new` (`src/cpu/kernels.rs:428`) 820 ms of 2000 ms int8 time on tiny.
 - Hypothesis: `values.clear(); values.resize(m * k, 0)` zero-fills m x k bytes on the
   calling thread, single-threaded, before the parallel quantizer overwrites every byte:
   about 4.6 MB per tiny encoder layer, ~1.8 ms per clip. Growing the buffer only when it

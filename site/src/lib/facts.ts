@@ -7,7 +7,7 @@ import { readRepo } from "./repo";
 
 export const NAME = "Trit";
 
-export const version = /^version = "([^"]+)"/m.exec(readRepo("trit/Cargo.toml"))?.[1] ?? "";
+export const version = /^version = "([^"]+)"/m.exec(readRepo("Cargo.toml"))?.[1] ?? "";
 
 /** One line, for titles and link previews. */
 export const tagline = "Speech to text on the CPU. No GPU, no Python.";

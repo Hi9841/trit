@@ -5,12 +5,12 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
-// scripts/astro.mjs starts Astro in trit/site, so the repository is two up.
-const root = resolve(process.cwd(), "..", "..");
+// scripts/astro.mjs starts Astro in site/, so the repository is one up.
+const root = resolve(process.cwd(), "..");
 
 export const readRepo = (path: string) => readFileSync(resolve(root, path), "utf8");
 
-export const repoUrl = "https://github.com/Hi9841/tdt";
+export const repoUrl = "https://github.com/Hi9841/trit";
 export const blobUrl = (path: string) => `${repoUrl}/blob/main/${path}`;
 
 const git = (...args: string[]) => {

@@ -1,8 +1,8 @@
 """Interleaved A/B of two Trit libraries on one model: time per clip and errors.
 
-usage (from desktop/):
+usage (from the repository root):
   uv run --no-project --python 3.12 --with numpy --with whisper-normalizer --with scipy \\
-      python ../oploop/ab.py <model> <A trit_ffi.dll> <B trit_ffi.dll> [--rounds 3] [--sets clean]
+      python oploop/ab.py <model> <A trit_ffi.dll> <B trit_ffi.dll> [--rounds 3] [--sets clean]
       [--cleanup]
 
 Each round runs side A, then side B, each in a fresh process (TRIT_LIB picks the
@@ -24,19 +24,19 @@ import sys
 import time
 from pathlib import Path
 
-DESKTOP = Path(__file__).resolve().parents[1] / "desktop"
-sys.path.insert(0, str(DESKTOP / "bench"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "bench"))
 
 
 def side(model: str, sets: list[str], cleanup: bool) -> None:
     """One side, in its own process: prints one JSON line."""
-    sys.path.insert(0, str(DESKTOP.parent / "trit" / "bindings" / "python"))
+    sys.path.insert(0, str(ROOT / "bindings" / "python"))
     import trit
 
     if cleanup:
         from cleanup_runtimes import cases
 
-        cleaner = trit.Cleaner(str(DESKTOP.parent / "models" / "s1-mini"))
+        cleaner = trit.Cleaner(str(ROOT / "models" / "s1-mini"))
         items = cases()
         cleaner.clean(items[0][0])
         out = []
@@ -57,7 +57,7 @@ def side(model: str, sets: list[str], cleanup: bool) -> None:
 
     normalize = EnglishTextNormalizer()
     engine = trit.Trit(model)
-    clips = [p for s in sets for p in sorted((DESKTOP / "target" / "accuracy" / s).glob("*.wav"))]
+    clips = [p for s in sets for p in sorted((ROOT / "target" / "accuracy" / s).glob("*.wav"))]
     engine.transcribe(read_clip(clips[0]), language="en")
     out = []
     for path in clips:
@@ -74,7 +74,7 @@ def side(model: str, sets: list[str], cleanup: bool) -> None:
 def run(lib: str, model: str, sets: list[str], cleanup: bool) -> list[dict]:
     env = dict(os.environ, TRIT_LIB=lib)
     command = [sys.executable, __file__, "--side", model, ",".join(sets)] + (["--cleanup"] if cleanup else [])
-    result = subprocess.run(command, cwd=DESKTOP, env=env, capture_output=True, text=True, encoding="utf-8")
+    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8")
     if result.returncode:
         sys.exit(f"side failed ({lib}):\n{result.stderr[-2000:]}")
     return json.loads(result.stdout.strip().splitlines()[-1])

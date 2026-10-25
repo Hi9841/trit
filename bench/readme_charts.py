@@ -1,7 +1,7 @@
-"""Draws the README charts from desktop/bench/benchmarks.json (written by
+"""Draws the README charts from bench/benchmarks.json (written by
 runtimes_report.py): docs/images/errors.svg and docs/images/speed.svg.
 
-usage (from the repository root): python desktop/bench/readme_charts.py
+usage (from the repository root): python bench/readme_charts.py
 
 Each chart has one row per speech model with two bars: Trit as it runs by
 default, and the best other runtime (fewest errors, or the fastest time per
@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs" / "images"
 TRIT, OTHER, INK, MUTED, GRID = "#5b6cf0", "#a3a8b8", "#1d2030", "#5d6275", "#e6e8ef"
 WIDTH, LABEL, BAR, GAP, ROW = 760, 190, 18, 4, 64
@@ -48,7 +48,7 @@ def chart(title: str, note: str, rows: list[tuple[str, float, str, float]], unit
 
 
 def main() -> None:
-    data = json.loads((ROOT / "desktop" / "bench" / "benchmarks.json").read_text(encoding="utf-8"))
+    data = json.loads((ROOT / "bench" / "benchmarks.json").read_text(encoding="utf-8"))
     errors, speed = [], []
     for model in data["models"]:
         runs = model["runs"]

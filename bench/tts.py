@@ -5,7 +5,7 @@ Trit's engine adds shows up as extra word errors.
 
 usage: uv run --no-project --python 3.12 --with torch --with transformers --with numpy --with scipy --with whisper-normalizer --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match python bench/tts.py TRIT_EXE VOICE_DIR ASR_DIR [--seeds 3]
 
-Run from desktop/. The sentences are bench/corpus.txt and bench/tech-corpus.txt.
+Run from the repository root. The sentences are bench/corpus.txt and bench/tech-corpus.txt.
 Both runtimes get the same parts (Trit's sentence cuts), the same pause, and
 the same ids: a blank (id 0) between all characters, as MMS was trained.
 (Transformers' tokenizer takes the blank "k" for a special token and drops
@@ -27,8 +27,8 @@ from scipy.io import wavfile
 from transformers import VitsModel, VitsTokenizer
 from whisper_normalizer.english import EnglishTextNormalizer
 
-DESKTOP = Path(__file__).resolve().parents[1]
-OUT = DESKTOP / "target" / "tts"
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "target" / "tts"
 CORPORA = ["corpus.txt", "tech-corpus.txt"]
 # Trit's speech.rs: the pause between sentences, and where a sentence ends.
 PAUSE_SECONDS = 0.3
@@ -39,7 +39,7 @@ NORMALIZE = EnglishTextNormalizer()
 def sentences() -> list[tuple[str, str]]:
     rows = []
     for name in CORPORA:
-        for line in (DESKTOP / "bench" / name).read_text(encoding="utf-8").splitlines():
+        for line in (ROOT / "bench" / name).read_text(encoding="utf-8").splitlines():
             if "|" in line:
                 clip, text = line.split("|", 1)
                 rows.append((clip, text.strip()))

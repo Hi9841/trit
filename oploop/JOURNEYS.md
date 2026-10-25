@@ -2,7 +2,7 @@
 
 What a user waits for: one dictation or one file, transcribed with Trit's default
 (auto precision; Whisper and Moonshine with 5 beams). Measured with `ab.py`
-(from `desktop/`): fresh process per side, one warm-up clip, then every clip of
+(from the repository root): fresh process per side, one warm-up clip, then every clip of
 the set, one call each.
 
 | ID | Journey | Command (A, B = trit_ffi.dll paths) | Metric | WER floor (total errors, 456 clips) |
@@ -14,4 +14,4 @@ the set, one call each.
 | J5 | S1-mini cleanup | `ab.py x A B --cleanup` | median ms per case | 42 errors, 37 exact |
 
 WER check for a candidate: `ab.py <model> A B --rounds 1 --sets clean,other,tech,tts16`
-(totals) and `desktop/bench/wer_rule.py` after a full rerun.
+(totals) and `bench/wer_rule.py` after a full rerun.

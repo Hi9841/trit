@@ -21,7 +21,7 @@ import { readRepo, updatedOf } from "../lib/repo";
 import { measure } from "../lib/sketch";
 
 const REPORT = "docs/engine-comparison.md";
-const updated = updatedOf(["trit/site/src/pages/benchmarks.astro", REPORT, "desktop/bench/benchmarks.json"]);
+const updated = updatedOf(["site/src/pages/benchmarks.astro", REPORT, "bench/benchmarks.json"]);
 const report = sections(readRepo(REPORT));
 const part = (id: string) => report.find((s) => s.id === id);
 

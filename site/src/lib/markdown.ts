@@ -18,7 +18,7 @@ export function slug(text: string) {
 // Pages on this site that replace a file of the repository.
 const onSite = new Map([
   ["docs/engine-comparison.md", links.benchmarks],
-  ["trit/README.md", links.docs],
+  ["README.md", links.docs],
 ]);
 
 // A link relative to `from` (a file of the repository) becomes a site page,
