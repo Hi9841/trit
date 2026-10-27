@@ -195,6 +195,15 @@ pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Bu
     out
 }
 
+/// `matmul` into `out` (`m x n`), on the calling thread, for a task that
+/// is itself one of many parallel tasks. Each value is the one `matmul`
+/// gives: a value's sum does not depend on the tile around it.
+pub fn matmul_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &mut [f32]) {
+    assert!(x.len() >= m * k && w.len() >= n * k && out.len() >= m * n);
+    // SAFETY: the block covers `out` exactly; the level was detected from the CPU.
+    unsafe { block(level(), x, k, w, n, 0..m, 0..n, OutPtr(out.as_mut_ptr())) };
+}
+
 /// `out[i][j] = sum_k x[i][k] * w[j][k]` where the weights come from
 /// `widen(cols, panel)`, which writes rows `cols` of `w` as f32 into a
 /// `cols.len() x k` panel. Each 64 x 64 block widens its columns once, then

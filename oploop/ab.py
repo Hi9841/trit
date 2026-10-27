@@ -10,8 +10,10 @@ library), so warm-up and drift favor neither. A side loads the model, runs one
 warm-up clip, then transcribes every clip of the sets, one call each, timed.
 Prints per round: the median ms, the total errors, and the texts. Then the
 verdict: median of the per-round medians, their range, the median of the
-per-clip B/A ratios, a rank-sum test on the per-clip times of all rounds,
-the error totals, and how many texts differ between A and B.
+per-clip B/A ratios, a rank-sum test on the per-clip times of all rounds, a
+paired signed-rank test on the per-clip medians (the stronger test: clips of
+very different lengths do not hide the change), the errors per set, and how
+many texts differ between A and B. --save FILE writes every row as JSON.
 
 --cleanup: <model> is ignored; times S1-mini on the cleanup harness's cases.
 """
@@ -101,17 +103,23 @@ def main() -> None:
     clips = len(runs["A"][0])
     per_clip = {k: [statistics.median(rows[i]["ms"] for rows in v) for i in range(clips)] for k, v in runs.items()}
     ratio = statistics.median(b / a for a, b in zip(per_clip["A"], per_clip["B"]))
-    from scipy.stats import mannwhitneyu
+    from scipy.stats import mannwhitneyu, wilcoxon
 
     pooled = {k: [x["ms"] for rows in v for x in rows] for k, v in runs.items()}
     p = mannwhitneyu(pooled["A"], pooled["B"]).pvalue
+    paired = wilcoxon(per_clip["A"], per_clip["B"]).pvalue
     differ = sum(x["hyp"].strip() != y["hyp"].strip() for x, y in zip(runs["A"][0], runs["B"][0]))
     err = {k: sum(x["errors"] for x in v[0]) for k, v in runs.items()}
     print(f"A: median {statistics.median(med['A']):.1f} ms (rounds {min(med['A']):.1f}-{max(med['A']):.1f})")
     print(f"B: median {statistics.median(med['B']):.1f} ms (rounds {min(med['B']):.1f}-{max(med['B']):.1f})")
-    print(f"per-clip B/A median ratio {ratio:.3f}; rank-sum p = {p:.2g}; "
-          f"{'significant' if p < 0.01 else 'not significant'}")
+    print(f"per-clip B/A median ratio {ratio:.3f}; rank-sum p = {p:.2g}; paired signed-rank p = {paired:.2g}; "
+          f"{'significant' if paired < 0.01 else 'not significant'}")
     print(f"errors A {err['A']}, B {err['B']}; texts differing: {differ} of {clips}")
+    for name in dict.fromkeys(x["clip"].split("/")[0] for x in runs["A"][0]):
+        e = {k: sum(x["errors"] for x in v[0] if x["clip"].startswith(name + "/")) for k, v in runs.items()}
+        print(f"  {name}: errors A {e['A']}, B {e['B']}")
+    if "--save" in args:
+        Path(args[args.index("--save") + 1]).write_text(json.dumps(runs), encoding="utf-8")
 
 
 if __name__ == "__main__":

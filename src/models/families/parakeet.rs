@@ -16,15 +16,21 @@ pub use bias::BiasWeights;
 
 pub struct Parakeet {
     model: model::Parakeet,
-    /// The user's dictionary; none means plain greedy decoding.
-    dictionary: RwLock<Option<dictionary::Dictionary>>,
+    /// One lock for both, so a call never pairs one dictionary with the
+    /// ban of another.
+    terms: RwLock<Terms>,
     frontend: MelFrontend,
     tokenizer: Tokenizer,
     /// Tokens of other languages; blocked when the caller asks for English.
     non_english: Vec<usize>,
+}
+
+struct Terms {
+    /// The user's dictionary; none means plain greedy decoding.
+    dictionary: Option<dictionary::Dictionary>,
     /// `non_english` without the pieces of the dictionary terms: a name
     /// such as "Hetzner" must stay possible.
-    blocked: RwLock<Vec<usize>>,
+    blocked: Vec<usize>,
 }
 
 /// One minute: 750 encoder frames, a few MB of attention per head.
@@ -45,12 +51,21 @@ impl Parakeet {
         drop(tensors);
         model.warm_positions();
         let tokenizer = Tokenizer::open(&dir.join("tokenizer.json"))?;
+        // Only token ids: the joint row holds the durations after them.
+        let vocab = model.config.vocab;
+        let non_english: Vec<usize> = tokenizer
+            .non_english()
+            .into_iter()
+            .filter(|id| *id < vocab)
+            .collect();
         Ok(Self {
-            dictionary: RwLock::new(None),
+            terms: RwLock::new(Terms {
+                dictionary: None,
+                blocked: non_english.clone(),
+            }),
             model,
             frontend,
-            blocked: RwLock::new(tokenizer.non_english()),
-            non_english: tokenizer.non_english(),
+            non_english,
             tokenizer,
         })
     }
@@ -70,15 +85,18 @@ impl Parakeet {
         if matches!(self.model.config.head, model::HeadKind::Ctc) {
             return terms.to_vec();
         }
-        let (terms, skipped) = dictionary::Dictionary::build(&self.tokenizer, terms, weights);
-        let used = terms.as_ref().map(|d| d.pieces()).unwrap_or_default();
-        *self.blocked.write() = self
+        let (dictionary, skipped) = dictionary::Dictionary::build(&self.tokenizer, terms, weights);
+        let used = dictionary.as_ref().map(|d| d.pieces()).unwrap_or_default();
+        let blocked = self
             .non_english
             .iter()
             .copied()
             .filter(|id| !used.contains(id))
             .collect();
-        *self.dictionary.write() = terms;
+        *self.terms.write() = Terms {
+            dictionary,
+            blocked,
+        };
         skipped
     }
 
@@ -150,9 +168,9 @@ impl Parakeet {
             .language
             .as_deref()
             .is_some_and(|code| code.trim().eq_ignore_ascii_case("en"));
-        let blocked = self.blocked.read();
-        let blocked: &[usize] = if english { &blocked } else { &[] };
-        let dictionary = self.dictionary.read();
-        self.model.decode(&encoded, t, dictionary.as_ref(), blocked)
+        let terms = self.terms.read();
+        let blocked: &[usize] = if english { &terms.blocked } else { &[] };
+        self.model
+            .decode(&encoded, t, terms.dictionary.as_ref(), blocked)
     }
 }

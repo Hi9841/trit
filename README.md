@@ -220,7 +220,7 @@ trit_free(engine);
 | `trit_release_memory(void)` | Gives memory that earlier calls freed back to the system |
 | `trit_last_error(void)` | The reason for the last failure on this thread |
 | `trit_free_text(char *)`, `trit_free(Trit *)`, `trit_cleaner_free(TritCleaner *)`, `trit_voice_free(TritVoice *)`, `trit_free_samples(float *, size_t count)` | Free. NULL is a no-op |
-| `trit_version(void)` | `"0.3.0"` |
+| `trit_version(void)` | `"0.3.1"` |
 
 Rules: strings are UTF-8. `language` is an ISO 639-1 code or NULL. Free
 every returned text with `trit_free_text`, and the samples of `trit_speak`

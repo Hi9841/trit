@@ -1,6 +1,6 @@
 [package]
 name = "trit"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Speech to text and text to speech on the CPU: Parakeet, Whisper, Canary, Moonshine, Kokoro, and MMS-TTS, with no Python and no inference library"
 license = "PolyForm-Noncommercial-1.0.0"

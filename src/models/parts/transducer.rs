@@ -6,19 +6,52 @@
 //! Apache-2.0 Hugging Face `ParakeetForTDT`.
 
 use super::dictionary::{Candidate, Check, Dictionary, CAPITAL_PRIOR};
-use super::fastconformer::{dense, half_dense, Config};
+use super::fastconformer::{dense, Config};
 use crate::cpu::activation;
 use crate::cpu::buf::Buf;
-use crate::cpu::gemm::Dense;
+use crate::cpu::gemm::{Dense, Precision};
 use crate::cpu::half::HalfDense;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
 use crate::models::layers::argmax;
 use std::collections::HashMap;
 
+/// A decoder layer: f16 weights as stored under `Precision::Auto` and
+/// `F16`, the precision the caller asked for under `F32` and `Int8`.
+enum DecoderLayer {
+    Half(HalfDense),
+    Dense(Dense),
+}
+
+impl DecoderLayer {
+    /// `name` (`.weight`, `.bias`) from the file.
+    fn load(t: &Tensors, name: &str, out: usize, inp: usize) -> Result<Self, String> {
+        if matches!(t.precision(), Precision::F32 | Precision::Int8) {
+            return Dense::load(t, &[(name, out)], inp).map(Self::Dense);
+        }
+        let weight = t.f16_bits(&format!("{name}.weight"), out * inp)?;
+        let bias = t.f32_len(&format!("{name}.bias"), out)?;
+        HalfDense::new(weight, Some(bias), out, inp).map(Self::Half)
+    }
+
+    fn matvec(&self, x: &[f32]) -> Buf {
+        match self {
+            Self::Half(layer) => layer.matvec(x),
+            Self::Dense(layer) => layer.forward(x, 1),
+        }
+    }
+
+    fn forward(&self, x: &[f32], rows: usize) -> Buf {
+        match self {
+            Self::Half(layer) => layer.forward(x, rows),
+            Self::Dense(layer) => layer.forward(x, rows),
+        }
+    }
+}
+
 struct Lstm {
     /// `[W_ih | W_hh]`, applied to `[input | hidden]`.
-    gates: HalfDense,
+    gates: DecoderLayer,
     bias: Vec<f32>,
 }
 
@@ -54,10 +87,11 @@ pub struct DecoderState {
 
 pub(crate) struct Transducer {
     pub(crate) encoder_projector: Dense,
-    embedding: Vec<f32>,
+    /// One row per token: f32 under `Precision::Auto`, else `Dense::table`.
+    embedding: Dense,
     lstm: Vec<Lstm>,
-    decoder_projector: HalfDense,
-    joint: HalfDense,
+    decoder_projector: DecoderLayer,
+    joint: DecoderLayer,
 }
 
 impl Transducer {
@@ -68,21 +102,50 @@ impl Transducer {
                 let b_ih = t.f32_len(&format!("decoder.lstm.bias_ih_l{l}"), 4 * dh)?;
                 let b_hh = t.f32_len(&format!("decoder.lstm.bias_hh_l{l}"), 4 * dh)?;
                 // LSTM weights carry no `.weight` suffix.
-                let w_ih = t.f16_bits(&format!("decoder.lstm.weight_ih_l{l}"), 4 * dh * dh)?;
-                let w_hh = t.f16_bits(&format!("decoder.lstm.weight_hh_l{l}"), 4 * dh * dh)?;
-                let joined = HalfDense::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
+                let (ih, hh) = (
+                    format!("decoder.lstm.weight_ih_l{l}"),
+                    format!("decoder.lstm.weight_hh_l{l}"),
+                );
+                let gates = match t.precision() {
+                    precision @ (Precision::F32 | Precision::Int8) => {
+                        let (w_ih, w_hh) =
+                            (t.f32_len(&ih, 4 * dh * dh)?, t.f32_len(&hh, 4 * dh * dh)?);
+                        let joined = HalfDense::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
+                        DecoderLayer::Dense(Dense::with_precision(
+                            joined,
+                            None,
+                            4 * dh,
+                            2 * dh,
+                            precision,
+                        )?)
+                    }
+                    Precision::Auto | Precision::F16 => {
+                        let (w_ih, w_hh) =
+                            (t.f16_bits(&ih, 4 * dh * dh)?, t.f16_bits(&hh, 4 * dh * dh)?);
+                        let joined = HalfDense::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
+                        DecoderLayer::Half(HalfDense::new(joined, None, 4 * dh, 2 * dh)?)
+                    }
+                };
                 Ok(Lstm {
-                    gates: HalfDense::new(joined, None, 4 * dh, 2 * dh)?,
+                    gates,
                     bias: b_ih.iter().zip(&b_hh).map(|(a, b)| a + b).collect(),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            encoder_projector: dense(t, "encoder_projector", dh, c.hidden, true)?,
-            embedding: t.f32_len("decoder.embedding.weight", c.vocab * dh)?,
+            encoder_projector: dense(t, "encoder_projector", dh, c.hidden)?,
+            embedding: match t.precision() {
+                Precision::Auto => Dense::new(
+                    t.f32_len("decoder.embedding.weight", c.vocab * dh)?,
+                    None,
+                    c.vocab,
+                    dh,
+                )?,
+                _ => Dense::table(t, "decoder.embedding.weight", c.vocab, dh)?,
+            },
             lstm,
-            decoder_projector: half_dense(t, "decoder.decoder_projector", dh, dh)?,
-            joint: half_dense(t, "joint.head", c.vocab + c.durations.len(), dh)?,
+            decoder_projector: DecoderLayer::load(t, "decoder.decoder_projector", dh, dh)?,
+            joint: DecoderLayer::load(t, "joint.head", c.vocab + c.durations.len(), dh)?,
         })
     }
 }
@@ -90,7 +153,8 @@ impl Transducer {
 impl Transducer {
     fn decoder_step(&self, c: &Config, token: usize, state: &mut DecoderState) -> Buf {
         let dh = c.decoder_hidden;
-        let mut input = self.embedding[token * dh..(token + 1) * dh].to_vec();
+        let mut input = vec![0.0f32; dh];
+        self.embedding.row(token, &mut input);
         let mut joined = vec![0.0f32; 2 * dh];
         for (layer, lstm) in self.lstm.iter().enumerate() {
             joined[..dh].copy_from_slice(&input);
@@ -106,10 +170,10 @@ impl Transducer {
     /// read once for all of them. Returns the outputs, one row per state.
     fn decoder_steps(&self, c: &Config, tokens: &[usize], states: &mut [DecoderState]) -> Buf {
         let (dh, n) = (c.decoder_hidden, tokens.len());
-        let mut input: Vec<f32> = tokens
-            .iter()
-            .flat_map(|&t| self.embedding[t * dh..(t + 1) * dh].iter().copied())
-            .collect();
+        let mut input = vec![0.0f32; n * dh];
+        for (&token, row) in tokens.iter().zip(input.chunks_exact_mut(dh)) {
+            self.embedding.row(token, row);
+        }
         let mut joined = vec![0.0f32; n * 2 * dh];
         for (layer, lstm) in self.lstm.iter().enumerate() {
             for (i, row) in joined.chunks_exact_mut(2 * dh).enumerate() {

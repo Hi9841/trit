@@ -5,11 +5,18 @@
 //! short serial gap. These workers spin on a counter while steps keep coming,
 //! so a step starts in about a microsecond, and they park after
 //! `SPIN_FOR` without work, so an idle app uses no CPU.
+//!
+//! A step ends when its tasks are done, not when every worker has looked at
+//! it. With more ready threads than CPUs (a build on every core), a worker
+//! can wait a long time for a CPU; the threads that run take its tasks, and
+//! it finds nothing to do when it wakes. Waiting for every worker cost 3 to
+//! 5 s of a 6 to 9 s take.
 
 use parking_lot::{Condvar, Mutex};
+use std::any::Any;
 use std::cell::Cell;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -18,16 +25,27 @@ const SPIN_FOR: Duration = Duration::from_millis(3);
 
 struct Job {
     run: *const (dyn Fn(usize) + Sync),
-    tasks: usize,
+}
+
+/// Most tasks in one job: the claim word holds 16 bits of task numbers.
+const MAX_TASKS: usize = u16::MAX as usize;
+
+/// The claim word: the job number, its task count, and its next task. A
+/// thread claims a task with one compare-and-swap on this word, so it can
+/// only claim a task of the job that is current at that moment.
+fn claim_word(job: u32, tasks: usize, next: usize) -> u64 {
+    (u64::from(job) << 32) | ((tasks as u64) << 16) | next as u64
 }
 
 struct Shared {
+    /// Changes with each job; parked workers wait for it.
     generation: AtomicUsize,
     job: AtomicPtr<Job>,
-    next: AtomicUsize,
-    /// Workers that have not finished the current job yet.
-    busy: AtomicUsize,
-    /// A task of the current job panicked on a worker.
+    /// See `claim_word`.
+    claim: AtomicU64,
+    /// Tasks of the current job that have returned.
+    done: AtomicUsize,
+    /// A task of the current job panicked.
     panicked: AtomicBool,
     parked: AtomicUsize,
     lock: Mutex<()>,
@@ -55,8 +73,8 @@ impl Team {
         let shared = Arc::new(Shared {
             generation: AtomicUsize::new(0),
             job: AtomicPtr::new(std::ptr::null_mut()),
-            next: AtomicUsize::new(0),
-            busy: AtomicUsize::new(0),
+            claim: AtomicU64::new(0),
+            done: AtomicUsize::new(0),
             panicked: AtomicBool::new(false),
             parked: AtomicUsize::new(0),
             lock: Mutex::new(()),
@@ -69,6 +87,8 @@ impl Team {
                 .name(format!("tdt-speech-{index}"))
                 .spawn(move || {
                     set_affinity(domain);
+                    set_priority(ABOVE_NORMAL);
+                    set_ideal(ideal_cpu(domain, index + 1, threads));
                     work(&for_worker);
                 });
             if spawned.is_err() {
@@ -93,48 +113,79 @@ impl Team {
             (0..tasks).for_each(run);
             return;
         }
+        if tasks > MAX_TASKS {
+            for start in (0..tasks).step_by(MAX_TASKS) {
+                let count = MAX_TASKS.min(tasks - start);
+                self.for_each(count, &|task| run(start + task));
+            }
+            return;
+        }
         let _one_caller = self.submit.lock();
         INSIDE.set(true);
-        // SAFETY: the job only lives until every worker has left it (busy == 0
-        // below), so erasing the closure's lifetime cannot outlive the borrow.
+        // SAFETY: a thread calls `run` only for a task it claimed while
+        // `claim` named this job, and this frame returns only when every
+        // claimed task has returned (done == tasks below), so erasing the
+        // closure's lifetime cannot outlive the borrow.
         let run: &'static (dyn Fn(usize) + Sync) = unsafe { std::mem::transmute(run) };
-        let job = Job { run, tasks };
+        let job = Job { run };
         let s = &*self.shared;
+        // Only the caller, under `submit`, changes the generation.
+        let generation = s.generation.load(Ordering::Relaxed).wrapping_add(1);
         s.job
             .store(&job as *const Job as *mut Job, Ordering::Relaxed);
-        s.next.store(0, Ordering::Relaxed);
-        s.busy.store(self.workers, Ordering::Relaxed);
-        s.generation.fetch_add(1, Ordering::SeqCst);
+        s.done.store(0, Ordering::Relaxed);
+        // Release: a thread that claims a task sees the job and `done` above.
+        s.claim
+            .store(claim_word(generation as u32, tasks, 0), Ordering::Release);
+        s.generation.store(generation, Ordering::SeqCst);
         if s.parked.load(Ordering::SeqCst) > 0 {
             let _lock = s.lock.lock();
             s.wake.notify_all();
         }
-        // The workers read `job` from this stack frame: a panic here must
-        // wait for them before it unwinds the frame.
-        let caller = catch_unwind(AssertUnwindSafe(|| run_tasks(s, &job)));
-        while s.busy.load(Ordering::Acquire) != 0 {
+        let caller = run_tasks(s);
+        while s.done.load(Ordering::Acquire) < tasks {
             std::hint::spin_loop();
         }
         INSIDE.set(false);
-        if let Err(panic) = caller {
+        let panicked = s.panicked.swap(false, Ordering::Relaxed);
+        if let Some(panic) = caller {
             resume_unwind(panic);
         }
         // A worker's panic goes to the caller, where the C ABI catches it.
-        if s.panicked.swap(false, Ordering::Relaxed) {
+        if panicked {
             panic!("a speech worker thread panicked");
         }
     }
 }
 
-fn run_tasks(s: &Shared, job: &Job) {
-    // SAFETY: the caller keeps the closure alive until every worker is done.
-    let run = unsafe { &*job.run };
+/// Claims and runs tasks of the current job until none is left. Returns the
+/// first panic of a task this thread ran; every panic also sets `panicked`
+/// before its task counts as done, so the caller sees it.
+fn run_tasks(s: &Shared) -> Option<Box<dyn Any + Send>> {
+    let mut first_panic = None;
+    let mut word = s.claim.load(Ordering::Acquire);
     loop {
-        let task = s.next.fetch_add(1, Ordering::Relaxed);
-        if task >= job.tasks {
-            break;
+        let (tasks, next) = ((word >> 16) & 0xFFFF, word & 0xFFFF);
+        if next >= tasks {
+            return first_panic;
         }
-        run(task);
+        if let Err(current) =
+            s.claim
+                .compare_exchange_weak(word, word + 1, Ordering::Acquire, Ordering::Acquire)
+        {
+            word = current;
+            continue;
+        }
+        // SAFETY: the claim succeeded on a word that the job's caller published
+        // after it stored `job`, and that caller returns only after this task
+        // counts in `done`, so the job and its closure are alive.
+        let run = unsafe { &*(*s.job.load(Ordering::Acquire)).run };
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| run(next as usize))) {
+            s.panicked.store(true, Ordering::Relaxed);
+            first_panic.get_or_insert(panic);
+        }
+        s.done.fetch_add(1, Ordering::Release);
+        word = s.claim.load(Ordering::Acquire);
     }
 }
 
@@ -164,13 +215,9 @@ fn work(s: &Shared) {
                 std::hint::spin_loop();
             }
         }
-        // SAFETY: the job pointer was published before the generation changed.
-        let job = unsafe { &*s.job.load(Ordering::Relaxed) };
-        // A worker that dies without the decrement would hang the caller.
-        if catch_unwind(AssertUnwindSafe(|| run_tasks(s, job))).is_err() {
-            s.panicked.store(true, Ordering::Relaxed);
-        }
-        s.busy.fetch_sub(1, Ordering::Release);
+        // A late worker finds a later job or no task left: both are safe.
+        // Its panics are in `panicked` for the caller.
+        let _ = run_tasks(s);
     }
 }
 
@@ -192,23 +239,114 @@ pub fn start(slot: usize, size: impl FnOnce() -> (usize, usize)) {
 /// until the guard drops.
 pub fn enter(slot: usize) -> Entered {
     let previous = CURRENT.replace(slot);
+    let team = team();
     Entered {
         previous,
-        affinity: set_affinity(team().domain),
+        affinity: set_affinity(team.domain),
+        priority: set_priority(ABOVE_NORMAL),
+        ideal: set_ideal(ideal_cpu(team.domain, 0, team.workers + 1)),
     }
 }
 
-/// The caller's previous team and affinity mask (0: nothing to restore).
+/// The caller's previous team, affinity mask (0: nothing to restore),
+/// priority, and ideal processor (`None`: nothing to restore).
 pub struct Entered {
     previous: usize,
     affinity: usize,
+    priority: Option<i32>,
+    ideal: Option<u32>,
 }
 
 impl Drop for Entered {
     fn drop(&mut self) {
+        set_ideal(self.ideal);
+        if let Some(priority) = self.priority {
+            set_priority(priority);
+        }
         set_affinity(self.affinity);
         CURRENT.set(self.previous);
     }
+}
+
+/// The ideal processor of team thread `index` (0: the caller) of `threads`:
+/// a processor of `domain` (of the process when 0), every other one when
+/// there are two per thread (one per core with SMT). A raised thread
+/// preempts lower-priority work only on its ideal or last processor, and
+/// Windows assigns ideal processors round-robin per process: two team
+/// threads with one ideal processor made some processes wait a time slice
+/// per step.
+fn ideal_cpu(domain: usize, index: usize, threads: usize) -> Option<u32> {
+    let mask = if domain != 0 { domain } else { process_mask() };
+    let cpus: Vec<u32> = (0..usize::BITS)
+        .filter(|bit| mask >> bit & 1 == 1)
+        .collect();
+    if cpus.is_empty() {
+        return None;
+    }
+    let stride = if cpus.len() >= 2 * threads { 2 } else { 1 };
+    Some(cpus[(index * stride) % cpus.len()])
+}
+
+/// The processors this process may run on (0 when unknown).
+#[cfg(windows)]
+fn process_mask() -> usize {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+    let (mut process, mut system) = (0usize, 0usize);
+    // SAFETY: both pointers name locals that live through the call.
+    match unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) } {
+        Ok(()) => process,
+        Err(_) => 0,
+    }
+}
+
+#[cfg(not(windows))]
+fn process_mask() -> usize {
+    0
+}
+
+/// Sets this thread's ideal processor and returns the previous one; `None`
+/// for `None` or when the call failed.
+#[cfg(windows)]
+fn set_ideal(cpu: Option<u32>) -> Option<u32> {
+    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadIdealProcessor};
+    // SAFETY: the pseudo handle names the calling thread; the call takes no pointer.
+    let previous = unsafe { SetThreadIdealProcessor(GetCurrentThread(), cpu?) };
+    (previous != u32::MAX).then_some(previous)
+}
+
+#[cfg(not(windows))]
+fn set_ideal(_cpu: Option<u32>) -> Option<u32> {
+    None
+}
+
+/// THREAD_PRIORITY_ABOVE_NORMAL. A thread that holds a task delays its step
+/// until it runs again; at normal priority, a build on every core paused
+/// team threads for hundreds of ms per take. The team parks when idle, so
+/// the priority costs other programs nothing then.
+const ABOVE_NORMAL: i32 = 1;
+
+/// Sets this thread's priority and returns the previous one; `None` when
+/// the thread already had it, or the call failed.
+#[cfg(windows)]
+fn set_priority(priority: i32) -> Option<i32> {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, GetThreadPriority, SetThreadPriority, THREAD_PRIORITY,
+    };
+    // SAFETY: the pseudo handle names the calling thread; neither call takes a pointer.
+    unsafe {
+        let previous = GetThreadPriority(GetCurrentThread());
+        if previous == priority {
+            return None;
+        }
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY(priority)).ok()?;
+        Some(previous)
+    }
+}
+
+/// Raising a thread's priority needs privileges outside Windows.
+#[cfg(not(windows))]
+fn set_priority(_priority: i32) -> Option<i32> {
+    None
 }
 
 /// Sets this thread's affinity mask and returns the previous one. A mask of

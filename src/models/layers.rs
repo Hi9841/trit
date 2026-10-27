@@ -338,6 +338,12 @@ impl HeadMajor {
             kv_heads,
         }
     }
+
+    /// K transposed (hd x tk) and V (tk x hd) of key/value head `g`.
+    pub fn head(&self, g: usize) -> (&[f32], &[f32]) {
+        let size = self.hd * self.tk;
+        (&self.kt[g * size..][..size], &self.vh[g * size..][..size])
+    }
 }
 
 /// `attention` over keys and values already laid out per head.
@@ -361,11 +367,7 @@ pub fn attention_with(
     team::for_each(heads * chunks, |task| {
         let (h, c) = (task / chunks, task % chunks);
         let rows = c * chunk..((c + 1) * chunk).min(tq);
-        let g = h / group;
-        let (kt, vh) = (
-            &kv.kt[g * hd * tk..][..hd * tk],
-            &kv.vh[g * tk * hd..][..tk * hd],
-        );
+        let (kt, vh) = kv.head(h / group);
         SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
             let m = rows.len();

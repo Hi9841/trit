@@ -7,8 +7,7 @@ use super::transducer::Transducer;
 use crate::cpu::activation;
 use crate::cpu::buf::Buf;
 use crate::cpu::fgemm;
-use crate::cpu::gemm::Dense;
-use crate::cpu::half::HalfDense;
+use crate::cpu::gemm::{Dense, Precision};
 use crate::cpu::kernels::Ternary;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
@@ -20,13 +19,15 @@ use std::sync::Arc;
 const BATCH_NORM_EPS: f32 = 1e-5;
 
 thread_local! {
-    /// One attention head's query (two biases), key, and position columns.
-    /// Each grows to the longest take once per thread and is then reused,
-    /// so the worker threads allocate nothing per head.
-    static HEADS: std::cell::RefCell<[Vec<f32>; 4]> = const {
-        std::cell::RefCell::new([Vec::new(), Vec::new(), Vec::new(), Vec::new()])
-    };
+    /// One attention task's queries (two biases), scores, position scores,
+    /// and output. It grows to the longest take once per thread and is then
+    /// reused, so the worker threads allocate nothing per task.
+    static SCRATCH: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
+
+/// Queries per attention task: a short take still makes several tasks per
+/// head, and a block reads t+31 positions instead of 2t-1 per query.
+const ATTENTION_ROWS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -179,32 +180,15 @@ fn stacked(
     Dense::load(t, &parts, inp).map(Linear::Dense)
 }
 
-/// Decoder layer with f16 weights as stored and an f32 bias.
-pub(crate) fn half_dense(
-    t: &Tensors,
-    name: &str,
-    out: usize,
-    inp: usize,
-) -> Result<HalfDense, String> {
-    let weight = t.f16_bits(&format!("{name}.weight"), out * inp)?;
-    let bias = t.f32_len(&format!("{name}.bias"), out)?;
-    HalfDense::new(weight, Some(bias), out, inp)
-}
-
-pub(crate) fn dense(
-    t: &Tensors,
-    name: &str,
-    out: usize,
-    inp: usize,
-    bias: bool,
-) -> Result<Dense, String> {
+/// `name` (`.weight`, `.bias`): f32 under `Precision::Auto`, as this model's
+/// accuracy was measured, else the precision the caller asked for.
+pub(crate) fn dense(t: &Tensors, name: &str, out: usize, inp: usize) -> Result<Dense, String> {
+    if t.precision() != Precision::Auto {
+        return Dense::load(t, &[(name, out)], inp);
+    }
     let weight = t.f32_len(&format!("{name}.weight"), out * inp)?;
-    let bias = if bias {
-        Some(t.f32_len(&format!("{name}.bias"), out)?)
-    } else {
-        None
-    };
-    Dense::new(weight, bias, out, inp)
+    let bias = t.f32_len(&format!("{name}.bias"), out)?;
+    Dense::new(weight, Some(bias), out, inp)
 }
 
 /// Stride-2 convolution stack that turns 10 ms mel frames into 80 ms frames.
@@ -249,7 +233,6 @@ impl Subsampling {
                 &format!("{}encoder.subsampling.layers.3", c.prefix),
                 ch,
                 ch,
-                true,
             )?,
             dw2: tap_major(conv(5)?, ch),
             pw2: dense(
@@ -257,14 +240,12 @@ impl Subsampling {
                 &format!("{}encoder.subsampling.layers.6", c.prefix),
                 ch,
                 ch,
-                true,
             )?,
             linear: dense(
                 t,
                 &format!("{}encoder.subsampling.linear", c.prefix),
                 c.hidden,
                 ch * (c.mels / 8),
-                true,
             )?,
         })
     }
@@ -347,8 +328,14 @@ multiversion! {
         // Output row oh reads conv0 rows 2oh-1 ..= 2oh+1.
         let first_in = (2 * first_out).saturating_sub(1);
         let last_in = (2 * (first_out + out_rows - 1) + 1).min(h1 - 1);
-        let mut conv0 = vec![0.0f32; (last_in - first_in + 1) * w1 * ch];
-        for (offset, row) in conv0.chunks_exact_mut(w1 * ch).enumerate() {
+        let len = (last_in - first_in + 1) * w1 * ch;
+        // This thread's buffer, so a task allocates nothing; `conv0_row`
+        // writes every value it reads.
+        let mut conv0 = CONV0.take();
+        if conv0.len() < len {
+            conv0.resize(len, 0.0);
+        }
+        for (offset, row) in conv0[..len].chunks_exact_mut(w1 * ch).enumerate() {
             sub.conv0_row(features, frames, mels, first_in + offset, row);
         }
         let (weight, bias) = &sub.dw1;
@@ -372,7 +359,14 @@ multiversion! {
                 }
             }
         }
+        CONV0.set(conv0);
     }
+}
+
+thread_local! {
+    /// The conv0 rows of one `conv_strip` task, up to 1 MB. It grows once
+    /// per thread and is then reused.
+    static CONV0: std::cell::Cell<Vec<f32>> = const { std::cell::Cell::new(Vec::new()) };
 }
 
 /// Most output rows of the first depthwise conv in one parallel task.
@@ -545,76 +539,91 @@ impl Block {
         *x = self.norm_out.residual(x, &ff, 0.5);
     }
 
-    /// Multi-head attention with Transformer-XL relative positions.
+    /// Multi-head attention with Transformer-XL relative positions: one task
+    /// per head and block of `ATTENTION_ROWS` queries. The products are
+    /// `fgemm::matmul_into`, so every value is the one a whole-head product
+    /// gives; a change in a sum's order changes the text of some clips.
     fn attention(&self, x: &[f32], t: usize, c: &Config) -> Buf {
         let (d, heads) = (c.hidden, c.heads);
         let hd = d / heads;
         let qkv = self.qkv.forward(x, t);
-        let cache = self
-            .rel_cache
-            .rows(t, d, |table, rows| self.rel_k.forward(table, rows));
-        let r = cache.slice(t, d);
-        let scale = 1.0 / (hd as f32).sqrt();
-        let p = 2 * t - 1;
-        let mut context = Buf::scratch(t * d);
-        let per_head: Vec<Buf> = team::map(heads, |h| {
-            let cols = h * hd..(h + 1) * hd;
-            // Columns of head h from a matrix with `stride` values per row,
-            // into `out`, which keeps its memory for the next call.
-            let head = |out: &mut Vec<f32>,
-                        src: &[f32],
-                        stride: usize,
-                        offset: usize,
-                        rows: usize,
-                        bias: Option<&[f32]>| {
-                out.clear();
-                for i in 0..rows {
-                    let row = &src[i * stride + offset..][cols.clone()];
-                    match bias {
-                        Some(b) => out.extend(row.iter().zip(b).map(|(v, b)| v + b)),
-                        None => out.extend_from_slice(row),
-                    }
-                }
-            };
-            let (ac, bd) = HEADS.with(|heads| {
-                let [qu, qv, k, pos] = &mut *heads.borrow_mut();
-                head(qu, &qkv, 3 * d, 0, t, Some(&self.bias_u[cols.clone()]));
-                head(qv, &qkv, 3 * d, 0, t, Some(&self.bias_v[cols.clone()]));
-                head(k, &qkv, 3 * d, d, t, None);
-                head(pos, r, d, 0, p, None);
-                (
-                    fgemm::matmul(qu, t, hd, &k[..], t),
-                    fgemm::matmul(qv, t, hd, &pos[..], p),
-                )
-            });
-            let mut probs = Buf::scratch(t * t);
-            for (i, row) in probs.chunks_exact_mut(t).enumerate() {
-                // Column t-1-i+j of the position product is relative position i - j.
-                let shifted = &bd[i * p + (t - 1 - i)..][..t];
-                let mut max = f32::NEG_INFINITY;
-                for j in 0..t {
-                    row[j] = (ac[i * t + j] + shifted[j]) * scale;
-                    max = max.max(row[j]);
-                }
-                row.iter_mut().for_each(|value| *value -= max);
-                activation::exp(row);
-                let inv = 1.0 / row.iter().sum::<f32>();
-                row.iter_mut().for_each(|value| *value *= inv);
-            }
-            let mut v_t = Buf::scratch(hd * t);
+        // Per head, from the pool on the calling thread: K as rows (t x hd)
+        // and V transposed (hd x t), so each product reads whole rows.
+        let mut keys = Buf::scratch(heads * 2 * t * hd);
+        team::chunks_mut(&mut keys, 2 * t * hd, |h, head| {
+            let (k, v_t) = head.split_at_mut(t * hd);
             for j in 0..t {
-                for (e, value) in qkv[j * 3 * d + 2 * d..][cols.clone()].iter().enumerate() {
+                let row = &qkv[j * 3 * d + h * hd..];
+                k[j * hd..(j + 1) * hd].copy_from_slice(&row[d..][..hd]);
+                for (e, value) in row[2 * d..][..hd].iter().enumerate() {
                     v_t[e * t + j] = *value;
                 }
             }
-            fgemm::matmul(&probs, t, t, &v_t, hd)
         });
-        for (h, out) in per_head.iter().enumerate() {
-            for i in 0..t {
-                context[i * d + h * hd..i * d + (h + 1) * hd]
-                    .copy_from_slice(&out[i * hd..(i + 1) * hd]);
-            }
-        }
+        let positions = self
+            .rel_cache
+            .rows(t, (d, heads), |table, rows| self.rel_k.forward(table, rows));
+        let scale = 1.0 / (hd as f32).sqrt();
+        let chunk = ATTENTION_ROWS.min(t);
+        let chunks = t.div_ceil(chunk);
+        let mut context = Buf::scratch(t * d);
+        let out = team::SendPtr::new(&mut context);
+        team::for_each(heads * chunks, |task| {
+            let (h, block) = (task / chunks, task % chunks);
+            let rows = block * chunk..((block + 1) * chunk).min(t);
+            let m = rows.len();
+            let (k, v_t) = keys[h * 2 * t * hd..][..2 * t * hd].split_at(t * hd);
+            // Query i reads relative positions i down to i-(t-1): t of the
+            // take's 2t-1, from t-1-i. The block's rows read t+m-1 of them,
+            // from t-rows.end.
+            let width = t + m - 1;
+            let first = positions.first(t) + t - rows.end;
+            let band = &positions.head(h, hd)[first * hd..][..width * hd];
+            let (bias_u, bias_v) = (&self.bias_u[h * hd..][..hd], &self.bias_v[h * hd..][..hd]);
+            SCRATCH.with(|scratch| {
+                let mut scratch = scratch.borrow_mut();
+                let need = m * (3 * hd + t + width);
+                if scratch.len() < need {
+                    scratch.resize(need, 0.0);
+                }
+                let (qu, rest) = scratch.split_at_mut(m * hd);
+                let (qv, rest) = rest.split_at_mut(m * hd);
+                let (scores, rest) = rest.split_at_mut(m * t);
+                let (shifted, rest) = rest.split_at_mut(m * width);
+                let head_out = &mut rest[..m * hd];
+                for ((u, v), i) in qu
+                    .chunks_exact_mut(hd)
+                    .zip(qv.chunks_exact_mut(hd))
+                    .zip(rows.clone())
+                {
+                    let q = &qkv[i * 3 * d + h * hd..][..hd];
+                    for e in 0..hd {
+                        u[e] = q[e] + bias_u[e];
+                        v[e] = q[e] + bias_v[e];
+                    }
+                }
+                fgemm::matmul_into(qu, m, hd, k, t, scores);
+                fgemm::matmul_into(qv, m, hd, band, width, shifted);
+                for (row, i) in scores.chunks_exact_mut(t).zip(rows.clone()) {
+                    let local = i - rows.start;
+                    let position = &shifted[local * width + (rows.end - 1 - i)..][..t];
+                    let mut max = f32::NEG_INFINITY;
+                    for (value, p) in row.iter_mut().zip(position) {
+                        *value = (*value + p) * scale;
+                        max = max.max(*value);
+                    }
+                    row.iter_mut().for_each(|value| *value -= max);
+                    activation::exp(row);
+                    let inv = 1.0 / row.iter().sum::<f32>();
+                    row.iter_mut().for_each(|value| *value *= inv);
+                }
+                fgemm::matmul_into(scores, m, t, v_t, hd, head_out);
+                for (part, i) in head_out.chunks_exact(hd).zip(rows.clone()) {
+                    // SAFETY: row i, head h belongs to this task only; `context` outlives the step.
+                    unsafe { out.slice_mut(i * d + h * hd, hd) }.copy_from_slice(part);
+                }
+            });
+        });
         self.o.forward(&context, t)
     }
 
@@ -678,20 +687,32 @@ struct RelCache {
 
 struct RelRows {
     reach: usize,
+    /// Positions `reach` down to `-reach`, per head: `[head][position][hd]`,
+    /// so the positions of a block of queries are consecutive rows.
     rows: Buf,
 }
 
 impl RelRows {
-    /// Rows for positions t-1 down to -(t-1).
-    fn slice(&self, t: usize, d: usize) -> &[f32] {
-        let first = self.reach - (t - 1);
-        &self.rows[first * d..(first + 2 * t - 1) * d]
+    /// Head `h`'s rows, one per position.
+    fn head(&self, h: usize, hd: usize) -> &[f32] {
+        let size = (2 * self.reach + 1) * hd;
+        &self.rows[h * size..][..size]
+    }
+
+    /// The table column of position t-1, the first of a take of `t` frames.
+    fn first(&self, t: usize) -> usize {
+        self.reach - (t - 1)
     }
 }
 
 impl RelCache {
     /// The table, grown first when `t` frames reach past it.
-    fn rows(&self, t: usize, d: usize, project: impl Fn(&[f32], usize) -> Buf) -> Arc<RelRows> {
+    fn rows(
+        &self,
+        t: usize,
+        (d, heads): (usize, usize),
+        project: impl Fn(&[f32], usize) -> Buf,
+    ) -> Arc<RelRows> {
         if let Some(rows) = self.table.read().as_ref().filter(|r| r.reach + 1 >= t) {
             return Arc::clone(rows);
         }
@@ -702,10 +723,18 @@ impl RelCache {
         let reach = (t - 1)
             .max(POSITION_REACH)
             .max(table.as_ref().map_or(0, |r| 2 * r.reach));
-        let positions = relative_positions(reach + 1, d);
+        let count = 2 * reach + 1;
+        let projected = project(&relative_positions(reach + 1, d), count);
+        let hd = d / heads;
+        let mut by_head = Buf::scratch(count * d);
+        team::chunks_mut(&mut by_head, count * hd, |h, head| {
+            for (row, out) in projected.chunks_exact(d).zip(head.chunks_exact_mut(hd)) {
+                out.copy_from_slice(&row[h * hd..][..hd]);
+            }
+        });
         let rows = Arc::new(RelRows {
             reach,
-            rows: project(&positions, 2 * reach + 1),
+            rows: by_head,
         });
         *table = Some(Arc::clone(&rows));
         rows
@@ -816,7 +845,7 @@ impl VadHead {
 enum Head {
     /// Transducer (TDT, or RNNT without durations): LSTM prediction
     /// network and joint network.
-    Transducer(Transducer),
+    Transducer(Box<Transducer>),
     /// One projection to token logits per frame, greedy with repeats merged.
     Ctc(Dense),
     /// No head: the encoder output is the result.
@@ -830,8 +859,10 @@ impl Parakeet {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         let head = match c.head {
-            HeadKind::Ctc => Head::Ctc(dense(t, "ctc_head", c.vocab, c.hidden, true)?),
-            HeadKind::Transducer | HeadKind::Rnnt => Head::Transducer(Transducer::load(t, c)?),
+            HeadKind::Ctc => Head::Ctc(dense(t, "ctc_head", c.vocab, c.hidden)?),
+            HeadKind::Transducer | HeadKind::Rnnt => {
+                Head::Transducer(Box::new(Transducer::load(t, c)?))
+            }
             HeadKind::Encoder => Head::Encoder,
         };
         Ok(Self {
@@ -877,11 +908,13 @@ impl Parakeet {
 
     /// Fills every layer's position table up front, so the first take does not wait.
     pub fn warm_positions(&self) {
-        let d = self.config.hidden;
+        let shape = (self.config.hidden, self.config.heads);
         for block in &self.blocks {
-            block.rel_cache.rows(POSITION_REACH + 1, d, |table, rows| {
-                block.rel_k.forward(table, rows)
-            });
+            block
+                .rel_cache
+                .rows(POSITION_REACH + 1, shape, |table, rows| {
+                    block.rel_k.forward(table, rows)
+                });
         }
     }
 

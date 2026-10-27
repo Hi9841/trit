@@ -145,14 +145,10 @@ impl Dense {
         }
         let bias = any_bias.then_some(bias);
         let precision = t.precision();
-        let int8 = Int8::fits(out_features, in_features)
-            && match precision {
-                Precision::Int8 => true,
-                Precision::Auto => out_features.min(in_features) >= INT8_MIN_WIDTH,
-                Precision::F16 | Precision::F32 => false,
-            };
         let len = out_features * in_features;
-        if !int8 && matches!(precision, Precision::Auto | Precision::F16) {
+        if !Self::int8(out_features, in_features, precision)
+            && matches!(precision, Precision::Auto | Precision::F16)
+        {
             // f16: read as f16 bits directly; no f32 copy of the layer exists.
             let mut half = Vec::with_capacity(len);
             for (name, rows) in parts {
@@ -163,6 +159,37 @@ impl Dense {
         let mut weight = Vec::with_capacity(len);
         for (name, rows) in parts {
             weight.extend(t.f32_len(&format!("{name}.weight"), rows * in_features)?);
+        }
+        Self::with_precision(weight, bias, out_features, in_features, precision)
+    }
+
+    /// Whether `load` stores a layer of this shape with int8 activations.
+    fn int8(out_features: usize, in_features: usize, precision: Precision) -> bool {
+        Int8::fits(out_features, in_features)
+            && match precision {
+                Precision::Int8 => true,
+                Precision::Auto => out_features.min(in_features) >= INT8_MIN_WIDTH,
+                Precision::F16 | Precision::F32 => false,
+            }
+    }
+
+    /// f32 weights (`out x in`) stored as `precision` says, by the rules of
+    /// `load`: for a layer that is not one tensor of the file.
+    pub fn with_precision(
+        weight: Vec<f32>,
+        bias: Option<Vec<f32>>,
+        out_features: usize,
+        in_features: usize,
+        precision: Precision,
+    ) -> Result<Self, String> {
+        let len = weight.len();
+        let int8 = Self::int8(out_features, in_features, precision);
+        if !int8 && matches!(precision, Precision::Auto | Precision::F16) {
+            let half = weight
+                .iter()
+                .map(|v| super::tensors::f32_to_f16(*v))
+                .collect();
+            return Self::half(half, bias, out_features, in_features);
         }
         let weight = if int8 {
             Weights::Int8(Int8::quantize(out_features, in_features, |row, out| {

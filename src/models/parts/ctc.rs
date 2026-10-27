@@ -1,6 +1,7 @@
 //! CTC decoding, shared by the families with a CTC head.
 
 /// Greedy CTC: the best token per frame, repeats merged, blanks dropped.
+/// A banned id outside the vocabulary bans nothing.
 pub fn greedy(
     logits: &[f32],
     vocab: usize,
@@ -13,7 +14,9 @@ pub fn greedy(
     for (index, frame) in logits.chunks_exact(vocab).enumerate() {
         let mut row = frame.to_vec();
         for &id in banned {
-            row[id] = f32::NEG_INFINITY;
+            if let Some(value) = row.get_mut(id) {
+                *value = f32::NEG_INFINITY;
+            }
         }
         let token = crate::models::layers::argmax(&row);
         if token != blank && token != previous {
