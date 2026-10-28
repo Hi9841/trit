@@ -35,6 +35,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SAMPLE_RATE: u32 = 16_000;
 /// The Hugging Face repository of the default model.
 pub const MODEL_REPO: &str = "moondream/parakeet-redux";
+/// The most beams `Options::beam` gives. Each beam keeps its own decoder
+/// caches: Whisper tiny with 10^8 beams held 14 GB within a minute, and
+/// still grew.
+const MAX_BEAMS: usize = 16;
 /// The files every model folder holds; a family may need more. A large
 /// model may hold `model.safetensors.index.json` and its shards instead of
 /// `model.safetensors`.
@@ -54,7 +58,8 @@ pub struct Options {
     /// Beams for the decoder families. 0 (the default) is the model's own
     /// choice: 5 for Whisper and Moonshine (fewer errors than greedy on
     /// every test set, at 2 to 3 times the decoder time), greedy for Canary.
-    /// 1 is greedy, as the reference runtimes decode by default.
+    /// 1 is greedy, as the reference runtimes decode by default. More than
+    /// 16 decode with 16.
     pub beam: usize,
     /// Write the speech as spoken (the default), or translate it into
     /// English (Whisper's multilingual models, Canary).
@@ -88,12 +93,12 @@ impl Options {
         self.fallback.unwrap_or(true)
     }
 
-    /// `beam`, or `default` when it is 0.
+    /// `beam`, or `default` when it is 0; at most `MAX_BEAMS`.
     pub(crate) fn beams(&self, default: usize) -> usize {
         if self.beam == 0 {
             default
         } else {
-            self.beam
+            self.beam.min(MAX_BEAMS)
         }
     }
 
