@@ -282,10 +282,12 @@ fn parse_header(
         let [start, end] = offsets[..] else {
             return Err(format!("tensor {name} has no data_offsets"));
         };
-        if start > end || data_start + end > total {
-            return Err(format!("tensor {name} points outside the file"));
-        }
-        let (start, end) = (data_start + start, data_start + end);
+        // Checked: offsets near 2^64 wrapped past the length check.
+        let end = data_start
+            .checked_add(end)
+            .filter(|end| start <= end - data_start && *end <= total)
+            .ok_or_else(|| format!("tensor {name} points outside the file"))?;
+        let start = data_start + start;
         entries.insert(
             name,
             Entry {
