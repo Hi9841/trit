@@ -23,6 +23,10 @@ const MIN_FUZZY_LETTERS: usize = 4;
 const MIN_LENGTH_RATIO: f32 = 0.7;
 /// Terms tried on one run of words, the closest first.
 const TERMS_PER_SPAN: usize = 2;
+/// Longer terms are skipped: no name is this long, and the merges of
+/// `Tokenizer::encode` take time with the square of a word's length (one
+/// term of 10,000 letters took 2 s to set).
+const MAX_TERM_CHARS: usize = 100;
 /// Sound checks per window, the closest spellings first.
 const MAX_CANDIDATES: usize = 16;
 /// The sound cannot tell "rust" from "Rust". A term that adds only a first
@@ -106,7 +110,10 @@ impl Dictionary {
         let mut skipped = Vec::new();
         let mut entries: Vec<Term> = Vec::new();
         for term in terms.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
-            match tokenizer.encode(term) {
+            let tokens = (term.chars().count() <= MAX_TERM_CHARS)
+                .then(|| tokenizer.encode(term))
+                .flatten();
+            match tokens {
                 Some(tokens) if !tokens.is_empty() => {
                     let mut spellings = vec![tokens.clone()];
                     if let Some(lower) = tokenizer.encode(&term.to_lowercase()) {
