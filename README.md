@@ -111,7 +111,7 @@ Flags of `transcribe`:
 | `--task transcribe\|translate` | `transcribe` | `translate` writes English (multilingual Whisper, Canary) |
 | `--timestamps` | off | Timed segments too: sentences for Parakeet, windows for the others |
 | `--precision auto\|int8\|f16\|f32` | `auto` | How the weights are held; see [Precision](#precision) |
-| `--beam <n>` | 5 for Whisper and Moonshine, 1 for Canary | Beams; 1 is greedy |
+| `--beam <n>` | 5 for Whisper and Moonshine, 1 for Canary | Beams; 1 is greedy, at most 16 |
 | `--cleanup` | off | Clean each transcript with S1-mini; `--cleanup-model`, `--styling`, `--structure`, `--context` as for `clean` |
 | `--format toon\|json\|text` | `toon` | `json` for programs; `text` gives one transcript per line |
 | `--full` | off | Do not cut transcripts over 500 characters in a list of several files |
@@ -205,10 +205,10 @@ trit_free(engine);
 | `trit_load_with(const char *model, const char *precision)` | The same with `"auto"` (or NULL), `"int8"`, `"f16"`, `"f32"` |
 | `trit_kind(engine)` | The family, static |
 | `trit_transcribe(engine, const float *samples, size_t count, const char *language)` | Text, or NULL |
-| `trit_transcribe_with(engine, samples, count, language, int beam)` | The same with beams (0: the model's default, 1: greedy) |
+| `trit_transcribe_with(engine, samples, count, language, int beam)` | The same with beams (0: the model's default, 1: greedy, at most 16) |
 | `trit_transcribe_wav(engine, const char *path, const char *language)` | Text, or NULL |
 | `trit_transcribe_json(engine, samples, count, const char *options)`, `trit_transcribe_wav_json(engine, path, options)` | `{"text", "segments": [{"start", "end", "text"}]}` as JSON, or NULL. `options` is NULL or a JSON object with any of `language`, `task` (`"transcribe"`, `"translate"`), `beam`, `fallback`, `timestamps` |
-| `trit_set_dictionary(engine, const char *terms)` | Terms skipped, or -1. One term per line |
+| `trit_set_dictionary(engine, const char *terms)` | Terms skipped, or -1. One term per line; a term over 100 characters is skipped |
 | `trit_cleaner_load(const char *model)`, `trit_cleaner_load_with(model, precision)` | A cleaner, or NULL |
 | `trit_clean(cleaner, text, styling, structure, context)` | Clean text, or NULL. NULL settings take the default |
 | `trit_voice_load(const char *model)` | A voice, or NULL. A folder, a name, or NULL for `kokoro-82m`, then `mms-tts-eng` |
@@ -220,7 +220,7 @@ trit_free(engine);
 | `trit_release_memory(void)` | Gives memory that earlier calls freed back to the system |
 | `trit_last_error(void)` | The reason for the last failure on this thread |
 | `trit_free_text(char *)`, `trit_free(Trit *)`, `trit_cleaner_free(TritCleaner *)`, `trit_voice_free(TritVoice *)`, `trit_free_samples(float *, size_t count)` | Free. NULL is a no-op |
-| `trit_version(void)` | `"0.3.1"` |
+| `trit_version(void)` | `"0.3.2"` |
 
 Rules: strings are UTF-8. `language` is an ISO 639-1 code or NULL. Free
 every returned text with `trit_free_text`, and the samples of `trit_speak`

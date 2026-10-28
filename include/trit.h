@@ -75,7 +75,8 @@ char *trit_transcribe(const Trit *engine, const float *samples, size_t count,
 
 /* trit_transcribe with `beam` beams for the decoder families (Whisper,
  * Moonshine, Canary). 0 is the model's default, as trit_transcribe uses:
- * 5 for Whisper and Moonshine, greedy for Canary. 1 is greedy. */
+ * 5 for Whisper and Moonshine, greedy for Canary. 1 is greedy; more than
+ * 16 decode with 16. */
 char *trit_transcribe_with(const Trit *engine, const float *samples, size_t count,
                            const char *language, int beam);
 
