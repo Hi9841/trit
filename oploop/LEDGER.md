@@ -479,3 +479,87 @@ clips (`ab.py`): 30.9 -> 29.7 ms median, per-clip ratio 0.961, paired p = 1.9e-6
 0 texts differ; errors equal per set (takes 105, clean 81, other 172, tech 34).
 Control: `--precision int8` changes 24 of 200 `other` texts (0 before the fix).
 Clippy, fmt, and `trit skill --check` clean.
+
+## Session 2026-10-28 (stability)
+
+Goal: the speech-to-text path (Parakeet Redux and v3 first) must not crash, hang,
+give wrong or empty text, or grow memory. Method: read the code, then prove each
+defect with a real run through `bindings/python/trit.py` (one process per input,
+probes kept outside git). Each kept change is a fix, not a speed claim.
+
+### Probe P-S1 (inputs, Redux, before the fixes)
+
+- No defect: empty audio, 1 sample, 0.05 to 0.13 s, 5 s of zeros, DC 0.5, DC under
+  speech, speech clipped at full scale, a square wave, uniform noise, int16-scale
+  samples (x 32768), 1e-30 and 1e-40 scale (empty, as digital silence), 120 s
+  (0.8 s) and 600 s (4.2 s) of speech, `segments` on 120 s.
+- 1000 calls on one engine (86 takes and tech clips, cycled): 0 texts change
+  between repeats; private bytes 1481 MB after 100 calls, 1417 to 1519 MB up to
+  1000, 1343 MB after `release_memory`. `release_memory` after every call (300):
+  flat at 1343 MB. One take in three made three times longer (300): 1468 MB, 1344
+  MB after release. No growth.
+- Two threads on one engine and on two engines, 3 x 20 clips each, with
+  `release_memory` from a third thread every 50 ms: 0 texts differ, no error.
+- Dictionary: empty list, empty and blank terms, non-ASCII, punctuation, control
+  characters, 5000 terms, 100 copies of one term: no error, same text.
+
+### SI-S1 sanitize the samples (`src/audio/mod.rs`, `src/lib.rs`)
+
+- Defect: one NaN, +Inf, -Inf, or 3.4e38 sample in a 10.6 s clip gave empty text
+  (`transcribe` and `segments`): the log-mel of its window became NaN. Speech at
+  1e20 scale gave empty text too (the power spectrum overflows f32).
+- Change: `audio::sanitized` maps non-finite samples to 0 and clamps finite ones
+  to +-1e10, before every family. Samples in range are borrowed, not copied.
+- Result: the four one-sample cases give the clean text; 1e20 scale gives the
+  text with 2 words changed; all-NaN gives "". Commit `7601d9e`.
+
+### SI-S2 safetensors offsets near 2^64 (`src/cpu/tensors.rs`, coldstart's file)
+
+- Defect: an end offset of 2^64 - 1 wrapped past the length check; the load
+  panicked with "capacity overflow" (the C ABI gave "internal error (panic)").
+- Change: `checked_add` on the offsets. Result: "tensor ... points outside the
+  file". Commit `216d288`.
+
+### SI-S3 config and tokenizer that do not fit (`fastconformer.rs`, `parakeet.rs`)
+
+- Defects: `blank_token_id` 99999 loaded, and then every call panicked in the
+  embedding lookup (`gemm.rs:234`). A `tokenizer.json` with 2 pieces loaded, and
+  every call gave "".
+- Change: `blank < vocab` in `Config::parse`; Parakeet load fails when the
+  tokenizer has fewer pieces than `vocab - 1`. Commit `567e2fc`.
+
+### SI-S4 long dictionary terms (`dictionary.rs`)
+
+- Defect: `Tokenizer::encode` merges in time quadratic in a word's length. One
+  term of 10,000 letters took 2.2 s in `set_dictionary`; 100,000 would take
+  minutes.
+- Change: terms over 100 characters are skipped (returned as skipped).
+  Result: 0.11 s. Commit `d9b61eb`.
+
+### SI-S5 at most 16 beams (`src/lib.rs`, PUBLIC API behavior)
+
+- Defect: `trit_transcribe_with(beam = 10^8)` on Whisper tiny held 14 GB within
+  a minute and still grew (each beam clones its decoder caches); the probe was
+  stopped by hand.
+- Change: `Options::beams` caps at 16; the signature does not change.
+  Result: the call returns, with the same text as beam 16. Commit `dbaf577`.
+
+### Not fixed
+
+- One word (1 s) after 40 s or more of silence gives "" (35 s: "At most."; 40,
+  50, 58 s of zeros, and 50, 58 s of noise at -70 dBFS: ""). The per-bin
+  normalization of `audio/mel.rs` runs over the whole window, so the long
+  silence sets the mean and spread. A fix changes the features of every take.
+- `RelCache` (`fastconformer.rs`) grows from 375 to 750 positions after the
+  first take over 30 s and keeps them: about 74 MB (24 layers x 751 rows x
+  1024 x 4 B) that `release_memory` does not return. Bounded by the 60 s window.
+- `durations` in `config.json` are not checked: a duration of 2^62 loads and
+  gives "".
+
+### Gates of the branch head (`dbaf577`)
+
+- `ab.py parakeet-redux`, baseline v0.3.1 vs head, 1 round, 486 clips: 0 texts
+  differ; errors takes 105, clean 81, other 172, tech 34 on both sides.
+- `ab.py parakeet-tdt-0.6b-v3`, the same: 0 texts differ; errors takes 56, clean 58,
+  other 124, tech 20 on both sides.
+- Clippy `-D warnings --release` and `cargo fmt --all --check`: clean.
