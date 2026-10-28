@@ -156,19 +156,19 @@ impl Trit {
 
     /// 16 kHz mono samples to text, with `Options::default()`.
     pub fn transcribe(&self, samples: &[f32]) -> String {
-        self.model.transcribe(samples, &Options::default())
+        self.transcribe_with(samples, &Options::default())
     }
 
     /// 16 kHz mono samples to text.
     pub fn transcribe_with(&self, samples: &[f32], options: &Options) -> String {
-        self.model.transcribe(samples, options)
+        self.model.transcribe(&audio::sanitized(samples), options)
     }
 
     /// The text in timed segments: sentences or pauses for Parakeet (from
     /// the times its decoder emits tokens), one per window of up to 30 s for
     /// Whisper and Moonshine, and 40 s for Canary.
     pub fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        self.model.segments(samples, options)
+        self.model.segments(&audio::sanitized(samples), options)
     }
 
     /// Terms to favor while decoding, as written ("Kubernetes", "PostgreSQL").
