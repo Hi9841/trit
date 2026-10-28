@@ -130,6 +130,7 @@ impl Config {
             || !config.mels.is_multiple_of(8)
             || (head == HeadKind::Transducer && config.durations.is_empty())
             || (transducer && config.max_symbols == 0)
+            || config.blank >= config.vocab
         {
             return Err("config.json has inconsistent sizes".into());
         }

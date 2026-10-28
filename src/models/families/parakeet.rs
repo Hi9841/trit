@@ -53,6 +53,13 @@ impl Parakeet {
         let tokenizer = Tokenizer::open(&dir.join("tokenizer.json"))?;
         // Only token ids: the joint row holds the durations after them.
         let vocab = model.config.vocab;
+        // The blank, the last id, has no piece.
+        if tokenizer.len() + 1 < vocab {
+            return Err(format!(
+                "tokenizer.json has {} pieces; the model has {vocab} tokens",
+                tokenizer.len()
+            ));
+        }
         let non_english: Vec<usize> = tokenizer
             .non_english()
             .into_iter()
