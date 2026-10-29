@@ -73,7 +73,7 @@ Do the steps in order. Each step ends on a check.
 | Skill current? | `./target/release/trit skill --check skill/SKILL.md` |
 | Voices against their references | `python bench/tts.py kokoro <trit.exe> <kokoro dir> <parakeet-redux dir>` and `python bench/tts.py vits <trit.exe> <mms dir> <parakeet-redux dir>`, in the environment that `bench/tts.py` names |
 | Phonemes of a text | `./target/release/trit phonemes "<text>"` (`--british`, `--no-fallback`) |
-| Same model on other runtimes | `uv run --no-project --python 3.12 python bench/runtimes.py <engine>` |
+| Same model on other runtimes | `uv run --no-project --python 3.12 python bench/runtimes.py <engine>` (`--rounds 3` for published numbers: the report gives the median and the spread) |
 | Speed of one change | `uv run --no-project --python 3.12 --with numpy --with whisper-normalizer --with scipy python oploop/ab.py <model> <A.dll> <B.dll>` (interleaved A/B of two `trit_ffi` builds) |
 
 There are no unit tests. The checks are:

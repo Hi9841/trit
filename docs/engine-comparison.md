@@ -184,8 +184,13 @@ Trit is called through its Python binding with `language="en"`.
   read after a garbage collection. The second varies by up to about 35 MB
   between runs of the same code.
 - **Isolation:** each runtime runs in its own process and its own Python
-  environment, one after another. One run each; expect about 10 % spread in
-  speed. Other programs on the computer were idle but not stopped.
+  environment, one after another. Other programs on the computer were idle
+  but not stopped.
+- **Rounds:** every runtime ran three times (`--rounds 3`), each round
+  starting from a later runtime, so a slow drift of the computer falls on
+  all of them. A table gives the median of the three rounds; the time per
+  clip also gives the lowest and highest round in brackets. The word errors
+  were the same in every round.
 - **Trit from Python:** Trit is timed through its Python binding, the same
   path as the other runtimes. The Rust CLI is about 5 % faster.
 
@@ -224,7 +229,8 @@ Trit is called through its Python binding with `language="en"`.
 From the repository root, after `cargo build --release -p trit-ffi`:
 
 ```powershell
-uv run --no-project --python 3.12 python bench/runtimes.py all
+uv run --no-project --python 3.12 python bench/runtimes.py all --rounds 3
+uv run --no-project --python 3.12 python bench/cleanup_runtimes.py all --rounds 3
 python bench/runtimes_report.py
 ```
 

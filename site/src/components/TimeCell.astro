@@ -1,0 +1,87 @@
+---
+// A time cell of the benchmark tables: a bar for the median of the rounds,
+// a whisker from the lowest to the highest round, and the median with ± half
+// that range. No motion: the tables are reference data.
+interface Props {
+  /** Median, lowest and highest round, in ms. */
+  ms: number;
+  lo: number;
+  hi: number;
+  rounds: number;
+  /** The highest round of the table: the full width. */
+  slowest: number;
+}
+
+const { ms, lo, hi, rounds, slowest } = Astro.props;
+const at = (x: number) => (x / slowest).toFixed(4);
+const half = (hi - lo) / 2;
+const pm = half < 10 ? half.toFixed(1) : Math.round(half).toString();
+const spread = rounds > 1 && half >= 0.05;
+---
+
+<td class="time">
+  <span class="track" aria-hidden="true">
+    <span class="bar" style={`--w:${at(ms)}`}></span>
+    {spread && <span class="whisker" style={`--lo:${at(lo)};--hi:${at(hi)}`} />}
+  </span>
+  <span class="ms">
+    {Math.round(ms)} ms{
+      spread ? (
+        <small title={`Median of ${rounds} rounds; lowest ${lo} ms, highest ${hi} ms`}>
+          ±{pm}
+          <span class="sr">, {rounds} rounds from {lo} to {hi} ms</span>
+        </small>
+      ) : null
+    }
+  </span>
+</td>
+
+<style>
+  .track {
+    position: relative;
+    display: block;
+    height: 12px;
+    margin: 4px 0 6px;
+  }
+  .bar {
+    position: absolute;
+    inset: 2px 0;
+    background: var(--muted);
+    opacity: 0.55;
+    transform: scaleX(var(--w));
+    transform-origin: left center;
+  }
+  :global(.trit) .bar {
+    background: var(--accent);
+    opacity: 1;
+  }
+  /* A hairline with an end cap at the lowest and the highest round. */
+  .whisker {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--lo) * 100%);
+    width: max(1px, calc((var(--hi) - var(--lo)) * 100%));
+    border-inline: 1px solid var(--ink);
+    background: linear-gradient(var(--ink), var(--ink)) center / 100% 1px no-repeat;
+  }
+  .ms {
+    font-variant-numeric: tabular-nums;
+  }
+  :global(.trit) .ms {
+    color: var(--accent-text);
+  }
+  small {
+    margin-left: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+</style>

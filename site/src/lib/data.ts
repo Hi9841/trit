@@ -51,8 +51,14 @@ export interface Run {
   trit: boolean;
   /** Trit as it runs when the caller sets nothing. */
   default: boolean;
+  /** Median time per clip of the rounds, and the lowest and highest round. */
   ms: number;
+  ms_lo: number;
+  ms_hi: number;
   speed: number;
+  speed_lo: number;
+  speed_hi: number;
+  rounds: number;
   clean: number;
   other: number;
   /** WER over all 456 clips. */
@@ -74,7 +80,11 @@ export interface Cleanup {
   precision: string;
   trit: boolean;
   default: boolean;
+  /** Median time per case of the rounds, and the lowest and highest round. */
   ms: number;
+  ms_lo: number;
+  ms_hi: number;
+  rounds: number;
   wer: number;
   errors: number;
   exact: number;

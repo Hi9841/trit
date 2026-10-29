@@ -1,6 +1,6 @@
 """The same speech models on different runtimes: word error rate, speed, memory.
 
-usage: uv run --no-project --python 3.12 --with numpy bench/runtimes.py ENGINE|MODEL|all [...] [--sets clean,other,tech,tts16] [--list]
+usage: uv run --no-project --python 3.12 --with numpy bench/runtimes.py ENGINE|MODEL|all [...] [--sets clean,other,tech,tts16] [--rounds N] [--list]
 
 Run from the repository root. ENGINE is one name from --list; MODEL runs every engine of
 that model (parakeet-redux, parakeet-v2, whisper-turbo, ...); `all` runs all.
@@ -8,6 +8,9 @@ Each engine runs in its own process and its own uv environment, so packages
 never clash and peak memory is its own. Every engine gets the same 16 kHz
 arrays (quiet after the last word cut to 150 ms, as bench-asr does), one
 warm-up clip, and the same timer around one call per clip.
+--rounds N runs the list N times, each round from a later engine, so a slow
+drift of the machine spreads over all engines; the results of one call share
+a campaign, and the report gives the median of its rounds.
 Results append to target/runtimes/results.jsonl; transcripts go next to it.
 Build Trit first: cargo build --release -p trit-ffi.
 """
@@ -499,7 +502,8 @@ def child(name: str, sets: list[str]) -> None:
     rss_mb = memory.rss / 2**20
     result = {"engine": name, "model": model, "model_name": MODELS[model], "runtime": runtime,
               "precision": precision, "device": device, "threads": CPU_THREADS, "load_s": round(load_s, 2),
-              "load_mb": round(load_mb), "peak_mb": round(peak_mb), "rss_mb": round(rss_mb), "sets": rows, "date": time.strftime("%Y-%m-%d")}
+              "load_mb": round(load_mb), "peak_mb": round(peak_mb), "rss_mb": round(rss_mb), "sets": rows,
+              "date": time.strftime("%Y-%m-%d"), "campaign": os.environ.get("BENCH_CAMPAIGN")}
     with open(OUT / "results.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(result) + "\n")
     print(f"  load {load_s:.2f} s, memory {load_mb:.0f} MB after load, {rss_mb:.0f} MB after the run, "
@@ -512,6 +516,11 @@ def main() -> None:
     if "--sets" in args:
         i = args.index("--sets")
         sets = args[i + 1].split(",")
+        del args[i: i + 2]
+    rounds = 1
+    if "--rounds" in args:
+        i = args.index("--rounds")
+        rounds = int(args[i + 1])
         del args[i: i + 2]
     if "--child" in args:
         args.remove("--child")
@@ -533,18 +542,26 @@ def main() -> None:
             sys.exit(f"unknown engine or model: {arg}\nmodels: {', '.join(MODELS)}\nengines: run with --list")
     if not names:
         sys.exit(__doc__)
-    for name in names:
-        print(f"== {name}", flush=True)
-        packages = ENGINES[name][4]
-        command = ["uv", "run", "--no-project", "--python", "3.12", "--quiet"]
-        for package in BASE + packages:
-            command += ["--with", package]
-        if any(p.startswith("torch") for p in packages):
-            command += ENV_ARGS["torch"]
-        command += ["python", __file__, name, "--child", "--sets", ",".join(sets)]
-        code = subprocess.run(command, cwd=ROOT, check=False).returncode
-        if code:
-            print(f"  failed with exit code {code}", flush=True)
+    os.environ.setdefault("BENCH_CAMPAIGN", time.strftime("%Y-%m-%dT%H:%M"))
+    for k in range(rounds):
+        shift = k * len(names) // rounds
+        for name in names[shift:] + names[:shift]:
+            print(f"== {name} (round {k + 1} of {rounds})", flush=True)
+            run(name, sets)
+
+
+def run(name: str, sets: list[str]) -> None:
+    """One engine in its own process and uv environment."""
+    packages = ENGINES[name][4]
+    command = ["uv", "run", "--no-project", "--python", "3.12", "--quiet"]
+    for package in BASE + packages:
+        command += ["--with", package]
+    if any(p.startswith("torch") for p in packages):
+        command += ENV_ARGS["torch"]
+    command += ["python", __file__, name, "--child", "--sets", ",".join(sets)]
+    code = subprocess.run(command, cwd=ROOT, check=False).returncode
+    if code:
+        print(f"  failed with exit code {code}", flush=True)
 
 
 if __name__ == "__main__":

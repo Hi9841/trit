@@ -3,6 +3,7 @@ import Base from "../layouts/Base.astro";
 import Header from "../components/Header.astro";
 import PageHead from "../components/PageHead.astro";
 import Footer from "../components/Footer.astro";
+import TimeCell from "../components/TimeCell.astro";
 import {
   benchDate,
   benches,
@@ -44,7 +45,6 @@ const leads = benches.map(lead);
 const medals = medalTable();
 const winner = medals[0];
 const times = (x: number) => `${x.toFixed(1)}×`;
-const ms = (x: number) => `${Math.round(x)} ms`;
 const mb = (x: number) => `${x.toLocaleString("en-US")} MB`;
 
 /** The class of a place: p1, p2, p3, or p4 for 4th and worse. */
@@ -171,13 +171,14 @@ const cells = (r: Run) => [
         Each model: Trit's default against the best other runtime, then every runtime and setting. In the tables,
         each value carries its place among the other runtimes and Trit's default (a tie shares the place):
         <span class="place p1">1st</span> in heavy ink, <span class="place p4">4th or worse</span> muted. Trit's
-        other settings show where they would stand.
+        other settings show where they would stand. Each runtime ran three rounds: a time is their median, and the
+        whisker on its bar spans the lowest to the highest round.
       </p>
     </section>
 
     {
       benches.map((b, i) => {
-        const slowest = Math.max(...b.runs.map((r) => r.ms));
+        const slowest = Math.max(...b.runs.map((r) => r.ms_hi));
         const [best, golds] = modelWinner(b.runs, speechMetrics);
         const summary = summaryOf(b.runs);
 
@@ -234,10 +235,7 @@ const cells = (r: Run) => [
                           {r.default ? <span class="tag">default</span> : null}
                           <span>{r.precision}</span>
                         </th>
-                        <td class="time">
-                          <span class="bar" style={`--w:${(r.ms / slowest).toFixed(3)}`} aria-hidden="true" />
-                          <span class="ms">{ms(r.ms)}</span>
-                        </td>
+                        <TimeCell ms={r.ms} lo={r.ms_lo} hi={r.ms_hi} rounds={r.rounds} slowest={slowest} />
                         {cells(r).map((text, c) => {
                           const n = place(b.runs, speechMetrics[c], r);
                           return (
@@ -284,7 +282,7 @@ const cells = (r: Run) => [
           <tbody>
             {
               cleanup.map((r) => {
-                const slowest = Math.max(...cleanup.map((x) => x.ms));
+                const slowest = Math.max(...cleanup.map((x) => x.ms_hi));
                 const texts = [`${(1000 / r.ms).toFixed(1)}/s`, `${r.wer.toFixed(2)} %`, `${r.exact} / ${r.cases}`];
                 return (
                   <tr class:list={{ trit: r.trit, default: r.default }}>
@@ -293,10 +291,7 @@ const cells = (r: Run) => [
                       {r.default ? <span class="tag">default</span> : null}
                       <span>{r.precision}</span>
                     </th>
-                    <td class="time">
-                      <span class="bar" style={`--w:${(r.ms / slowest).toFixed(3)}`} aria-hidden="true" />
-                      <span class="ms">{ms(r.ms)}</span>
-                    </td>
+                    <TimeCell ms={r.ms} lo={r.ms_lo} hi={r.ms_hi} rounds={r.rounds} slowest={slowest} />
                     {texts.map((text, c) => {
                       const n = place(cleanup, cleanupMetrics[c], r);
                       return (
@@ -569,24 +564,7 @@ const cells = (r: Run) => [
     }
   }
 
-  .bar {
-    display: block;
-    height: 8px;
-    margin: 6px 0 8px;
-    background: var(--muted);
-    opacity: 0.55;
-    transform: scaleX(var(--w));
-    transform-origin: left center;
-  }
-  .trit .bar {
-    background: var(--accent);
-    opacity: 1;
-  }
-  .ms {
-    font-variant-numeric: tabular-nums;
-  }
-  .trit th,
-  .trit .ms {
+  .trit th {
     color: var(--accent-text);
   }
   .report {

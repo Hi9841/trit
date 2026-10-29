@@ -1,6 +1,6 @@
 """S1-mini (transcript cleanup) on different runtimes: the same prompts, scored the same way.
 
-usage: uv run --no-project --python 3.12 python bench/cleanup_runtimes.py ENGINE|all [...] [--list]
+usage: uv run --no-project --python 3.12 python bench/cleanup_runtimes.py ENGINE|all [...] [--rounds N] [--list]
 
 Run from the repository root. Inputs: the 56 sentences of bench/corpus.txt and
 bench/tech-corpus.txt as a raw transcript (lowercase, no punctuation but
@@ -8,7 +8,8 @@ apostrophes), plus the six examples of the S1-mini model card. The target
 is the written sentence. Every runtime gets the exact prompt the model was
 trained on, greedy decoding, and one warm-up call. Formatted WER counts
 casing and punctuation (words split on spaces); `exact` counts outputs equal
-to the target. Results append to target/runtimes/cleanup.jsonl.
+to the target. --rounds N runs the list N times, as in runtimes.py. Results
+append to target/runtimes/cleanup.jsonl.
 """
 
 import json
@@ -153,7 +154,8 @@ def child(name):
     times.sort()
     result = {"engine": name, "runtime": runtime, "precision": precision, "cases": len(times),
               "wer": round(100 * errors / words, 2), "errors": errors, "words": words, "exact": exact,
-              "median_ms": round(times[len(times) // 2], 1), "date": time.strftime("%Y-%m-%d")}
+              "median_ms": round(times[len(times) // 2], 1), "date": time.strftime("%Y-%m-%d"),
+              "campaign": os.environ.get("BENCH_CAMPAIGN")}
     with open(OUT / "cleanup.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(result) + "\n")
     print(f"  formatted WER {result['wer']:.2f} % ({errors} / {words}), exact {exact}/{len(times)}, "
@@ -170,25 +172,37 @@ def main():
         for name, (runtime, precision, _, _) in ENGINES.items():
             print(f"{name}: {runtime}, {precision}")
         return
+    rounds = 1
+    if "--rounds" in args:
+        i = args.index("--rounds")
+        rounds = int(args[i + 1])
+        del args[i: i + 2]
     names = list(ENGINES) if args == ["all"] else args
     for name in names:
         if name not in ENGINES:
             sys.exit(f"unknown engine {name}; run with --list")
-    for name in names:
-        print(f"== {name}", flush=True)
-        packages = ENGINES[name][2]
-        command = ["uv", "run", "--no-project", "--python", "3.12", "--quiet"]
-        for package in packages:
-            command += ["--with", package]
-        if packages == LLAMA:
-            command += ENV["llama"]
-        elif any(p.startswith("torch") for p in packages):
-            command += ENV["torch"]
-        command += ["python", __file__, name, "--child"]
-        code = subprocess.run(command, cwd=ROOT, check=False).returncode
-        if code:
-            print(f"  failed with exit code {code}", flush=True)
+    os.environ.setdefault("BENCH_CAMPAIGN", time.strftime("%Y-%m-%dT%H:%M"))
+    for k in range(rounds):
+        shift = k * len(names) // rounds
+        for name in names[shift:] + names[:shift]:
+            print(f"== {name} (round {k + 1} of {rounds})", flush=True)
+            run(name)
 
+
+def run(name: str) -> None:
+    """One engine in its own process and uv environment."""
+    packages = ENGINES[name][2]
+    command = ["uv", "run", "--no-project", "--python", "3.12", "--quiet"]
+    for package in packages:
+        command += ["--with", package]
+    if packages == LLAMA:
+        command += ENV["llama"]
+    elif any(p.startswith("torch") for p in packages):
+        command += ENV["torch"]
+    command += ["python", __file__, name, "--child"]
+    code = subprocess.run(command, cwd=ROOT, check=False).returncode
+    if code:
+        print(f"  failed with exit code {code}", flush=True)
 
 if __name__ == "__main__":
     main()
