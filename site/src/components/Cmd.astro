@@ -1,16 +1,27 @@
 ---
-// A shell command in a terminal line, with a copy button. Without JavaScript
-// the button is hidden and the command is plain, selectable text.
+// Shell commands, one a line, with a copy button that copies them all.
+// Without JavaScript the button is hidden and the commands are plain,
+// selectable text.
 interface Props {
+  /** One command, or several on their own lines. */
   command: string;
 }
 
 const { command } = Astro.props;
+const lines = command.split("\n");
 ---
 
-<div class="cmd">
-  <span class="prompt" aria-hidden="true">$</span>
-  <code>{command}</code>
+<div class:list={["cmd", { multi: lines.length > 1 }]}>
+  <code
+    >{
+      lines.map((line) => (
+        <span class="line">
+          <span class="prompt" aria-hidden="true">$</span>
+          {line.split(" ").map((word, k) => (k ? [" ", <span class="word">{word}</span>] : <span class="word">{word}</span>))}
+        </span>
+      ))
+    }</code
+  >
   <button class="copy" type="button" data-copy={command} aria-label="Copy command">
     <svg class="icon copy-icon" viewBox="0 0 16 16" aria-hidden="true">
       <rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.5"></rect>
@@ -20,7 +31,7 @@ const { command } = Astro.props;
       <path d="M3 8.5 L6.5 12 L13 4.5"></path>
     </svg>
   </button>
-  <span class="status" role="status"></span>
+  <span class="status sr" role="status"></span>
 </div>
 
 <script>
@@ -53,31 +64,53 @@ const { command } = Astro.props;
 </script>
 
 <style>
+  /* One box for one or several commands. A line too long for the box wraps
+     between words, indented past the prompt; the button copies it unwrapped. */
   .cmd {
     display: flex;
-    align-items: center;
+    align-items: start;
     gap: 12px;
-    height: 48px;
-    padding: 0 6px 0 16px;
+    min-height: 48px;
+    padding: 6px 6px 6px 16px;
     border: 1px solid var(--rule);
     border-radius: 6px;
     background: var(--tint);
     font-family: var(--mono);
     font-size: 14.5px;
   }
+  .multi {
+    padding-block: 10px;
+  }
   .prompt {
-    flex: none;
+    margin-right: 1ch;
     color: var(--muted);
     user-select: none;
   }
   code {
     flex: 1;
     min-width: 0;
+    align-self: center;
     overflow-x: auto;
     font: inherit;
     color: var(--ink);
-    white-space: nowrap;
+    white-space: normal;
     scrollbar-width: none;
+  }
+  .line {
+    display: block;
+    padding-block: 4px;
+    padding-left: 2ch;
+    text-indent: -2ch;
+    line-height: 1.5;
+  }
+  /* A command wraps only between words, never at a hyphen inside one. */
+  .word {
+    white-space: nowrap;
+  }
+  @media (max-width: 600px) {
+    .multi {
+      font-size: 13px;
+    }
   }
   .copy {
     display: grid;
@@ -130,14 +163,6 @@ const { command } = Astro.props;
     opacity: 1;
     transform: none;
     filter: none;
-  }
-  .status {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
   }
   /* Without JavaScript the button would do nothing. */
   :global(html:not(.js)) .copy {

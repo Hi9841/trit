@@ -1,0 +1,95 @@
+---
+// One section of README.md on its own page, with the index of every docs
+// page and the pages before and after it.
+import Base from "../../layouts/Base.astro";
+import Header from "../../components/Header.astro";
+import Footer from "../../components/Footer.astro";
+import DocsBody from "../../components/DocsBody.astro";
+import { docPages, ordered, README, summaryOf, type DocPage } from "../../lib/docs";
+import { render } from "../../lib/markdown";
+import { updatedOf } from "../../lib/repo";
+
+export function getStaticPaths() {
+  return docPages.map((doc) => ({ params: { id: doc.id }, props: { doc } }));
+}
+
+interface Props {
+  doc: DocPage;
+}
+
+const { doc } = Astro.props;
+const updated = updatedOf(["site/src/pages/docs/[id].astro", README]);
+const html = await render(doc.body, README, 1);
+
+const at = ordered.indexOf(doc);
+const before = ordered[at - 1];
+const after = ordered[at + 1];
+---
+
+<Base title={`${doc.title} · Trit docs`} description={summaryOf(doc.body)} updated={updated}>
+  <Header />
+  <main id="content">
+    <DocsBody current={doc.href}>
+      <h1 class="display l">{doc.title}</h1>
+      <Fragment set:html={html} />
+      <nav class="turn" aria-label="Previous and next page">
+        {
+          before && (
+            <a class="before" href={before.href}>
+              <span>Previous</span>
+              {before.title}
+            </a>
+          )
+        }
+        {
+          after && (
+            <a class="after" href={after.href}>
+              <span>Next</span>
+              {after.title}
+            </a>
+          )
+        }
+      </nav>
+    </DocsBody>
+  </main>
+  <Footer updated={updated} />
+</Base>
+
+<style>
+  h1 {
+    max-width: none;
+    margin-bottom: 40px;
+  }
+  /* The pages before and after: two links on one hairline, the next on the right. */
+  .turn {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    max-width: none;
+    margin-top: 96px;
+    padding-top: 20px;
+    border-top: 1px solid var(--rule);
+  }
+  .turn a {
+    display: grid;
+    gap: 4px;
+    padding-block: 4px;
+    font-size: 19px;
+    font-weight: 500;
+    text-decoration: none;
+  }
+  .turn span {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+  }
+  .after {
+    grid-column: 2;
+    text-align: right;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .turn a:hover {
+      color: var(--accent-text);
+    }
+  }
+</style>

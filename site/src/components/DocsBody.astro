@@ -1,0 +1,205 @@
+---
+// The frame of every docs page: the index of the pages on the left (on a
+// phone, a menu bar that names the page), the page's text on the right.
+import { groups } from "../lib/docs";
+
+interface Props {
+  /** The href of the page being read. */
+  current: string;
+}
+
+const { current } = Astro.props;
+const title = groups.flatMap((g) => g.pages).find((p) => p.href === current)?.title ?? "Docs";
+---
+
+<div class="grid body">
+  <nav class="index" aria-label="Docs">
+    {
+      groups.map((g) => (
+        <>
+          <p class="label">{g.name}</p>
+          <ol>
+            {g.pages.map((p) => (
+              <li>
+                <a href={p.href} aria-current={p.href === current ? "page" : undefined}>
+                  {p.title}
+                </a>
+              </li>
+            ))}
+          </ol>
+        </>
+      ))
+    }
+  </nav>
+  <details class="index-phone">
+    <summary>{title}</summary>
+    {
+      groups.map((g) => (
+        <>
+          <p class="label">{g.name}</p>
+          <ol>
+            {g.pages.map((p) => (
+              <li>
+                <a href={p.href} aria-current={p.href === current ? "page" : undefined}>
+                  {p.title}
+                </a>
+              </li>
+            ))}
+          </ol>
+        </>
+      ))
+    }
+  </details>
+  <div class="prose">
+    <slot />
+  </div>
+</div>
+
+<style>
+  .body {
+    align-items: start;
+    margin-top: 96px;
+  }
+  .index {
+    grid-column: 1 / span 3;
+    position: sticky;
+    top: 24px;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+  }
+  /* Group names of the index, in sentence case. */
+  .label {
+    margin: 0 0 12px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+  }
+  ol + .label {
+    margin-top: 32px;
+  }
+  ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .index ol {
+    border-left: 1px solid var(--rule);
+  }
+  .index a {
+    display: block;
+    margin-left: -1px;
+    padding: 4px 0 4px 16px;
+    border-left: 2px solid transparent;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--muted);
+    text-decoration: none;
+    transition:
+      color 150ms ease,
+      border-color 150ms ease;
+  }
+  .index a[aria-current] {
+    border-left-color: var(--accent);
+    color: var(--ink);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    a:hover {
+      color: var(--ink);
+    }
+  }
+  .index-phone {
+    display: none;
+  }
+
+  /* Code and tables use nine columns; text keeps its measure inside them. */
+  .prose {
+    grid-column: 4 / -1;
+    min-width: 0;
+  }
+  .prose > :global(h2:first-child) {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  /* Tablets and phones: the index is a menu bar that stays on top and names
+     the page being read. */
+  @media (max-width: 900px) {
+    .body {
+      margin-top: 64px;
+    }
+    .index {
+      display: none;
+    }
+    .index-phone {
+      display: block;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      grid-column: 1 / -1;
+      margin: 0 calc(var(--margin) * -1) 40px;
+      padding: 0 var(--margin);
+      border-bottom: 1px solid var(--rule);
+      background: var(--paper);
+    }
+    .index-phone[open] {
+      max-height: 100vh;
+      max-height: 100svh;
+      overflow-y: auto;
+    }
+    summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 48px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      list-style: none;
+    }
+    summary::-webkit-details-marker {
+      display: none;
+    }
+    summary::after {
+      content: "";
+      flex: none;
+      width: 8px;
+      height: 8px;
+      margin-right: 4px;
+      border-right: 1.5px solid currentColor;
+      border-bottom: 1.5px solid currentColor;
+      transform: translateY(-2px) rotate(45deg);
+      transition: transform 150ms var(--ease-out);
+    }
+    details[open] summary::after {
+      transform: translateY(2px) rotate(225deg);
+    }
+    .index-phone ol {
+      padding-bottom: 16px;
+      columns: 2;
+      column-gap: 24px;
+    }
+    .index-phone a {
+      display: block;
+      padding: 8px 0;
+      font-size: 15px;
+      color: var(--muted);
+      text-decoration: none;
+    }
+    .index-phone a[aria-current] {
+      color: var(--ink);
+    }
+    .prose {
+      grid-column: 1 / -1;
+    }
+    /* Headings land below the menu bar, not under it. */
+    .prose :global(:is(h2, h3)) {
+      scroll-margin-top: 64px;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    summary::after {
+      transition: none;
+    }
+  }
+</style>

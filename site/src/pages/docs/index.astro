@@ -1,0 +1,72 @@
+---
+import Base from "../../layouts/Base.astro";
+import Header from "../../components/Header.astro";
+import PageHead from "../../components/PageHead.astro";
+import Footer from "../../components/Footer.astro";
+import Cmd from "../../components/Cmd.astro";
+import DocsBody from "../../components/DocsBody.astro";
+import { anchorMap, landing, landingHref, README } from "../../lib/docs";
+import { render } from "../../lib/markdown";
+import { links } from "../../lib/links";
+import { readRepo, updatedOf } from "../../lib/repo";
+import { idle, plugs } from "../../lib/sketch";
+
+const updated = updatedOf(["site/src/pages/docs/index.astro", README, "Cargo.toml"]);
+
+// The introduction of the README, then "Start here": the table that sends
+// each task to its page.
+const parts = await Promise.all(landing.map(async (s, k) => ({ ...s, html: await render(s.body, README), k })));
+
+const version = /^version = "([^"]+)"/m.exec(readRepo("Cargo.toml"))?.[1] ?? "";
+---
+
+<Base
+  title="Docs · Trit"
+  description="How to use Trit, speech to text and text to speech on the CPU: the trit command line, the Rust crate, the C ABI, and bindings for Python, C#, Node and Bun. Models, languages, cleanup, precision and limits."
+  updated={updated}
+>
+  <Header />
+  <main id="content">
+    <PageHead title="Use it from any language." art={plugs} scene="plugs">
+      <p>
+        Trit turns 16 kHz speech into text, and text into speech, on the CPU. Call it from the <code>trit</code>{" "}
+        command, the Rust crate, or a C ABI with bindings for Python, C#, Node and Bun. These pages are the{" "}
+        <a href={`${links.repo}/blob/main/README.md`}>README.md</a> of Trit {version}, a section a page.
+      </p>
+      <Cmd command="cargo install --git https://github.com/Hi9841/trit" />
+    </PageHead>
+
+    <DocsBody current={landingHref}>
+      {
+        parts.map((p) => (
+          <>
+            <h2 id={p.id}>{p.title}</h2>
+            <Fragment set:html={p.html} />
+          </>
+        ))
+      }
+      <figure class="art end" data-scene="idle">
+        <Fragment set:html={idle} />
+        <figcaption>Workers spin for 3 ms after a step, then sleep. An idle engine uses no CPU.</figcaption>
+      </figure>
+    </DocsBody>
+  </main>
+  <Footer updated={updated} />
+</Base>
+
+<!-- A link to a README heading on the old one-page docs (/docs/#rust) goes to its page now. -->
+<script is:inline define:vars={{ anchorMap }}>
+  const target = anchorMap[decodeURIComponent(location.hash.slice(1))];
+
+  if (target && target.split("#")[0] !== location.pathname) location.replace(target);
+</script>
+
+<style>
+  .end {
+    max-width: 640px;
+    margin-top: 64px;
+  }
+  .end figcaption {
+    text-wrap: balance;
+  }
+</style>

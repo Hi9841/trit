@@ -1,7 +1,7 @@
 // What the site says about Trit, in one place: the homepage, the FAQ,
 // llms.txt and the structured data all read it, so they say the same thing.
 // The numbers come from the benchmark and the catalog (data.ts).
-import { benchDate, benches, catalog, DEFAULT_MODEL, lead, redux, sizeOf } from "./data";
+import { benchDate, benches, catalog, DEFAULT_MODEL, isSpeechToText, lead, redux, sizeOf } from "./data";
 import { links } from "./links";
 import { readRepo } from "./repo";
 
@@ -39,7 +39,7 @@ export const stat = {
   date: benchDate,
 };
 
-const speechModels = catalog.filter((m) => m.kind !== "cleanup").length;
+const speechModels = catalog.filter(isSpeechToText).length;
 const speed = Math.round(redux.trit.speed);
 
 /** An answer without its code marks, for structured data. */
@@ -68,16 +68,17 @@ export const faq: Answer[] = [
   {
     q: "How do I install it?",
     a:
-      "Build it from source with Rust: run `cargo build --release` in the `trit` folder. Download a model with the " +
-      "Hugging Face CLI (`trit models` prints the command), then run `trit transcribe take.wav`. There is no " +
-      "prebuilt download of Trit yet.",
+      "With Rust: `cargo install --git https://github.com/Hi9841/trit` builds the `trit` command and puts it on " +
+      "your PATH. Download a model with the Hugging Face CLI (`trit models` prints the command), then run " +
+      "`trit transcribe take.wav`. There is no prebuilt download of Trit yet.",
     more: { label: "Docs", href: links.docs },
   },
   {
     q: "Which models can it run?",
     a:
-      `${speechModels} speech checkpoints from Hugging Face, as published: Parakeet TDT and CTC, Canary, Whisper ` +
-      "and Moonshine. Other checkpoints of the same families load the same way. S1-mini cleans transcripts. " +
+      `${speechModels} speech-to-text checkpoints from Hugging Face, as published: Parakeet TDT, RNNT and CTC, ` +
+      "Canary, Whisper, Moonshine, Qwen3-ASR and wav2vec 2.0. Other checkpoints of the same families load the " +
+      "same way. S1-mini cleans transcripts, and Kokoro-82M and MMS-TTS speak text. " +
       `The default is Parakeet Redux, ${sizeOf(DEFAULT_MODEL)} on disk.`,
     more: { label: "Models", href: links.models },
   },

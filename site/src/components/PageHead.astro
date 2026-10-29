@@ -1,20 +1,19 @@
 ---
 // The first screen of an inner page: what it is on the left, a drawing on the
-// right. A page with no drawing gives its words more of the row.
+// right. A page with no drawing gives its words more of the row. The heading
+// starts the page: no label above it.
 interface Props {
-  label: string;
   title: string;
   art?: string;
   /** The drawing's story in scenes.ts. */
   scene?: "measure" | "shelf" | "plugs";
 }
 
-const { label, title, art, scene } = Astro.props;
+const { title, art, scene } = Astro.props;
 ---
 
 <section class:list={["grid head", { plain: !art }]}>
   <div class="words">
-    <p class="label">{label}</p>
     <h1 class="display l">{title}</h1>
     <div class="lead"><slot /></div>
   </div>
@@ -32,16 +31,13 @@ const { label, title, art, scene } = Astro.props;
      of the words column. */
   .head {
     align-items: end;
-    padding-top: 64px;
+    padding-top: 96px;
   }
   .words {
     grid-column: 1 / span 5;
   }
   .plain .words {
     grid-column: 1 / span 8;
-  }
-  .label {
-    margin-bottom: 24px;
   }
   .lead {
     margin: 32px 0 0;
@@ -57,6 +53,9 @@ const { label, title, art, scene } = Astro.props;
     margin-right: calc(var(--margin) * -1);
   }
   @media (max-width: 900px) {
+    .head {
+      padding-top: 64px;
+    }
     .words,
     .plain .words,
     .art {

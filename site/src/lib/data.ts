@@ -13,24 +13,49 @@ export interface Model {
 
 const FAMILY = new Map([
   ["parakeet_tdt", "Parakeet"],
+  ["parakeet_rnnt", "Parakeet"],
   ["parakeet_ctc", "Parakeet"],
   ["canary", "Canary"],
   ["whisper", "Whisper"],
   ["moonshine", "Moonshine"],
+  ["qwen3_asr", "Qwen3-ASR"],
+  ["wav2vec2", "wav2vec 2.0"],
   ["cleanup", "Transcript cleanup"],
+  ["kokoro", "Text to speech"],
+  ["g2p", "Text to speech"],
+  ["vits", "Text to speech"],
 ]);
 
+/** The kinds that do not turn speech into text. */
+const NOT_SPEECH = new Set(["cleanup", "kokoro", "g2p", "vits"]);
+
 export const familyOf = (kind: string) => FAMILY.get(kind) ?? kind;
+
+export const isSpeechToText = (m: Model) => !NOT_SPEECH.has(m.kind);
 
 export const languagesOf = (languages: string) =>
   languages === "en" ? "English" : /^\d+$/.test(languages) ? `${languages} languages` : languages;
 
+const CATALOG_RS = readRepo("src/catalog.rs");
+
+// The files Trit reads for each kind, from the match in `Known::files`; `_`
+// is the arm for every other kind.
+const FILES_FN = CATALOG_RS.split("pub fn files")[1]?.split("pub fn download_command")[0] ?? "";
+
+const FILES = new Map(
+  [...FILES_FN.matchAll(/(?:"(\w+)"|_) => &\[([^\]]*)\]/g)].map((arm) => [
+    arm[1] ?? "_",
+    [...arm[2]!.matchAll(/"([^"]+)"/g)].map((file) => file[1]!),
+  ]),
+);
+
+/** The command `trit models` prints: every file named, no glob. */
 export const downloadCommand = (m: Model) =>
-  `hf download ${m.repo} --include "*.json" model.safetensors --local-dir models/${m.name}`;
+  `hf download ${m.repo} ${(FILES.get(m.kind) ?? FILES.get("_") ?? []).join(" ")} --local-dir models/${m.name}`;
 
 const KNOWN = /Known \{\s*name: "([^"]+)",\s*repo: "([^"]+)",\s*kind: "([^"]+)",\s*languages: "([^"]+)",\s*mb: (\d+),/g;
 
-export const catalog: Model[] = [...readRepo("src/catalog.rs").matchAll(KNOWN)].map((m) => ({
+export const catalog: Model[] = [...CATALOG_RS.matchAll(KNOWN)].map((m) => ({
   name: m[1],
   repo: m[2],
   kind: m[3],

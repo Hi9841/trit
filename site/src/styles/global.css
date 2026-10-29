@@ -95,10 +95,85 @@ body {
 a {
   color: inherit;
 }
+/* The parts the browser draws carry the palette too. */
+::selection {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: var(--ink);
+}
+:root {
+  accent-color: var(--accent);
+  caret-color: var(--accent);
+}
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
+/* The first stop of the keyboard: hidden until it has focus. */
+.skip {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+  padding: 10px 14px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 15px;
+  font-weight: 500;
+  text-decoration: none;
+  transform: translateY(-200%);
+}
+.skip:focus-visible {
+  transform: none;
+}
+
+/* Text for screen readers only. */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The one button of the site, for links and buttons alike: an ink frame that
+   fills on hover. `.quiet` is for a button repeated down a list. */
+.button {
+  display: inline-block;
+  padding: 14px 18px;
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  background: none;
+  color: var(--ink);
+  font: 500 15px/1 var(--sans);
+  text-decoration: none;
+  cursor: pointer;
+  transition:
+    transform 160ms var(--ease-out),
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
+}
+.button:active {
+  transform: scale(0.97);
+}
+.button.quiet {
+  padding: 12px 14px;
+  border-color: var(--rule);
+  font-size: 14px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .button:hover {
+    background: var(--ink);
+    color: var(--paper);
+  }
+  .button.quiet:hover {
+    background: none;
+    border-color: var(--ink);
+    color: var(--ink);
+  }
+}
+
 /* A theme switch is instant: nothing eases between palettes. */
 .theme-switching *,
 .theme-switching *::before,
@@ -115,12 +190,15 @@ a {
   margin-inline: auto;
 }
 
-/* ---------- type ---------- */
+/* ---------- type ----------
+   Roles: display (the page's one heading), lead (the paragraph under it),
+   body, and small text for captions and notes. Tracking stops at -0.04em. */
 h1,
 h2 {
   text-wrap: balance;
 }
-p {
+p,
+li {
   text-wrap: pretty;
 }
 p,
@@ -131,31 +209,23 @@ figcaption {
 .display {
   margin: 0;
   font-weight: var(--display-weight);
-  line-height: 0.92;
-  letter-spacing: -0.055em;
+  line-height: 0.94;
+  letter-spacing: -0.04em;
 }
 .display .line {
   display: block;
 }
 .display.xl {
-  font-size: clamp(3.25rem, 8.2vw, 7.75rem);
+  font-size: clamp(2.75rem, 6.4vw, 6rem);
 }
 .display.l {
   font-size: clamp(2.75rem, 5.4vw, 5.25rem);
 }
-.label {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
 .lead {
   margin: 0 0 32px;
   max-width: 40ch;
-  font-size: 20px;
-  line-height: 1.5;
+  font-size: 19px;
+  line-height: 1.55;
 }
 figure {
   margin: 0;
@@ -511,6 +581,15 @@ figcaption {
   margin: 24px 0 32px;
   overflow-x: auto;
 }
+/* A table wider than its column scrolls; a shadow on the edge it can scroll
+   to says so. The paper covers each shadow at the end it has reached. */
+.data-table {
+  background:
+    linear-gradient(to right, var(--paper) 40%, transparent) left / 32px 100% no-repeat local,
+    linear-gradient(to left, var(--paper) 40%, transparent) right / 32px 100% no-repeat local,
+    linear-gradient(to right, var(--rule), transparent) left / 12px 100% no-repeat scroll,
+    linear-gradient(to left, var(--rule), transparent) right / 12px 100% no-repeat scroll;
+}
 .prose table,
 .data-table table {
   width: 100%;
@@ -581,6 +660,8 @@ figcaption {
     max-width: none;
     padding: 0;
     border: 0;
+    /* A long repository name breaks rather than widen the page. */
+    overflow-wrap: anywhere;
   }
   .prose td + td {
     margin-top: 4px;

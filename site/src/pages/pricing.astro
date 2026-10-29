@@ -13,6 +13,8 @@ const models = [
   ["Parakeet, Canary", "CC-BY-4.0"],
   ["Whisper, Moonshine", "MIT"],
   ["S1-mini", "Apache-2.0 with a naming clause"],
+  ["Kokoro-82M, the G2P fallback", "Apache-2.0"],
+  ["MMS-TTS", "CC-BY-NC-4.0 (noncommercial)"],
 ];
 ---
 
@@ -22,8 +24,8 @@ const models = [
   updated={updated}
 >
   <Header />
-  <main>
-    <PageHead label="Pricing" title="Free for noncommercial use.">
+  <main id="content">
+    <PageHead title="Free for noncommercial use.">
       <p>
         Trit is under the PolyForm Noncommercial License 1.0.0. There is no account, no key and no paid tier of the
         engine: every model, binding and precision is in the free one.
@@ -40,7 +42,7 @@ const models = [
           <li>Research and experiments for public knowledge.</li>
           <li>Charities, schools, public research, health and safety organizations, and government bodies.</li>
         </ul>
-        <a class="act" href={links.license}>Read the license</a>
+        <a class="act button" href={links.license}>Read the license</a>
       </article>
       <article class="plan">
         <h2>Commercial</h2>
@@ -53,7 +55,7 @@ const models = [
           <li>On X: <a href={links.x}>@hi9841s</a></li>
           <li>On GitHub: <a href={links.issues}>open an issue</a></li>
         </ul>
-        <a class="act" href={links.x}>Ask on X</a>
+        <a class="act button" href={links.x}>Ask on X</a>
       </article>
     </section>
 
@@ -118,7 +120,7 @@ const models = [
     font-size: clamp(40px, 4vw, 56px);
     font-weight: var(--display-weight);
     line-height: 1;
-    letter-spacing: -0.05em;
+    letter-spacing: -0.04em;
   }
   .plan p {
     margin-top: 0;
@@ -138,25 +140,6 @@ const models = [
   .act {
     align-self: start;
     margin-top: auto;
-    padding: 14px 18px;
-    border: 1px solid var(--ink);
-    border-radius: 2px;
-    font-size: 15px;
-    font-weight: 500;
-    text-decoration: none;
-    transition:
-      transform 160ms var(--ease-out),
-      background-color 150ms ease,
-      color 150ms ease;
-  }
-  .act:active {
-    transform: scale(0.97);
-  }
-  @media (hover: hover) and (pointer: fine) {
-    .act:hover {
-      background: var(--ink);
-      color: var(--paper);
-    }
   }
   .models {
     margin-top: 128px;

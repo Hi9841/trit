@@ -11,7 +11,7 @@ const rows = [
   { what: "Faster than realtime", trit: x(trit.speed), them: x(transformers.speed) },
   { what: "Memory after all clips", trit: megabytes(trit.run_mb), them: megabytes(transformers.run_mb) },
   { what: "Word error rate, LibriSpeech clean", trit: wer(trit.clean), them: wer(transformers.clean) },
-  { what: "Needs", trit: "No Python", them: "Python, PyTorch" },
+  { what: "Needs", trit: "No Python", them: "Python, PyTorch", words: true },
 ];
 ---
 
@@ -28,25 +28,25 @@ const rows = [
       rows.map((r) => (
         <tr>
           <th scope="row">{r.what}</th>
-          <td class="us">{r.trit}</td>
-          <td>{r.them}</td>
+          <td class:list={["us", { words: r.words }]}>{r.trit}</td>
+          <td class:list={{ words: r.words }}>{r.them}</td>
         </tr>
       ))
     }
   </tbody>
 </table>
-<p class="src">Same Parakeet Redux weights, same clips, same computer.</p>
 
 <style>
-  /* A three-column ledger: Trit's column in ink and larger, the baseline muted. */
+  /* A three-column ledger: Trit's column in ink and larger, the baseline muted.
+     Numbers are set in mono; words stay in the text face. */
   .versus {
     width: 100%;
     border-collapse: collapse;
     font-size: 14px;
   }
   thead th {
-    padding: 0 0 12px;
-    font-size: 11px;
+    padding: 0 0 12px 16px;
+    font-size: 12px;
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -75,22 +75,32 @@ const rows = [
     letter-spacing: -0.02em;
     color: var(--ink);
   }
+  td.words {
+    font-family: var(--sans);
+    letter-spacing: 0;
+  }
+  /* The narrowest phones: smaller figures, and the words may wrap. */
+  @media (max-width: 400px) {
+    td,
+    thead th {
+      padding-left: 10px;
+    }
+    td.us {
+      font-size: 18px;
+    }
+    td.words:not(.us) {
+      white-space: normal;
+    }
+  }
+  @media (max-width: 360px) {
+    td.words {
+      white-space: normal;
+    }
+  }
   tbody tr {
     border-top: 1px solid var(--rule);
   }
   tbody tr:last-child {
     border-bottom: 1px solid var(--rule);
-  }
-  .sr {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-  }
-  .src {
-    margin: 16px 0 0;
-    font-size: 13px;
-    color: var(--muted);
   }
 </style>

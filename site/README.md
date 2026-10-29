@@ -34,7 +34,10 @@ The one-page site of Trit, built with Astro. Run the commands in `site/`.
     the summary table, cleanup, method and reproduce sections of
     `docs/engine-comparison.md`. It leaves out the report's sections 4 and 5
     and the summary's numbered notes: they describe an earlier Trit.
-  - `/docs`: `README.md`, all sections except Contents and Performance.
+  - `/docs`: `README.md`, a page for each `## ` section (`src/lib/docs.ts`).
+    `/docs/` has the introduction and Start here; Contents and Performance
+    are left out. A README link to a heading goes to that heading's page,
+    and an old `/docs/#heading` link moves to it.
 - The home page's numbers come from the same files; update them by hand.
 - Colours are tokens in `src/styles/global.css`: a light and a dark palette.
   The header button stores the choice in `localStorage`; without a choice the

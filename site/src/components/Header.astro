@@ -3,7 +3,9 @@ import { links } from "../lib/links";
 import { mark } from "../lib/sketch";
 
 const here = Astro.url.pathname.replace(/\/$/, "");
-const page = (href: string) => (here === href ? "page" : undefined);
+
+// The page, or a page under it (/docs/rust under /docs).
+const page = (href: string) => (here === href || here.startsWith(`${href}/`) ? "page" : undefined);
 ---
 
 <header class="grid top">
@@ -13,14 +15,15 @@ const page = (href: string) => (here === href ? "page" : undefined);
     <a href={links.benchmarks} aria-current={page(links.benchmarks)}>Benchmarks</a>
     <a href={links.compare} aria-current={page(links.compare)}>Compare</a>
     <a href={links.docs} aria-current={page(links.docs)}>Docs</a>
+    <a href={links.pricing} aria-current={page(links.pricing)}>Pricing</a>
     <a href={links.repo}>GitHub</a>
-    <button class="theme" type="button" aria-label="Dark theme" aria-pressed="false">
-      <svg viewBox="0 0 20 20" aria-hidden="true">
-        <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.5"></circle>
-        <path d="M10 2.5 A7.5 7.5 0 0 1 10 17.5 Z" fill="currentColor"></path>
-      </svg>
-    </button>
   </nav>
+  <button class="theme" type="button" aria-label="Dark theme" aria-pressed="false">
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <circle cx="10" cy="10" r="7.5" fill="none" stroke="currentColor" stroke-width="1.5"></circle>
+      <path d="M10 2.5 A7.5 7.5 0 0 1 10 17.5 Z" fill="currentColor"></path>
+    </svg>
+  </button>
 </header>
 
 <script>
@@ -63,10 +66,15 @@ const page = (href: string) => (here === href ? "page" : undefined);
     width: 20px;
     height: 24px;
   }
+  /* Desktop: the links and the theme button end the row. Phones: the mark
+     and the theme button on the first row, every link on the second. */
   .nav {
-    grid-column: 5 / -1;
+    grid-column: 4 / -1;
+    grid-row: 1;
     justify-self: end;
     display: flex;
+    /* Room for the theme button, which shares the last column. */
+    padding-right: 62px;
     align-items: center;
     gap: 32px;
     font-size: 13px;
@@ -87,11 +95,14 @@ const page = (href: string) => (here === href ? "page" : undefined);
     text-underline-offset: 8px;
   }
   .theme {
+    grid-column: -2 / -1;
+    grid-row: 1;
+    justify-self: end;
     display: grid;
     place-items: center;
     width: 40px;
     height: 40px;
-    margin: -8px -10px -8px -8px;
+    margin: -8px -10px -8px 0;
     padding: 0;
     border: 0;
     background: none;
@@ -120,12 +131,30 @@ const page = (href: string) => (here === href ? "page" : undefined);
     }
   }
   @media (max-width: 600px) {
-    .nav {
-      gap: 20px;
+    .top {
+      row-gap: 20px;
+      padding-bottom: 24px;
     }
-    /* Models, Benchmarks and Compare stay in the footer. */
-    .nav a:nth-child(-n + 3) {
-      display: none;
+    .nav {
+      grid-column: 1 / -1;
+      grid-row: 2;
+      justify-self: stretch;
+      /* Six links in two rows of three, so none is left alone on a row. */
+      display: grid;
+      grid-template-columns: repeat(3, auto);
+      justify-content: start;
+      gap: 0 24px;
+      padding-right: 0;
+      font-size: 14px;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+    /* Each link a tall tap target. */
+    .nav a {
+      padding-block: 10px;
+    }
+    .nav a[aria-current="page"] {
+      text-underline-offset: 6px;
     }
   }
 </style>

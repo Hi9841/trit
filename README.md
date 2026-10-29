@@ -33,7 +33,7 @@ into a program, and the rules to change Trit.
 git clone https://github.com/Hi9841/trit
 cd trit
 cargo build --release                       # the CLI and the Rust library
-hf download moondream/parakeet-redux --include "*.json" model.safetensors --local-dir models/parakeet-redux
+hf download moondream/parakeet-redux config.json tokenizer.json model.safetensors --local-dir models/parakeet-redux
 ./target/release/trit transcribe take.wav
 ```
 
@@ -43,6 +43,9 @@ files: 1 transcribed, 0 failed, 6.0 s of audio in 0.04 s (172x realtime)
 results[1]{file,seconds,ms,text}:
   take.wav,6.0,35,"Restart the Kubernetes pod, then check the PostgreSQL logs."
 ```
+
+To get only the command line, without the source folder:
+`cargo install --git https://github.com/Hi9841/trit` puts `trit` on your PATH.
 
 `trit doctor` tells you what is missing and how to fix it. `trit models`
 lists the models, where they are on this computer, and the download command
@@ -357,7 +360,7 @@ checkpoints of the same families load the same way.
 Download only the files Trit reads:
 
 ```powershell
-hf download openai/whisper-large-v3-turbo --include "*.json" model.safetensors --local-dir models/whisper-large-v3-turbo
+hf download openai/whisper-large-v3-turbo config.json generation_config.json tokenizer.json model.safetensors --local-dir models/whisper-large-v3-turbo
 ```
 
 Trit looks for a model in this order:

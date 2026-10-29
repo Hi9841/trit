@@ -22,13 +22,13 @@ const ticks = Array.from({ length: AXIS / 100 + 1 }, (_, i) => i * 100);
 <section class="race" aria-label="Runtime race against a blink">
   <div class="head">
     <div class="clock">0<small>ms</small></div>
-    <button class="run" type="button">Run</button>
+    <button class="run button" type="button">Run</button>
   </div>
   <div class="chart" style={`--b0:${BLINK[0]! / AXIS};--b1:${BLINK[1]! / AXIS}`}>
     <div class="band" aria-hidden="true"><span>A blink, {BLINK[0]}–{BLINK[1]} ms</span></div>
     {
       lanes.map((l) => (
-        <div class:list={["lane", { trit: l.trit }]} data-ms={l.ms}>
+        <div class:list={["lane", { trit: l.trit, far: l.ms / AXIS > 0.7 }]} data-ms={l.ms}>
           <div class="who">
             {l.who}
             <span>{l.how}</span>
@@ -47,7 +47,8 @@ const ticks = Array.from({ length: AXIS / 100 + 1 }, (_, i) => i * 100);
     </div>
   </div>
   <p class="note">
-    Parakeet Redux, median of 200 LibriSpeech clips, Ryzen 9 7950X3D. Played 10× slower. Blink duration: 100–400 ms.
+    Parakeet Redux, median of 200 LibriSpeech clips, Ryzen 9 7950X3D. Played 10× slower. Ternary: each weight
+    is −1, 0 or +1.
   </p>
 </section>
 
@@ -135,7 +136,7 @@ const ticks = Array.from({ length: AXIS / 100 + 1 }, (_, i) => i * 100);
     font-family: var(--mono);
     font-size: 64px;
     line-height: 0.9;
-    letter-spacing: -0.05em;
+    letter-spacing: -0.04em;
     font-variant-numeric: tabular-nums;
   }
   .clock small {
@@ -146,28 +147,6 @@ const ticks = Array.from({ length: AXIS / 100 + 1 }, (_, i) => i * 100);
   }
   :global(html:not(.js)) .head {
     display: none;
-  }
-  .run {
-    padding: 15px 18px;
-    border: 1px solid var(--ink);
-    border-radius: 2px;
-    background: none;
-    color: var(--ink);
-    font: 500 14px/1 var(--sans);
-    cursor: pointer;
-    transition:
-      transform 160ms var(--ease-out),
-      background-color 150ms ease,
-      color 150ms ease;
-  }
-  .run:active {
-    transform: scale(0.97);
-  }
-  @media (hover: hover) and (pointer: fine) {
-    .run:hover {
-      background: var(--ink);
-      color: var(--paper);
-    }
   }
 
   /* The names on the left; the tracks share one axis on the right, and the
@@ -191,7 +170,7 @@ const ticks = Array.from({ length: AXIS / 100 + 1 }, (_, i) => i * 100);
     position: absolute;
     top: 8px;
     left: 8px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -249,6 +228,11 @@ const ticks = Array.from({ length: AXIS / 100 + 1 }, (_, i) => i * 100);
   .trit .t {
     color: var(--accent-text);
   }
+  /* Near the end of the axis the time sits above the bar's end, inside the chart. */
+  .far .t {
+    margin: -27px 0 0;
+    transform: translateX(-100%);
+  }
   :global(html.js) .lane:not(.done) .t {
     opacity: 0;
   }
@@ -258,7 +242,7 @@ const ticks = Array.from({ length: AXIS / 100 + 1 }, (_, i) => i * 100);
     margin-left: var(--names);
     border-top: 1px solid var(--rule);
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: 12px;
     color: var(--muted);
   }
   .ticks span {

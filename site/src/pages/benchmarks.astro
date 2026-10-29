@@ -42,6 +42,17 @@ const method = await render(part("3-how-the-numbers-were-measured")?.body ?? "",
 const reproduce = await render(part("6-reproduce")?.body ?? "", REPORT);
 
 const leads = benches.map(lead);
+
+// Where Trit's default is not first in memory after all clips: the verdict
+// says so next to the win.
+const MEMORY = speechMetrics[5]!;
+
+const heavier = new Intl.ListFormat("en", { type: "conjunction" }).format(
+  benches
+    .filter((b) => place(b.runs, MEMORY, b.runs.find((r) => r.default) ?? b.runs[0]!) !== 1)
+    .map((b) => b.name),
+);
+
 const medals = medalTable();
 const winner = medals[0];
 const times = (x: number) => `${x.toFixed(1)}×`;
@@ -110,14 +121,14 @@ const cells = (r: Run) => [
   updated={updated}
 >
   <Header />
-  <main>
-    <PageHead label="Benchmarks" title="Same model, different runtime." art={measure} scene="measure">
+  <main id="content">
+    <PageHead title="Same model, different runtime." art={measure} scene="measure">
       <p>
         Each model runs on every CPU runtime that supports it, so the runtime is the only difference. Same clips,
         same computer, same scorer.
       </p>
       <p class="meta">AMD Ryzen 9 7950X3D · Windows 11 · CPU only · {benchDate}</p>
-      <a class="raw" href={links.rawResults}>Download the raw results</a>
+      <a class="raw button" href={links.rawResults}>Download the raw results</a>
     </PageHead>
 
     <section class="grid verdict">
@@ -126,6 +137,14 @@ const cells = (r: Run) => [
           times(Math.max(...leads))
         } ahead of the next one, with the fewest errors over all clips, or a tie, for every model.
       </p>
+      {
+        heavier && (
+          <p class="limit">
+            It is not always the smallest: for {heavier}, another runtime holds less memory after all clips. All on
+            one computer, x86-64 Windows.
+          </p>
+        )
+      }
     </section>
 
     <section class="grid overall" aria-labelledby="overall">
@@ -149,10 +168,9 @@ const cells = (r: Run) => [
           </thead>
           <tbody>
             {
-              medals.map((m, i) => (
+              medals.map((m) => (
                 <tr class:list={{ trit: m.trit }}>
                   <th scope="row">
-                    {i === 0 ? <span class="crown">Winner</span> : null}
                     {m.runtime}
                   </th>
                   <td class="num">{m.gold}</td>
@@ -168,11 +186,10 @@ const cells = (r: Run) => [
 
     <section class="grid legend-row">
       <p class="legend">
-        Each model: Trit's default against the best other runtime, then every runtime and setting. In the tables,
-        each value carries its place among the other runtimes and Trit's default (a tie shares the place):
+        In the tables, each value carries its place (a tie shares it):{" "}
         <span class="place p1">1st</span> in heavy ink, <span class="place p4">4th or worse</span> muted. Trit's
-        other settings show where they would stand. Each runtime ran three rounds: a time is their median, and the
-        whisker on its bar spans the lowest to the highest round.
+        other settings show where they would stand. A time is the median of three rounds; its whisker spans the
+        lowest to the highest round.
       </p>
     </section>
 
@@ -335,30 +352,18 @@ const cells = (r: Run) => [
     color: var(--muted);
   }
   .raw {
-    display: inline-block;
     margin-top: 8px;
-    padding: 14px 18px;
-    border: 1px solid var(--ink);
-    border-radius: 2px;
-    font-size: 15px;
-    font-weight: 500;
-    text-decoration: none;
-    transition:
-      transform 160ms var(--ease-out),
-      background-color 150ms ease,
-      color 150ms ease;
-  }
-  .raw:active {
-    transform: scale(0.97);
-  }
-  @media (hover: hover) and (pointer: fine) {
-    .raw:hover {
-      background: var(--ink);
-      color: var(--paper);
-    }
   }
   .verdict {
     margin-top: 128px;
+  }
+  .verdict .limit {
+    grid-column: 1 / span 7;
+    margin-top: 20px;
+    font-size: 17px;
+    line-height: 1.55;
+    letter-spacing: 0;
+    color: var(--muted);
   }
   .verdict p {
     grid-column: 1 / span 8;
@@ -373,18 +378,6 @@ const cells = (r: Run) => [
   .medals {
     min-width: 0;
   }
-  .crown {
-    display: inline-block;
-    margin-right: 10px;
-    padding: 1px 8px;
-    border-radius: 2px;
-    background: var(--accent);
-    color: var(--paper);
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-  }
   .legend-row {
     margin-top: 64px;
   }
@@ -392,7 +385,7 @@ const cells = (r: Run) => [
     grid-column: 4 / -1;
     margin: 0;
     font-size: 15px;
-    line-height: 2;
+    line-height: 1.6;
     color: var(--muted);
   }
   .model {
@@ -442,6 +435,11 @@ const cells = (r: Run) => [
   td.num {
     white-space: nowrap;
   }
+  /* Long column names wrap, so the table fits its column without a scroll. */
+  thead th {
+    white-space: normal;
+    vertical-align: bottom;
+  }
   tbody th {
     padding: 12px 16px 12px 0;
     border-bottom: 1px solid var(--rule);
@@ -453,7 +451,7 @@ const cells = (r: Run) => [
     color: var(--ink);
     white-space: normal;
   }
-  tbody th span:not(.tag):not(.crown) {
+  tbody th span:not(.tag) {
     display: block;
     font-weight: 400;
     font-size: 14px;
@@ -481,7 +479,7 @@ const cells = (r: Run) => [
     font-variant-numeric: tabular-nums;
   }
   .place sup {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.02em;
     color: var(--muted);
@@ -493,14 +491,10 @@ const cells = (r: Run) => [
   .p4 {
     color: var(--muted);
   }
-  /* Trit's default row: a tint and one accent rule. */
-  .default td,
+  /* Trit's default row: a tint, and its tag. The time cell is TimeCell's. */
+  .default :global(td),
   .default th {
     background: var(--tint);
-  }
-  .default th {
-    box-shadow: inset 2px 0 0 var(--accent);
-    padding-left: 12px;
   }
 
   /* The summary: three facts, Trit's default large, the best other below. */
@@ -515,7 +509,7 @@ const cells = (r: Run) => [
     border-top: 1px solid var(--rule);
   }
   .vs dt {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;

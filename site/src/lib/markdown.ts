@@ -2,28 +2,22 @@
 // ids, links rewritten for the site, and code highlighted for both themes.
 import { Marked, type Token, type Tokens } from "marked";
 import { codeToHtml, createCssVariablesTheme } from "shiki";
+import { docsHref, landingHref, README } from "./docs";
 import { links } from "./links";
 import { blobUrl } from "./repo";
+import { slug } from "./sections";
 
-// The ids GitHub gives headings, so "#c-and-c" in the README still works.
-export function slug(text: string) {
-  return text
-    .toLowerCase()
-    .replace(/<[^>]+>/g, "")
-    .replace(/[^\p{L}\p{N}\s-]/gu, "")
-    .trim()
-    .replace(/\s/g, "-");
-}
+export { sections, slug, type Section } from "./sections";
 
-// Pages on this site that replace a file of the repository.
-const onSite = new Map([
-  ["docs/engine-comparison.md", links.benchmarks],
-  ["README.md", links.docs],
-]);
+// Pages on this site that replace a file of the repository. The README is
+// many pages: a link to one of its headings goes to the page of that heading.
+const onSite = new Map([["docs/engine-comparison.md", links.benchmarks]]);
 
 // A link relative to `from` (a file of the repository) becomes a site page,
 // a GitHub URL, or stays as it is.
 function rewrite(href: string, from: string) {
+  if (href.startsWith("#") && from === README) return docsHref(href.slice(1));
+
   if (/^([a-z]+:|#|\/)/i.test(href)) return href;
   const [path, hash = ""] = href.split("#");
   const parts = from.split("/").slice(0, -1);
@@ -34,6 +28,9 @@ function rewrite(href: string, from: string) {
   }
 
   const target = parts.join("/");
+
+  if (target === README) return hash ? docsHref(hash) : landingHref;
+
   const page = onSite.get(target);
 
   if (page) return hash ? `${page}#${hash}` : page;
@@ -87,12 +84,15 @@ async function highlight(tokens: Token[]) {
   }
 }
 
-// Renders `md`, a part of the file `from`, to HTML.
-export async function render(md: string, from: string) {
+// Renders `md`, a part of the file `from`, to HTML. `raise` moves headings
+// up that many levels (a section on its own page: `###` becomes h2).
+export async function render(md: string, from: string, raise = 0) {
   const marked = new Marked({
     renderer: {
       heading({ tokens, depth, text }) {
-        return `<h${depth} id="${slug(text)}">${this.parser.parseInline(tokens)}</h${depth}>\n`;
+        const level = Math.max(2, depth - raise);
+
+        return `<h${level} id="${slug(text)}">${this.parser.parseInline(tokens)}</h${level}>\n`;
       },
       // Short code and flags stay on one line; long code may wrap between words.
       codespan({ text }) {
@@ -150,31 +150,4 @@ export async function render(md: string, from: string) {
   await highlight(tokens);
 
   return marked.parser(tokens);
-}
-
-export interface Section {
-  title: string;
-  id: string;
-  body: string;
-}
-
-// Splits a file at its `## ` headings. The part before the first one has the title "".
-export function sections(md: string): Section[] {
-  const out: Section[] = [];
-  let current: Section = { title: "", id: "", body: "" };
-
-  for (const line of md.split(/\r?\n/)) {
-    const h2 = /^## (.+)$/.exec(line);
-
-    if (h2) {
-      out.push(current);
-      current = { title: h2[1].trim(), id: slug(h2[1]), body: "" };
-    } else {
-      current.body += `${line}\n`;
-    }
-  }
-
-  out.push(current);
-
-  return out;
 }
