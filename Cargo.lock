@@ -700,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "trit"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytemuck",
  "libmimalloc-sys",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "trit-ffi"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mimalloc",
  "serde_json",
