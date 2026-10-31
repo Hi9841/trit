@@ -43,6 +43,7 @@ MODELS = {
     "parakeet-redux": "Parakeet Redux 0.6B, 1.58-bit (TDT's model)",
     "parakeet-v2": "Parakeet TDT 0.6B v2",
     "parakeet-v3": "Parakeet TDT 0.6B v3",
+    "parakeet-ultra": "Parakeet Ultra 0.6B (v3 trained further)",
     "whisper-large-v3": "Whisper large-v3",
     "whisper-turbo": "Whisper large-v3-turbo",
     "distil-large-v3.5": "Distil-Whisper large-v3.5",
@@ -67,6 +68,7 @@ ENGINES = {
     "onnx-parakeet-v3": ("parakeet-v3", "ONNX Runtime", "fp32", "cpu", ["onnx-asr[cpu,hub]"], lambda: load_onnx('nemo-parakeet-tdt-0.6b-v3', None, 'cpu')),
     "hf-parakeet-v3": ("parakeet-v3", "Transformers (PyTorch)", "fp32", "cpu", ["transformers", "safetensors", "librosa", *TORCH], lambda: load_hf_parakeet(MODELS_DIR / "parakeet-tdt-0.6b-v3")),
     "onnx-parakeet-v3-int8": ("parakeet-v3", "ONNX Runtime", "int8", "cpu", ["onnx-asr[cpu,hub]"], lambda: load_onnx('nemo-parakeet-tdt-0.6b-v3', 'int8', 'cpu')),
+    "hf-parakeet-ultra": ("parakeet-ultra", "Transformers (PyTorch)", "fp32", "cpu", ["transformers", "safetensors", "librosa", *TORCH], lambda: load_hf_parakeet(MODELS_DIR / "parakeet-ultra")),
     "sherpa-parakeet-v3-int8": ("parakeet-v3", "sherpa-onnx", "int8", "cpu", ["sherpa-onnx"], lambda: load_sherpa_tdt('sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8')),
 
     "fw-large-v3": ("whisper-large-v3", "faster-whisper (CTranslate2)", "int8", "cpu", ["faster-whisper"], lambda: load_fw('Systran/faster-whisper-large-v3', 'cpu')),
@@ -116,6 +118,7 @@ TRIT = {
     # model: (`trit models` name, what auto gives)
     "parakeet-redux": (None, "ternary + f16"),
     "parakeet-v3": ("parakeet-tdt-0.6b-v3", "int8"),
+    "parakeet-ultra": ("parakeet-ultra", "int8"),
     "whisper-base.en": ("whisper-base.en", "f16"),
     "whisper-tiny": ("whisper-tiny", "f16"),
     "moonshine-tiny": ("moonshine-tiny", "f16"),

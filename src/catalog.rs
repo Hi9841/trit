@@ -35,6 +35,13 @@ pub const CATALOG: &[Known] = &[
         mb: 2508,
     },
     Known {
+        name: "parakeet-ultra",
+        repo: "moondream/parakeet-ultra",
+        kind: "parakeet_tdt",
+        languages: "25 European",
+        mb: 1255,
+    },
+    Known {
         name: "parakeet-rnnt-0.6b",
         repo: "nvidia/parakeet-rnnt-0.6b",
         kind: "parakeet_rnnt",

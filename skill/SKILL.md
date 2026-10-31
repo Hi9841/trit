@@ -121,6 +121,7 @@ examples:
 |---|---|---|---:|
 | parakeet-redux | parakeet_tdt | 25 European | 178 |
 | parakeet-tdt-0.6b-v3 | parakeet_tdt | 25 European | 2508 |
+| parakeet-ultra | parakeet_tdt | 25 European | 1255 |
 | parakeet-rnnt-0.6b | parakeet_rnnt | en | 2467 |
 | parakeet-ctc-0.6b | parakeet_ctc | en | 2436 |
 | canary-1b-v2 | canary | 25 European | 3916 |
