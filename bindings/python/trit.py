@@ -1,7 +1,8 @@
-"""Trit for Python: speech to text and text to speech on the CPU, through the C ABI of trit-ffi.
+"""Trit for Python: speech to text on the CPU or the GPU and text to speech on the CPU, through the C ABI of trit-ffi.
 
     import trit
     engine = trit.Trit("whisper-large-v3-turbo")   # a folder, a `trit models` name, or None
+    print(trit.gpu_info())                          # "NVIDIA GeForce RTX 4090, Dx12, f16"
     print(engine.kind)                              # "whisper"
     print(engine.transcribe_wav("take.wav"))        # the model detects the language
     print(engine.transcribe(samples, language="de"))  # 16 kHz mono floats: list, array, or numpy
@@ -36,7 +37,16 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Self
 
-__all__ = ["Cleaner", "Segment", "Trit", "TritError", "Voice", "release_memory", "version"]
+__all__ = [
+    "Cleaner",
+    "Segment",
+    "Trit",
+    "TritError",
+    "Voice",
+    "gpu_info",
+    "release_memory",
+    "version",
+]
 
 _NAMES = {"win32": "trit_ffi.dll", "darwin": "libtrit_ffi.dylib"}
 
@@ -63,7 +73,8 @@ def _library() -> ctypes.CDLL:
     signatures = {
         "trit_version": ([], text),
         "trit_last_error": ([], text),
-        "trit_load_with": ([text, text], ptr),
+        "trit_load_ex": ([text, text, text], ptr),
+        "trit_gpu_info": ([], ptr),
         "trit_release_memory": ([], None),
         "trit_kind": ([ptr], text),
         "trit_free": ([ptr], None),
@@ -71,7 +82,7 @@ def _library() -> ctypes.CDLL:
         "trit_transcribe_wav_json": ([ptr, text, text], ptr),
         "trit_free_text": ([ptr], None),
         "trit_set_dictionary": ([ptr, text], ctypes.c_int),
-        "trit_cleaner_load_with": ([text, text], ptr),
+        "trit_cleaner_load_ex": ([text, text, text], ptr),
         "trit_cleaner_free": ([ptr], None),
         "trit_clean": ([ptr, text, text, text, text], ptr),
         "trit_voice_load": ([text], ptr),
@@ -102,6 +113,12 @@ def release_memory() -> None:
     """Return memory freed by earlier calls to the system; call it when the
     app goes idle, not between calls."""
     _lib.trit_release_memory()
+
+
+def gpu_info() -> str:
+    """The GPU adapter, for example "NVIDIA GeForce RTX 4090, Dx12, f16".
+    Raises TritError when the computer has no adapter."""
+    return _text(_lib.trit_gpu_info())
 
 
 def _error() -> TritError:
@@ -154,12 +171,19 @@ def _samples(samples):
 class Trit:
     """One loaded speech model. Load once and keep it."""
 
-    def __init__(self, model: str | os.PathLike | None = None, precision: str | None = None):
+    def __init__(
+        self,
+        model: str | os.PathLike | None = None,
+        precision: str | None = None,
+        device: str = "cpu",
+    ):
         """`model`: a folder, a `trit models` name, or None for the default.
         `precision`: "auto" (None; int8 for layers 384 wide and more, f16
-        below), "int8" (least memory), "f16", or "f32" (as the reference)."""
+        below), "int8" (least memory), "f16", or "f32" (as the reference).
+        `device`: "cpu" (default), "gpu", or "auto". "auto" uses the GPU, or
+        the CPU when the computer has no adapter. TRIT_DEVICE overrides it."""
         self._handle = None
-        handle = _lib.trit_load_with(_arg(model), _arg(precision))
+        handle = _lib.trit_load_ex(_arg(model), _arg(precision), _arg(device))
         if not handle:
             raise _error()
         self._handle = handle
@@ -238,10 +262,15 @@ class Trit:
 class Cleaner:
     """Superwhisper S1-mini: a raw transcript to clean written English."""
 
-    def __init__(self, model: str | os.PathLike | None = None, precision: str | None = None):
-        """`precision` as for `Trit`."""
+    def __init__(
+        self,
+        model: str | os.PathLike | None = None,
+        precision: str | None = None,
+        device: str = "cpu",
+    ):
+        """`precision` and `device` as for `Trit`."""
         self._handle = None
-        handle = _lib.trit_cleaner_load_with(_arg(model), _arg(precision))
+        handle = _lib.trit_cleaner_load_ex(_arg(model), _arg(precision), _arg(device))
         if not handle:
             raise _error()
         self._handle = handle

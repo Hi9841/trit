@@ -1,6 +1,8 @@
-//! Trit: speech to text and text to speech on the CPU, with its own kernels
-//! and no inference library, no Python, and no GPU. It runs the models in
-//! `models/`; the files are read as published on Hugging Face.
+//! Trit: speech to text and text to speech with its own kernels and no
+//! inference library, and no Python. It runs the models in `models/`; the
+//! files are read as published on Hugging Face. The `gpu` feature runs the
+//! Parakeet encoder, and the dense and ternary products of the speech
+//! models, on a GPU. Without that feature every product runs on the CPU.
 //!
 //! ```no_run
 //! let model = trit::find_model(None).expect("model not found");
@@ -15,6 +17,8 @@ mod cpu;
 mod audio;
 mod catalog;
 mod cleanup;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod models;
 mod text;
 mod tts;
@@ -119,10 +123,110 @@ pub struct Segment {
     pub text: String,
 }
 
-/// How to load a model. `LoadOptions::default()` is `Precision::Auto`.
+/// Where the dense and ternary products run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Device {
+    /// Every product runs on the CPU.
+    #[default]
+    Cpu,
+    /// Dense and ternary products run on the GPU. The load fails when the
+    /// machine has no adapter, or when Trit was built without `gpu`.
+    Gpu,
+    /// The GPU when it is available, otherwise the CPU.
+    Auto,
+}
+
+impl Device {
+    pub const NAMES: [&str; 3] = ["cpu", "gpu", "auto"];
+
+    pub fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "cpu" => Ok(Self::Cpu),
+            "gpu" => Ok(Self::Gpu),
+            "auto" => Ok(Self::Auto),
+            other => Err(format!(
+                "device `{other}`: use one of {}",
+                Self::NAMES.join(", ")
+            )),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+}
+
+/// `TRIT_DEVICE=cpu|gpu|auto` overrides `requested`. `Gpu` fails when there
+/// is no adapter. Without the `gpu` feature, `Gpu` fails and `Auto` is the CPU.
+/// The result is `Cpu` or `Gpu`.
+pub(crate) fn active_device(requested: Device) -> Result<Device, String> {
+    let requested = match std::env::var("TRIT_DEVICE") {
+        Ok(name) if !name.is_empty() => Device::parse(&name.to_ascii_lowercase())?,
+        _ => requested,
+    };
+    match requested {
+        Device::Cpu => Ok(Device::Cpu),
+        Device::Gpu => {
+            #[cfg(feature = "gpu")]
+            {
+                gpu::Gpu::get().map(|_| Device::Gpu)
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                Err("trit was built without the gpu feature".into())
+            }
+        }
+        Device::Auto => {
+            #[cfg(feature = "gpu")]
+            {
+                Ok(if gpu::Gpu::get().is_ok() {
+                    Device::Gpu
+                } else {
+                    Device::Cpu
+                })
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                Ok(Device::Cpu)
+            }
+        }
+    }
+}
+
+/// The GPU adapter, for example `NVIDIA GeForce RTX 4090, Dx12, f16`.
+/// Without the `gpu` feature, or with no adapter, this is the reason.
+pub fn gpu_path() -> String {
+    #[cfg(feature = "gpu")]
+    {
+        match gpu::Gpu::get() {
+            Ok(gpu) => gpu.path().to_string(),
+            Err(error) => error,
+        }
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        "trit was built without the gpu feature".into()
+    }
+}
+
+/// Bytes of weight buffers resident on the GPU. 0 before a GPU load.
+pub fn gpu_weight_bytes() -> u64 {
+    #[cfg(feature = "gpu")]
+    {
+        gpu::weight_bytes()
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        0
+    }
+}
+
+/// How to load a model. `LoadOptions::default()` is `Precision::Auto` on the CPU.
+/// `TRIT_DEVICE` overrides `device` at load.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LoadOptions {
     pub precision: Precision,
+    pub device: Device,
 }
 
 /// One loaded model. Load once and keep it. `Trit` is `Send + Sync`; calls
@@ -147,10 +251,10 @@ impl Trit {
         Self::load_with(model_dir, &LoadOptions::default())
     }
 
-    /// `load`, with a choice of precision.
+    /// `load`, with a choice of precision and device.
     pub fn load_with(model_dir: &Path, options: &LoadOptions) -> Result<Self, String> {
         Ok(Self {
-            model: models::Model::load(model_dir, options.precision)?,
+            model: models::Model::load(model_dir, options.precision, options.device)?,
         })
     }
 

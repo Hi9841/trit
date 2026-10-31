@@ -1,6 +1,6 @@
 [package]
 name = "trit"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 description = "Speech to text and text to speech on the CPU: Parakeet, Whisper, Canary, Moonshine, Kokoro, and MMS-TTS, with no Python and no inference library"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -16,6 +16,10 @@ members = [".", "ffi"]
 name = "trit"
 path = "src/main.rs"
 
+[features]
+# Matrix products and the Parakeet encoder on a GPU (Vulkan, DX12, or Metal). Off by default.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
 [dependencies]
 parking_lot = "0.12"
 serde_json = "1.0"
@@ -24,9 +28,16 @@ miniz_oxide = "0.8"
 mimalloc = { version = "0.1", default-features = false }
 # mi_collect: give the memory freed while loading back to the system.
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
+wgpu = { version = "30", optional = true, default-features = false, features = ["dx12", "vulkan", "metal", "wgsl"] }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+# Exactly 0.62.0. wgpu-hal wants ^0.62 (crates.io serves 0.62.2) and
+# gpu-allocator 0.28 accepts <=0.62, which Cargo reads as <=0.62.0.
+# Those two ranges meet only at 0.62.0. Any other patch splits the
+# ID3D12 types and the DX12 backend does not compile.
+windows = { version = "=0.62.0", features = [
     "Win32_Foundation",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

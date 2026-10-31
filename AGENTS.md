@@ -68,6 +68,7 @@ Do the steps in order. Each step ends on a check.
 |---|---|
 | Build CLI and library | `cargo build --release --workspace` |
 | Lint | `cargo clippy --workspace --all-targets --release -- -D warnings` |
+| Build with the GPU | `cargo build --release --workspace --features trit/gpu`; lint it with the same `--features trit/gpu` |
 | Format | `cargo fmt --all` |
 | Smoke test | `./target/release/trit doctor`, then `./target/release/trit transcribe <file.wav> --model <name>` |
 | Skill current? | `./target/release/trit skill --check skill/SKILL.md` |
@@ -111,6 +112,7 @@ There are no unit tests. The checks are:
 - `src/models/families/`: one file per checkpoint family; it reads the files and wires the parts. `layers.rs` holds the shared layers (norms, GELU, rotary, attention with grouped heads, conv columns); `config.rs` reads `config.json`.
 - Precision: `Tensors::open_with(path, precision)` carries the `Precision` of `LoadOptions`; `Dense::load` and `Dense::table` (token tables) read it. Load every dense layer through them, so all four precisions work.
 - `src/cpu/`: kernels. `fgemm.rs` is the one f32 GEMM; its weights are f32 or f16 (`Weight`). `kernels.rs` is ternary (Redux), `int8.rs` int8 (VNNI 512, VNNI 256, AVX2). Each has AVX-512, AVX2, and scalar paths; `TRIT_ISA=scalar|avx2|avxvnni` forces a path. All paths must give the same text. Worker threads allocate nothing per task (thread-local scratch, `Buf` pool on the caller): allocator heaps of workers keep what they free.
+- `src/gpu/`: matrix products and the Parakeet encoder on the GPU through wgpu (DX12, Vulkan, Metal). The `gpu` feature builds them; `trit-ffi` enables it. `auto` uses the CPU when the computer has no adapter, and a GPU error falls back to the CPU for that call. The shaders are `.wgsl` files read with `include_str!` (CI allows this in `src/gpu` only). Text must stay the same on `--device cpu` and in a build without `gpu`.
 - `src/audio/`, `src/text/`: frontends and tokenizers. `bpe.rs` encodes with hand-written pre-tokenizers (GPT-2 and Qwen); it matches Hugging Face `tokenizers` ids.
 - `src/main.rs`: the `trit` CLI. AXI rules: TOON on stdout, errors on stdout with a `help:` fix, exit 0/1/2, unknown flags fail with the valid list.
 - `ffi/`: `trit-ffi`, the C ABI. `include/trit.h` must match it by hand. Change both together, then the three bindings in `bindings/`, then the tables in README.md.

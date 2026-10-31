@@ -7,7 +7,7 @@
 use crate::cpu::{gemm::Dense, tensors::Tensors};
 use crate::models::config::Json;
 use crate::models::layers::{attention, linear, Gelu, Norm};
-use crate::Precision;
+use crate::{Device, Precision};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -149,7 +149,7 @@ impl Fallback {
         let text = std::fs::read_to_string(dir.join("config.json"))
             .map_err(|e| format!("cannot read {}: {e}", dir.join("config.json").display()))?;
         let c = Json::parse(&text)?;
-        let t = Tensors::open_dir(dir, Precision::F32)?;
+        let t = Tensors::open_dir(dir, Precision::F32, Device::Cpu)?;
         let d = c.num("d_model")?;
         let vocab = c.num("vocab_size")?;
         let positions = c.num("max_position_embeddings")?;

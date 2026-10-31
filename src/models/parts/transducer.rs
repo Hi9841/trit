@@ -6,7 +6,7 @@
 //! Apache-2.0 Hugging Face `ParakeetForTDT`.
 
 use super::dictionary::{Candidate, Check, Dictionary, CAPITAL_PRIOR};
-use super::fastconformer::{dense, Config};
+use super::fastconformer::{dense_host, Config};
 use crate::cpu::activation;
 use crate::cpu::buf::Buf;
 use crate::cpu::gemm::{Dense, Precision};
@@ -27,7 +27,7 @@ impl DecoderLayer {
     /// `name` (`.weight`, `.bias`) from the file.
     fn load(t: &Tensors, name: &str, out: usize, inp: usize) -> Result<Self, String> {
         if matches!(t.precision(), Precision::F32 | Precision::Int8) {
-            return Dense::load(t, &[(name, out)], inp).map(Self::Dense);
+            return Dense::load_cpu(t, &[(name, out)], inp).map(Self::Dense);
         }
         let weight = t.f16_bits(&format!("{name}.weight"), out * inp)?;
         let bias = t.f32_len(&format!("{name}.bias"), out)?;
@@ -133,7 +133,7 @@ impl Transducer {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            encoder_projector: dense(t, "encoder_projector", dh, c.hidden)?,
+            encoder_projector: dense_host(t, "encoder_projector", dh, c.hidden)?,
             embedding: match t.precision() {
                 Precision::Auto => Dense::new(
                     t.f32_len("decoder.embedding.weight", c.vocab * dh)?,

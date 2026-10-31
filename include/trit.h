@@ -52,8 +52,21 @@ Trit *trit_load(const char *model_dir);
  *   "int8": int8 everywhere (least memory; narrow models lose some accuracy)
  *   "f16":  f16 weights, f32 math
  *   "f32":  f32 weights, as the reference runtimes hold them (slowest)
- * NULL on failure, also for an unknown precision. */
+ * The device stays "cpu". NULL on failure, also for an unknown precision. */
 Trit *trit_load_with(const char *model_dir, const char *precision);
+
+/* trit_load_with with a device:
+ *   "cpu" or NULL: the processor (default)
+ *   "gpu":         the graphics card. The load fails when the computer has
+ *                  no adapter, or when the library was built without gpu
+ *   "auto":        the graphics card, or the processor when there is no adapter
+ * TRIT_DEVICE overrides the device. NULL on failure, also for an unknown device. */
+Trit *trit_load_ex(const char *model_dir, const char *precision, const char *device);
+
+/* The GPU adapter, for example "NVIDIA GeForce RTX 4090, Dx12, f16".
+ * NULL when there is no adapter. trit_last_error() then gives the reason.
+ * Free the text with trit_free_text(). */
+char *trit_gpu_info(void);
 
 /* Returns memory freed by earlier calls to the system. Call it when the app
  * goes idle (some seconds after the last transcript), not between calls. */
@@ -104,7 +117,7 @@ char *trit_transcribe_json(const Trit *engine, const float *samples, size_t coun
 /* trit_transcribe_json for a 16 kHz WAV file, as for trit_transcribe_wav. */
 char *trit_transcribe_wav_json(const Trit *engine, const char *path, const char *options);
 
-/* Frees text from the trit_transcribe and trit_clean functions.
+/* Frees text from the trit_transcribe, trit_clean, and trit_gpu_info functions.
  * NULL is a no-op. */
 void trit_free_text(char *text);
 
@@ -118,8 +131,13 @@ int trit_set_dictionary(const Trit *engine, const char *terms);
  * Face cache. NULL on failure. */
 TritCleaner *trit_cleaner_load(const char *model_dir);
 
-/* trit_cleaner_load with a precision, as for trit_load_with. */
+/* trit_cleaner_load with a precision, as for trit_load_with.
+ * The device stays "cpu". */
 TritCleaner *trit_cleaner_load_with(const char *model_dir, const char *precision);
+
+/* trit_cleaner_load_with with a device, as for trit_load_ex. */
+TritCleaner *trit_cleaner_load_ex(const char *model_dir, const char *precision,
+                                  const char *device);
 
 /* Frees a cleaner. NULL is a no-op. */
 void trit_cleaner_free(TritCleaner *cleaner);

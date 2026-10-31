@@ -14,7 +14,7 @@ const DESCRIPTION: &str = "Speech to text on the CPU, offline: Parakeet, Canary,
 const PREVIEW_CHARS: usize = 500;
 
 const TRANSCRIBE_HELP: &str = "\
-usage: trit transcribe <path>... [--model <dir>] [--language <code>] [--dictionary <file>] [--task <t>] [--timestamps] [--cleanup] [--precision <p>] [--beam <n>] [--format toon|json|text] [--full]
+usage: trit transcribe <path>... [--model <dir>] [--language <code>] [--dictionary <file>] [--task <t>] [--timestamps] [--cleanup] [--precision <p>] [--device <d>] [--beam <n>] [--format toon|json|text] [--full]
   <path>          a 16 kHz WAV file, or a folder: every .wav file in it and its subfolders
   --model <dir>   speech model folder or `trit models` name: Parakeet, Canary, Whisper, Moonshine (default: TRIT_MODEL, then the places `trit doctor` lists)
   --language <code>  spoken language, ISO 639-1 (en, de, ...); default: the model detects it
@@ -24,6 +24,7 @@ usage: trit transcribe <path>... [--model <dir>] [--language <code>] [--dictiona
   --cleanup       clean each transcript with S1-mini (see `trit clean --help`); ms then includes it
   --cleanup-model <dir>, --styling, --structure, --context  as for `trit clean`
   --precision     auto (default: int8 for layers 384 wide and more, f16 below), int8 (least memory), f16, f32 (as the reference runtimes)
+  --device        cpu (default), gpu, auto. auto uses the GPU, or the CPU when the computer has no adapter. TRIT_DEVICE overrides
   --beam <n>      beams for Whisper, Moonshine, and Canary (default: 5 for Whisper and Moonshine, 1 (greedy) for Canary; at most 16)
   --format        toon (default), json (full text, for programs), text (one transcript per line)
   --full          do not cut transcripts longer than 500 characters in a list of several files
@@ -31,10 +32,11 @@ examples:
   trit transcribe meeting.wav
   trit transcribe clips/ --format json
   trit transcribe take.wav --dictionary terms.txt --cleanup
-  trit transcribe interview.wav --model models/whisper-large-v3-turbo --language de";
+  trit transcribe interview.wav --model models/whisper-large-v3-turbo --language de
+  trit transcribe meeting.wav --device gpu";
 
 const CLEAN_HELP: &str = "\
-usage: trit clean <text>... [--model <dir>] [--styling <s>] [--structure <s>] [--context <c>] [--precision <p>] [--format toon|json|text]
+usage: trit clean <text>... [--model <dir>] [--styling <s>] [--structure <s>] [--context <c>] [--precision <p>] [--device <d>] [--format toon|json|text]
   Rewrites a raw transcript as written text with Superwhisper S1-mini (English): removes
   fillers, resolves self-corrections, adds punctuation and casing, writes numbers and addresses.
   <text>          the raw transcript; several arguments join with spaces
@@ -43,6 +45,7 @@ usage: trit clean <text>... [--model <dir>] [--styling <s>] [--structure <s>] [-
   --structure     prose (default), lists
   --context       general (default), email
   --precision     auto (default), int8, f16, f32; as for `trit transcribe`
+  --device        cpu (default), gpu, auto; as for `trit transcribe`. TRIT_DEVICE overrides
   --format        toon (default), json, text
 examples:
   trit clean \"so um send the report by friday no wait thursday\"
@@ -97,7 +100,7 @@ examples:
 
 const DOCTOR_HELP: &str = "\
 usage: trit doctor
-  Checks the model folder and the CPU path; prints the command that fixes each problem.
+  Checks the model folder, the CPU path, and the GPU. Prints the command that fixes each problem.
 examples:
   trit doctor";
 
@@ -266,7 +269,7 @@ const HOME_HELP: [&str; 7] = [
     "Run `trit clean \"<raw transcript>\"` to rewrite text as clean written English (S1-mini)",
     "Run `trit speak \"<text>\" --out speech.wav` to speak text (Kokoro: 28 English voices; MMS-TTS)",
     "Run `trit phonemes \"<text>\"` to see the phonemes Kokoro speaks for text",
-    "Run `trit doctor` to check the models and the CPU",
+    "Run `trit doctor` to check the models, the CPU, and the GPU",
 ];
 
 fn print_help(lines: &[String]) {
@@ -299,6 +302,7 @@ fn transcribe(args: &[String]) -> ExitCode {
             "--structure",
             "--context",
             "--precision",
+            "--device",
             "--beam",
             "--task",
         ],
@@ -624,14 +628,19 @@ fn style(parsed: &Parsed) -> Result<trit::Style, ExitCode> {
     Ok(style)
 }
 
-/// `--precision`, as load options.
+/// `--precision` and `--device`, as load options.
 fn load_options(parsed: &Parsed) -> Result<trit::LoadOptions, ExitCode> {
     let precision = match parsed.value("--precision") {
         Some(name) => trit::Precision::parse(name)
             .map_err(|e| usage_error(&e, "--precision auto (the default) fits most uses"))?,
         None => trit::Precision::Auto,
     };
-    Ok(trit::LoadOptions { precision })
+    let device = match parsed.value("--device") {
+        Some(name) => trit::Device::parse(name)
+            .map_err(|e| usage_error(&e, &format!("--device {}", trit::Device::NAMES.join("|"))))?,
+        None => trit::Device::Cpu,
+    };
+    Ok(trit::LoadOptions { precision, device })
 }
 
 fn load_cleaner(
@@ -670,6 +679,7 @@ fn clean(args: &[String]) -> ExitCode {
             "--context",
             "--format",
             "--precision",
+            "--device",
         ],
         &[],
     ) {
@@ -1013,6 +1023,7 @@ fn doctor(args: &[String]) -> ExitCode {
         trit::threads(trit::Spread::OneCache),
         trit::threads(trit::Spread::AllCores)
     );
+    println!("gpu: {}", trit::gpu_path());
     let candidates = trit::model_candidates();
     let model = trit::find_model(None);
     match &model {
@@ -1101,7 +1112,7 @@ fn skill_text() -> String {
     text.push_str("---\nname: trit\ndescription: Transcribe speech from WAV files to text on the CPU, offline, with the Trit engine and a Parakeet, Canary, Whisper, or Moonshine model, in any language the model speaks; clean a raw transcript with S1-mini; speak text into a WAV file with Kokoro (28 English voices) or MMS-TTS. Use when an agent must turn a recording into text or text into speech, or add speech to text or text to speech to an app in Rust, C, C++, Python, C#, Node, or Bun.\n---\n\n");
     text.push_str("# Trit\n\n");
     text.push_str(DESCRIPTION);
-    text.push_str(".\n\n## Commands\n\n");
+    text.push_str(". `--device gpu` or `--device auto` runs the matrix products on the GPU. `auto` uses the CPU when the computer has no adapter. Build with `--features gpu` for that path.\n\n## Commands\n\n");
     for line in HOME_HELP {
         text.push_str(&format!("- {}\n", line.trim_start_matches("Run ")));
     }

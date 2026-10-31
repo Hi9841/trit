@@ -1,7 +1,8 @@
-// Trit for Node and Bun: speech to text and text to speech on the CPU, through the C ABI of trit-ffi.
+// Trit for Node and Bun: speech to text on the CPU or the GPU and text to speech on the CPU, through the C ABI of trit-ffi.
 //
-//   import { Trit, Cleaner, Voice } from "./trit.mjs";
+//   import { Trit, Cleaner, Voice, gpuInfo } from "./trit.mjs";
 //   const engine = new Trit("whisper-large-v3-turbo");  // folder, `trit models` name, or null
+//   console.log(gpuInfo());                              // "NVIDIA GeForce RTX 4090, Dx12, f16"
 //   console.log(engine.kind);                            // "whisper"
 //   console.log(engine.transcribeWav("take.wav"));       // the model detects the language
 //   console.log(engine.transcribe(samples, "de"));       // Float32Array at 16 kHz mono
@@ -42,7 +43,8 @@ const SamplesFn = koffi.proto("int TritSamplesFn(const float *samples, size_t co
 const c = {
   version: lib.func("const char *trit_version(void)"),
   lastError: lib.func("const char *trit_last_error(void)"),
-  load: lib.func("void *trit_load_with(const char *model_dir, const char *precision)"),
+  load: lib.func("void *trit_load_ex(const char *model_dir, const char *precision, const char *device)"),
+  gpuInfo: lib.func("void *trit_gpu_info(void)"),
   releaseMemory: lib.func("void trit_release_memory(void)"),
   kind: lib.func("const char *trit_kind(void *engine)"),
   free: lib.func("void trit_free(void *engine)"),
@@ -50,7 +52,7 @@ const c = {
   transcribeWav: lib.func("void *trit_transcribe_wav_json(void *engine, const char *path, const char *options)"),
   freeText: lib.func("void trit_free_text(void *text)"),
   setDictionary: lib.func("int trit_set_dictionary(void *engine, const char *terms)"),
-  cleanerLoad: lib.func("void *trit_cleaner_load_with(const char *model_dir, const char *precision)"),
+  cleanerLoad: lib.func("void *trit_cleaner_load_ex(const char *model_dir, const char *precision, const char *device)"),
   cleanerFree: lib.func("void trit_cleaner_free(void *cleaner)"),
   clean: lib.func("void *trit_clean(void *cleaner, const char *text, const char *styling, const char *structure, const char *context)"),
   voiceLoad: lib.func("void *trit_voice_load(const char *model_dir)"),
@@ -77,6 +79,9 @@ function text(pointer) {
   }
 }
 
+/** The GPU adapter, for example "NVIDIA GeForce RTX 4090, Dx12, f16". Throws when the computer has no adapter. */
+export const gpuInfo = () => text(c.gpuInfo());
+
 /** The options JSON of trit_transcribe_json. */
 function options(language, { beam = 0, task = null, fallback = null } = {}, timestamps = false) {
   const json = { language, beam, timestamps };
@@ -99,11 +104,13 @@ export class Trit {
 
   /**
    * @param {string | null} model a folder, a `trit models` name, or null for the default.
-   * @param {{precision?: string}} options precision: "auto" (default; int8 for layers 384 wide and
+   * @param {{precision?: string, device?: string}} options precision: "auto" (default; int8 for layers 384 wide and
    *   more, f16 below), "int8" (least memory), "f16", or "f32" (as the reference).
+   *   device: "cpu" (default), "gpu", or "auto" (the GPU, or the CPU when the computer has no adapter).
+   *   TRIT_DEVICE overrides device.
    */
-  constructor(model = null, { precision = null } = {}) {
-    this.#handle = c.load(model, precision);
+  constructor(model = null, { precision = null, device = "cpu" } = {}) {
+    this.#handle = c.load(model, precision, device);
 
     if (!this.#handle) throw new TritError(c.lastError());
   }
@@ -184,9 +191,9 @@ export class Trit {
 export class Cleaner {
   #handle;
 
-  /** @param {{precision?: string}} options as for `Trit`. */
-  constructor(model = null, { precision = null } = {}) {
-    this.#handle = c.cleanerLoad(model, precision);
+  /** @param {{precision?: string, device?: string}} options as for `Trit`. */
+  constructor(model = null, { precision = null, device = "cpu" } = {}) {
+    this.#handle = c.cleanerLoad(model, precision, device);
 
     if (!this.#handle) throw new TritError(c.lastError());
   }

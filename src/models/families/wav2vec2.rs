@@ -9,7 +9,7 @@ use crate::audio;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
 use crate::models::config::Json;
 use crate::models::layers::{add_into, attention, conv_columns, linear, stacked, Gelu, Norm};
-use crate::Precision;
+use crate::{Device, Precision};
 use std::path::Path;
 
 /// Longest window per pass: attention grows with the square of the frames
@@ -137,9 +137,14 @@ pub struct Wav2Vec2 {
 }
 
 impl Wav2Vec2 {
-    pub fn load(dir: &Path, json: &Json, precision: Precision) -> Result<Self, String> {
+    pub fn load(
+        dir: &Path,
+        json: &Json,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
         let c = Config::parse(json)?;
-        let t = Tensors::open_dir(dir, precision)?;
+        let t = Tensors::open_dir(dir, precision, device)?;
         let p = "wav2vec2";
         let d = c.d;
         let mut convs = Vec::with_capacity(c.convs.len());

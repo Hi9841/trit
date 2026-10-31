@@ -5,6 +5,7 @@
 //! file into one buffer kept that memory in the process after load.
 
 use super::gemm::Precision;
+use crate::Device;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
@@ -17,6 +18,7 @@ pub struct Tensors {
     files: Vec<File>,
     entries: HashMap<String, Entry>,
     precision: Precision,
+    device: Device,
 }
 
 struct Entry {
@@ -31,11 +33,12 @@ struct Entry {
 impl Tensors {
     /// Opens the weights of a model folder (`WEIGHTS`, or the shards that
     /// `SHARD_INDEX` lists); `Dense::load` stores its dense layers as
-    /// `precision` says.
-    pub fn open_dir(dir: &Path, precision: Precision) -> Result<Self, String> {
+    /// `precision` says. `device` is `Cpu` or `Gpu` after `Auto` is resolved;
+    /// `Dense::load` and `Ternary::from_base3` upload a GPU copy when it is `Gpu`.
+    pub fn open_dir(dir: &Path, precision: Precision, device: Device) -> Result<Self, String> {
         let single = dir.join(WEIGHTS);
         if single.is_file() {
-            return Self::open_files(&[single.as_path()], precision);
+            return Self::open_files(&[single.as_path()], precision, device);
         }
         let index = dir.join(SHARD_INDEX);
         let text = std::fs::read_to_string(&index)
@@ -52,7 +55,7 @@ impl Tensors {
         shards.dedup();
         let paths: Vec<_> = shards.iter().map(|shard| dir.join(shard)).collect();
         let paths: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
-        Self::open_files(&paths, precision)
+        Self::open_files(&paths, precision, device)
     }
 
     /// Opens PyTorch checkpoints (`.pth`, `.pt`): `(path, prefix)` pairs,
@@ -89,10 +92,11 @@ impl Tensors {
             files: opened,
             entries,
             precision,
+            device: Device::Cpu,
         })
     }
 
-    fn open_files(paths: &[&Path], precision: Precision) -> Result<Self, String> {
+    fn open_files(paths: &[&Path], precision: Precision, device: Device) -> Result<Self, String> {
         let mut files = Vec::with_capacity(paths.len());
         let mut entries = HashMap::new();
         for path in paths {
@@ -115,12 +119,18 @@ impl Tensors {
             files,
             entries,
             precision,
+            device,
         })
     }
 
     /// How `Dense::load` stores the layers of this file.
     pub fn precision(&self) -> Precision {
         self.precision
+    }
+
+    /// `Cpu`, or `Gpu` when this load uploads weight copies.
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn has(&self, name: &str) -> bool {

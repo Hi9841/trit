@@ -1,6 +1,7 @@
-// Trit for .NET: speech to text and text to speech on the CPU, through the C ABI of trit-ffi.
+// Trit for .NET: speech to text on the CPU or the GPU and text to speech on the CPU, through the C ABI of trit-ffi.
 //
 //   using var engine = new Trit("whisper-large-v3-turbo");  // folder, `trit models` name, or null
+//   Console.WriteLine(Trit.GpuInfo());                       // "NVIDIA GeForce RTX 4090, Dx12, f16"
 //   Console.WriteLine(engine.Kind);                          // "whisper"
 //   Console.WriteLine(engine.TranscribeWav("take.wav"));      // the model detects the language
 //   Console.WriteLine(engine.Transcribe(samples, "de"));      // float[] at 16 kHz mono
@@ -47,7 +48,8 @@ internal static partial class Native
 
     [LibraryImport(Lib)] public static partial IntPtr trit_version();
     [LibraryImport(Lib)] public static partial IntPtr trit_last_error();
-    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_load_with(string? model, string? precision);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_load_ex(string? model, string? precision, string? device);
+    [LibraryImport(Lib)] public static partial IntPtr trit_gpu_info();
     [LibraryImport(Lib)] public static partial void trit_release_memory();
     [LibraryImport(Lib)] public static partial IntPtr trit_kind(IntPtr engine);
     [LibraryImport(Lib)] public static partial void trit_free(IntPtr engine);
@@ -55,7 +57,7 @@ internal static partial class Native
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_transcribe_wav_json(IntPtr engine, string path, string? options);
     [LibraryImport(Lib)] public static partial void trit_free_text(IntPtr text);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial int trit_set_dictionary(IntPtr engine, string terms);
-    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_cleaner_load_with(string? model, string? precision);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_cleaner_load_ex(string? model, string? precision, string? device);
     [LibraryImport(Lib)] public static partial void trit_cleaner_free(IntPtr cleaner);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_clean(IntPtr cleaner, string text, string? styling, string? structure, string? context);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_voice_load(string? model);
@@ -76,12 +78,18 @@ public sealed class Trit : IDisposable
     IntPtr _handle;
 
     /// <summary>A model folder, a `trit models` name, or null for the default. precision: "auto" (null;
-    /// int8 for layers 384 wide and more, f16 below), "int8" (least memory), "f16", or "f32" (as the reference).</summary>
-    public Trit(string? model = null, string? precision = null)
+    /// int8 for layers 384 wide and more, f16 below), "int8" (least memory), "f16", or "f32" (as the reference).
+    /// device: "cpu" (default), "gpu", or "auto" (the GPU, or the CPU when the computer has no adapter).
+    /// TRIT_DEVICE overrides device.</summary>
+    public Trit(string? model = null, string? precision = null, string device = "cpu")
     {
-        _handle = Native.trit_load_with(model, precision);
+        _handle = Native.trit_load_ex(model, precision, device);
         if (_handle == IntPtr.Zero) throw Native.Error();
     }
+
+    /// <summary>The GPU adapter, for example "NVIDIA GeForce RTX 4090, Dx12, f16".
+    /// Throws when the computer has no adapter.</summary>
+    public static string GpuInfo() => Native.Text(Native.trit_gpu_info());
 
     public static string Version => Marshal.PtrToStringUTF8(Native.trit_version())!;
 
@@ -182,10 +190,10 @@ public sealed class TritCleaner : IDisposable
 {
     IntPtr _handle;
 
-    /// <summary>precision as for <see cref="Trit"/>.</summary>
-    public TritCleaner(string? model = null, string? precision = null)
+    /// <summary>precision and device as for <see cref="Trit"/>.</summary>
+    public TritCleaner(string? model = null, string? precision = null, string device = "cpu")
     {
-        _handle = Native.trit_cleaner_load_with(model, precision);
+        _handle = Native.trit_cleaner_load_ex(model, precision, device);
         if (_handle == IntPtr.Zero) throw Native.Error();
     }
 

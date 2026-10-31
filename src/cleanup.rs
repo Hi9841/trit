@@ -137,7 +137,7 @@ impl Cleaner {
         Self::load_with(dir, &crate::LoadOptions::default())
     }
 
-    /// `load`, with a choice of precision.
+    /// `load`, with a choice of precision and device.
     pub fn load_with(dir: &Path, options: &crate::LoadOptions) -> Result<Self, String> {
         let _team = crate::cpu::enter(crate::Spread::OneCache);
         let bpe = Bpe::open(&dir.join("tokenizer.json"))?;
@@ -151,7 +151,7 @@ impl Cleaner {
                 dir.display()
             ));
         }
-        let model = Qwen3::load(dir, options.precision)?;
+        let model = Qwen3::load(dir, options.precision, options.device)?;
         let system = model.prefix(&bpe.encode(&system_prefix()));
         Ok(Self {
             model,

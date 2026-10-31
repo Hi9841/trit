@@ -22,8 +22,9 @@ jobs:
         shell: bash
         # Speech to text decodes with the model alone (AGENTS.md). Text to
         # speech (src/tts) may hold lists: text normalization and the lexicon.
+        # src/gpu holds shader code, not words.
         run: |
-          if git grep -n 'include_str!' -- src ffi ':!src/tts' \
+          if git grep -n 'include_str!' -- src ffi ':!src/tts' ':!src/gpu' \
             || git ls-files -- src ':!src/tts' | grep -E '\.(txt|json|csv|tsv)$'; then
             echo "error: a word list ships in the speech-to-text engine; it decodes with the model alone"
             exit 1

@@ -2,8 +2,9 @@
 
 Trit is a speech-to-text and text-to-speech engine for the CPU. It runs
 Parakeet, Canary, Whisper, and Moonshine checkpoints as published on Hugging
-Face, with its own kernels: no Python, no PyTorch, no ONNX Runtime, no GPU.
-16 kHz audio in, text out. It can also clean a raw transcript with
+Face, with its own kernels: no Python, no PyTorch, no ONNX Runtime. The
+products run on the CPU. Speech to text can also run them on the GPU: see
+[GPU](#gpu). 16 kHz audio in, text out. It can also clean a raw transcript with
 Superwhisper S1-mini, and speak text with Kokoro-82M (28 English voices)
 or a VITS voice (Meta MMS-TTS).
 
@@ -114,6 +115,7 @@ Flags of `transcribe`:
 | `--task transcribe\|translate` | `transcribe` | `translate` writes English (multilingual Whisper, Canary) |
 | `--timestamps` | off | Timed segments too: sentences for Parakeet, windows for the others |
 | `--precision auto\|int8\|f16\|f32` | `auto` | How the weights are held; see [Precision](#precision) |
+| `--device cpu\|gpu\|auto` | `cpu` | Where the products run; see [GPU](#gpu). `TRIT_DEVICE` overrides this |
 | `--beam <n>` | 5 for Whisper and Moonshine, 1 for Canary | Beams; 1 is greedy, at most 16 |
 | `--cleanup` | off | Clean each transcript with S1-mini; `--cleanup-model`, `--styling`, `--structure`, `--context` as for `clean` |
 | `--format toon\|json\|text` | `toon` | `json` for programs; `text` gives one transcript per line |
@@ -124,6 +126,7 @@ trit transcribe clips/ --model whisper-large-v3-turbo --format json
 trit transcribe interview.wav --model parakeet-tdt-0.6b-v3 --language de
 trit transcribe take.wav --dictionary terms.txt --cleanup --format text
 trit transcribe meeting.wav --timestamps --precision f32
+trit transcribe meeting.wav --device auto
 trit clean "so um send the report by friday no wait thursday"
 trit speak "The build passed. Ship it." --out done.wav
 ```
@@ -158,7 +161,7 @@ trit::release_memory();                                  // when the app goes id
 | Item | Meaning |
 |---|---|
 | `Trit::load(dir) -> Result<Trit, String>` | Loads a model folder; the family comes from `config.json` |
-| `Trit::load_with(dir, &LoadOptions { precision })` | The same with a `Precision`: `Auto` (default), `Int8`, `F16`, `F32` |
+| `Trit::load_with(dir, &LoadOptions { precision, device })` | The same with a `Precision` (`Auto`, `Int8`, `F16`, `F32`) and a `Device` (`Cpu` default, `Gpu`, `Auto`) |
 | `Trit::transcribe(&self, &[f32]) -> String` | Text; the model detects the language |
 | `Trit::transcribe_with(&self, &[f32], &Options) -> String` | Text with `Options { language, task, beam, fallback }` |
 | `Trit::segments(&self, &[f32], &Options) -> Vec<Segment>` | Timed parts: `start`, `end` in seconds, `text` |
@@ -181,7 +184,7 @@ trit::release_memory();                                  // when the app goes id
 | `write_wav(&Path, &[f32], rate) -> Result<(), String>` | Mono samples as a 16-bit WAV file |
 | `CATALOG`, `known(name)`, `candidates(repo)` | The model catalog and the places of a repository |
 | `VOICE_REPO`, `VOICE_REPOS` | The default voice (`hexgrad/Kokoro-82M`), and the search order (Kokoro, MMS-TTS) |
-| `cpu_path() -> &str`, `threads(Spread) -> usize` | The kernel paths in use; the worker count |
+| `cpu_path() -> &str`, `gpu_path() -> String`, `threads(Spread) -> usize` | The kernel paths in use; the worker count. `gpu_path` is the adapter, or the reason there is none |
 | `SAMPLE_RATE`, `MODEL_TYPES`, `VERSION` | Constants |
 
 ## C ABI
@@ -205,14 +208,16 @@ trit_free(engine);
 | Function | Returns |
 |---|---|
 | `trit_load(const char *model)` | An engine, or NULL. A folder, a name, or NULL for the default |
-| `trit_load_with(const char *model, const char *precision)` | The same with `"auto"` (or NULL), `"int8"`, `"f16"`, `"f32"` |
+| `trit_load_with(const char *model, const char *precision)` | The same with `"auto"` (or NULL), `"int8"`, `"f16"`, `"f32"`. The device stays `"cpu"` |
+| `trit_load_ex(const char *model, const char *precision, const char *device)` | `trit_load_with` plus `"cpu"` (or NULL), `"gpu"`, or `"auto"` |
+| `trit_gpu_info(void)` | The adapter text, or NULL. Free with `trit_free_text`. `trit_last_error` gives the reason |
 | `trit_kind(engine)` | The family, static |
 | `trit_transcribe(engine, const float *samples, size_t count, const char *language)` | Text, or NULL |
 | `trit_transcribe_with(engine, samples, count, language, int beam)` | The same with beams (0: the model's default, 1: greedy, at most 16) |
 | `trit_transcribe_wav(engine, const char *path, const char *language)` | Text, or NULL |
 | `trit_transcribe_json(engine, samples, count, const char *options)`, `trit_transcribe_wav_json(engine, path, options)` | `{"text", "segments": [{"start", "end", "text"}]}` as JSON, or NULL. `options` is NULL or a JSON object with any of `language`, `task` (`"transcribe"`, `"translate"`), `beam`, `fallback`, `timestamps` |
 | `trit_set_dictionary(engine, const char *terms)` | Terms skipped, or -1. One term per line; a term over 100 characters is skipped |
-| `trit_cleaner_load(const char *model)`, `trit_cleaner_load_with(model, precision)` | A cleaner, or NULL |
+| `trit_cleaner_load(const char *model)`, `trit_cleaner_load_with(model, precision)`, `trit_cleaner_load_ex(model, precision, device)` | A cleaner, or NULL. The device values are the same as for `trit_load_ex` |
 | `trit_clean(cleaner, text, styling, structure, context)` | Clean text, or NULL. NULL settings take the default |
 | `trit_voice_load(const char *model)` | A voice, or NULL. A folder, a name, or NULL for `kokoro-82m`, then `mms-tts-eng` |
 | `trit_voice_sample_rate(voice)`, `trit_voice_kind(voice)` | The rate of the samples (24000 or 16000), or -1; `"kokoro"` or `"vits"` |
@@ -223,7 +228,7 @@ trit_free(engine);
 | `trit_release_memory(void)` | Gives memory that earlier calls freed back to the system |
 | `trit_last_error(void)` | The reason for the last failure on this thread |
 | `trit_free_text(char *)`, `trit_free(Trit *)`, `trit_cleaner_free(TritCleaner *)`, `trit_voice_free(TritVoice *)`, `trit_free_samples(float *, size_t count)` | Free. NULL is a no-op |
-| `trit_version(void)` | `"0.3.2"` |
+| `trit_version(void)` | `"0.4.0"` |
 
 Rules: strings are UTF-8. `language` is an ISO 639-1 code or NULL. Free
 every returned text with `trit_free_text`, and the samples of `trit_speak`
@@ -244,7 +249,8 @@ dependencies (ctypes). Copy it next to your code. It finds the library at
 ```python
 import trit
 
-engine = trit.Trit("parakeet-redux")              # folder, name, or None; precision="f16" and so on
+engine = trit.Trit("parakeet-redux")              # folder, name, or None; precision="f16", device="auto"
+print(trit.gpu_info())                            # the adapter, or TritError
 print(engine.kind)                                # "parakeet_tdt"
 print(engine.transcribe_wav("take.wav", language="en"))
 print(engine.transcribe(samples, language="en"))  # list, array("f"), or numpy float32, 16 kHz mono
@@ -278,7 +284,8 @@ to the program. .NET 7 or later.
 ```csharp
 using TritSpeech;
 
-using var engine = new Trit("parakeet-redux");           // second argument: precision, "f16" and so on
+using var engine = new Trit("parakeet-redux");           // precision, then device: "cpu", "gpu", or "auto"
+Console.WriteLine(Trit.GpuInfo());                       // the adapter, or TritException
 Console.WriteLine(engine.TranscribeWav("take.wav", "en"));
 Console.WriteLine(engine.Transcribe(samples, "en"));     // float[] or Span<float>, 16 kHz mono
 Console.WriteLine(engine.TranscribeWav("take.wav", task: "translate"));  // into English
@@ -304,9 +311,10 @@ Errors throw `TritException`. The options of each call are `language`,
 [koffi](https://koffi.dev): `npm install koffi` or `bun add koffi`.
 
 ```js
-import { Trit, Cleaner, Voice, releaseMemory } from "./trit.mjs";
+import { Trit, Cleaner, Voice, gpuInfo, releaseMemory } from "./trit.mjs";
 
-const engine = new Trit("parakeet-redux");             // second argument: { precision: "f16" }
+const engine = new Trit("parakeet-redux");             // second argument: { precision: "f16", device: "auto" }
+console.log(gpuInfo());                                // the adapter, or TritError
 console.log(engine.transcribeWav("take.wav", "en"));
 console.log(engine.transcribe(samples, "en"));         // Float32Array, 16 kHz mono
 console.log(engine.transcribeWav("take.wav", null, { task: "translate" }));  // into English
@@ -525,6 +533,51 @@ weights in every mode.
 | `f16` | f16 weights, f32 math | f16 | Half the memory of f32 |
 | `f32` | f32, as the reference runtimes hold them | f32 | Checks against the reference |
 
+## GPU
+
+Speech to text can run on the GPU through wgpu: DirectX 12, Vulkan, or Metal.
+The Parakeet encoder (all of it, for a take of 48 frames or more) and the
+dense and ternary products of the other models run there. Text to speech
+and the decoder heads stay on the CPU.
+Build Trit with the `gpu` feature:
+
+```powershell
+cargo build --release --features gpu
+```
+
+`trit-ffi` turns this feature on. The `trit` crate leaves it off until you
+ask for it. Without the feature the build has no GPU code, and the text is
+the same as in the last release.
+
+| Device | Effect |
+|---|---|
+| `cpu` (default) | Every product runs on the CPU |
+| `gpu` | Dense and ternary products run on the GPU. The load fails when the computer has no adapter, or when the build has no `gpu` feature |
+| `auto` | The GPU when an adapter is present. The CPU when the adapter is missing |
+
+`TRIT_DEVICE` (`cpu`, `gpu`, or `auto`) overrides the device of a load.
+`trit doctor` prints the adapter, or the reason there is none.
+`trit_gpu_info` returns the adapter text. It returns NULL, and
+`trit_last_error` gives the reason, when the computer has no adapter.
+A GPU error does not stop a call: Trit runs that call on the CPU and prints
+one line to stderr.
+
+The GPU sums in another order than the CPU, so some takes differ from the
+CPU text. Parakeet Redux on an RTX 4090 (Vulkan), 46 takes of 0.8 to 39 s, median
+time of a take over 5 rounds:
+
+| Takes | CPU (Ryzen 7950X3D) | GPU |
+|---|---|---|
+| All 46 | 74 ms | 43 ms |
+| 5 s or longer (33) | 93 ms | 47 ms |
+| 20 s or longer (8) | 212 ms | 83 ms |
+
+9 of the 46 texts differ from the CPU text by a word or a punctuation mark.
+The GPU text can also change between two runs on a take where two words
+score almost the same. The CPU text stays the same. The speed-up is measured for
+Parakeet Redux. Other models run on the GPU and gain little; a decoder step
+(fewer than 48 rows) stays on the CPU.
+
 ## Behavior and limits
 
 - **Long audio:** Trit cuts long audio at the quietest 100 ms near the end of
@@ -572,6 +625,7 @@ weights in every mode.
 | `TRIT_CLEANUP_MODEL` | The S1-mini folder, when the caller names none |
 | `TRIT_VOICE` | The voice folder, when the caller names none (else Kokoro, then MMS-TTS) |
 | `TRIT_THREADS` | The worker count; turns pinning off |
+| `TRIT_DEVICE` | `cpu`, `gpu`, or `auto`. Overrides the device of a load |
 | `TRIT_ISA` | `scalar`, `avx2`, or `avxvnni` forces another kernel path, for tests |
 | `TRIT_LIB` | The library path, for the Python and Node bindings |
 
@@ -585,6 +639,7 @@ weights in every mode.
 | `src/cleanup.rs` | `Cleaner`: S1-mini prompt and styles |
 | `src/tts/` | Text to speech: `Voice` and `Voicing` (`mod.rs`), Kokoro (`kokoro/`), VITS (`vits.rs`), the English phonemizer (`english/`: tokenizer, tagger, lexicon, numbers, BART fallback, data) |
 | `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`), PyTorch checkpoint reader (`torch_file.rs`) |
+| `src/gpu/` | GPU matrix products and the Parakeet encoder through wgpu (DX12, Vulkan, Metal), behind the `gpu` feature |
 | `src/audio/` | WAV reader and writer, STFT and its inverse (`stft.rs`), NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), windows for long audio |
 | `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen) |
 | `src/models/mod.rs` | `FAMILIES`: one row per `model_type` (its loader and thread spread), and the `Family` trait |

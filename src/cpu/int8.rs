@@ -197,6 +197,37 @@ impl Int8 {
         }
     }
 
+    /// The weights as f32, one scale per group. The VNNI byte flip is undone.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn dequant_f32(&self) -> Vec<f32> {
+        let (n, k, groups) = (self.n, self.k, self.k / GROUP);
+        let rows = self.path.rows();
+        let flipped = self.path.flipped();
+        let mut out = vec![0.0f32; n * k];
+        for block in 0..n / rows {
+            for r in 0..rows {
+                let row = block * rows + r;
+                for g in 0..groups {
+                    let scale = self.scales[(block * groups + g) * rows + r];
+                    for i in 0..GROUP {
+                        let kk = g * GROUP + i;
+                        let at = if self.path == Path::Scalar {
+                            row * k + kk
+                        } else {
+                            ((block * (k / 4) + kk / 4) * rows + r) * 4 + kk % 4
+                        };
+                        let mut code = self.weights[at];
+                        if flipped {
+                            code ^= i8::MIN;
+                        }
+                        out[row * k + kk] = f32::from(code) * scale;
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// `x` is `m x k` f32; returns `m x n`.
     pub fn forward(&self, x: &[f32], m: usize) -> Buf {
         let mut out = Buf::scratch(m * self.n);

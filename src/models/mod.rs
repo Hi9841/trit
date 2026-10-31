@@ -10,7 +10,7 @@ pub mod parts;
 
 use families::{canary, moonshine, parakeet, qwen3_asr, wav2vec2, whisper};
 
-use crate::{BiasWeights, Options, Precision, Segment, Spread};
+use crate::{BiasWeights, Device, Options, Precision, Segment, Spread};
 use std::path::Path;
 
 /// What every family does with audio.
@@ -23,7 +23,7 @@ pub trait Family: Send + Sync {
     fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String>;
 }
 
-type Load = fn(&Path, &config::Json, Precision) -> Result<Box<dyn Family>, String>;
+type Load = fn(&Path, &config::Json, Precision, Device) -> Result<Box<dyn Family>, String>;
 
 /// One `model_type` Trit runs: the worker spread its products need, and
 /// how to load it.
@@ -38,42 +38,42 @@ pub const FAMILIES: [Row; 8] = [
     Row {
         model_type: "parakeet_tdt",
         spread: Spread::OneCache,
-        load: |dir, c, p| Ok(Box::new(parakeet::Parakeet::load(dir, c, p)?)),
+        load: |dir, c, p, d| Ok(Box::new(parakeet::Parakeet::load(dir, c, p, d)?)),
     },
     Row {
         model_type: "parakeet_rnnt",
         spread: Spread::OneCache,
-        load: |dir, c, p| Ok(Box::new(parakeet::Parakeet::load(dir, c, p)?)),
+        load: |dir, c, p, d| Ok(Box::new(parakeet::Parakeet::load(dir, c, p, d)?)),
     },
     Row {
         model_type: "parakeet_ctc",
         spread: Spread::OneCache,
-        load: |dir, c, p| Ok(Box::new(parakeet::Parakeet::load(dir, c, p)?)),
+        load: |dir, c, p, d| Ok(Box::new(parakeet::Parakeet::load(dir, c, p, d)?)),
     },
     Row {
         model_type: "whisper",
         spread: Spread::AllCores,
-        load: |dir, c, p| Ok(Box::new(whisper::Whisper::load(dir, c, p)?)),
+        load: |dir, c, p, d| Ok(Box::new(whisper::Whisper::load(dir, c, p, d)?)),
     },
     Row {
         model_type: "moonshine",
         spread: Spread::OneCache,
-        load: |dir, c, p| Ok(Box::new(moonshine::Moonshine::load(dir, c, p)?)),
+        load: |dir, c, p, d| Ok(Box::new(moonshine::Moonshine::load(dir, c, p, d)?)),
     },
     Row {
         model_type: "canary",
         spread: Spread::OneCache,
-        load: |dir, c, p| Ok(Box::new(canary::Canary::load(dir, c, p)?)),
+        load: |dir, c, p, d| Ok(Box::new(canary::Canary::load(dir, c, p, d)?)),
     },
     Row {
         model_type: "wav2vec2",
         spread: Spread::OneCache,
-        load: |dir, c, p| Ok(Box::new(wav2vec2::Wav2Vec2::load(dir, c, p)?)),
+        load: |dir, c, p, d| Ok(Box::new(wav2vec2::Wav2Vec2::load(dir, c, p, d)?)),
     },
     Row {
         model_type: "qwen3_asr",
         spread: Spread::OneCache,
-        load: |dir, c, p| Ok(Box::new(qwen3_asr::Qwen3Asr::load(dir, c, p)?)),
+        load: |dir, c, p, d| Ok(Box::new(qwen3_asr::Qwen3Asr::load(dir, c, p, d)?)),
     },
 ];
 
@@ -92,7 +92,7 @@ pub const MODEL_TYPES: [&str; FAMILIES.len()] = {
 pub struct Model(Box<dyn Family>);
 
 impl Model {
-    pub fn load(dir: &Path, precision: Precision) -> Result<Self, String> {
+    pub fn load(dir: &Path, precision: Precision, device: Device) -> Result<Self, String> {
         let text = std::fs::read_to_string(dir.join("config.json"))
             .map_err(|e| format!("cannot read {}: {e}", dir.join("config.json").display()))?;
         let config = config::Json::parse(&text)?;
@@ -115,8 +115,9 @@ impl Model {
                     MODEL_TYPES.join(", ")
                 )
             })?;
+        let device = crate::active_device(device)?;
         let _team = crate::cpu::enter(row.spread);
-        Ok(Self((row.load)(dir, &config, precision)?))
+        Ok(Self((row.load)(dir, &config, precision, device)?))
     }
 
     pub fn kind(&self) -> &'static str {

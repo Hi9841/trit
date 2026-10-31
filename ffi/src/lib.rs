@@ -7,7 +7,9 @@ use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::OnceLock;
-use trit::{BiasWeights, Cleaner, LoadOptions, Options, Precision, Task, Trit, Voice, Voicing};
+use trit::{
+    BiasWeights, Cleaner, Device, LoadOptions, Options, Precision, Task, Trit, Voice, Voicing,
+};
 
 // The library's own allocations: the same allocator as the trit CLI and
 // TDT. A host's allocator only serves the host; text crosses the ABI as
@@ -107,6 +109,7 @@ pub unsafe extern "C" fn trit_load(model_dir: *const c_char) -> *mut Trit {
 }
 
 /// `trit_load` with a precision: "auto" (NULL), "int8", "f16", or "f32".
+/// The device stays "cpu".
 ///
 /// # Safety
 /// `model_dir` and `precision` are NULL or NUL-terminated UTF-8 strings.
@@ -115,13 +118,28 @@ pub unsafe extern "C" fn trit_load_with(
     model_dir: *const c_char,
     precision: *const c_char,
 ) -> *mut Trit {
+    trit_load_ex(model_dir, precision, std::ptr::null())
+}
+
+/// `trit_load_with` with a device: "cpu" (NULL), "gpu", or "auto".
+/// `auto` uses the GPU, or the CPU when the computer has no adapter.
+/// `TRIT_DEVICE` overrides the device. Returns NULL on failure.
+///
+/// # Safety
+/// `model_dir`, `precision`, and `device` are NULL or NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn trit_load_ex(
+    model_dir: *const c_char,
+    precision: *const c_char,
+    device: *const c_char,
+) -> *mut Trit {
     guard(std::ptr::null_mut(), || {
         let explicit = if model_dir.is_null() {
             None
         } else {
             Some(Path::new(text_arg(model_dir, "model_dir")?))
         };
-        let options = load_options(precision)?;
+        let options = load_options(precision, device)?;
         let dir = trit::find_model(explicit).ok_or_else(|| trit::missing_model(explicit))?;
         let engine = Trit::load_with(&dir, &options)?;
         trit::release_memory();
@@ -129,15 +147,39 @@ pub unsafe extern "C" fn trit_load_with(
     })
 }
 
+/// The GPU adapter, for example "NVIDIA GeForce RTX 4090, Dx12, f16".
+/// NULL when there is no adapter. `trit_last_error` then gives the reason.
+/// Free the text with `trit_free_text`.
+#[no_mangle]
+pub extern "C" fn trit_gpu_info() -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let path = trit::gpu_path();
+        // An adapter ends with ", f16" or ", f32". Any other text is the reason.
+        if path.ends_with(", f16") || path.ends_with(", f32") {
+            Ok(owned_text(path))
+        } else {
+            Err(path)
+        }
+    })
+}
+
 /// # Safety
-/// `precision` is NULL or a NUL-terminated UTF-8 string.
-unsafe fn load_options(precision: *const c_char) -> Result<LoadOptions, String> {
+/// `precision` and `device` are NULL or NUL-terminated UTF-8 strings.
+unsafe fn load_options(
+    precision: *const c_char,
+    device: *const c_char,
+) -> Result<LoadOptions, String> {
     let precision = if precision.is_null() {
         Precision::Auto
     } else {
         Precision::parse(text_arg(precision, "precision")?)?
     };
-    Ok(LoadOptions { precision })
+    let device = if device.is_null() {
+        Device::Cpu
+    } else {
+        Device::parse(text_arg(device, "device")?)?
+    };
+    Ok(LoadOptions { precision, device })
 }
 
 /// Returns the memory freed by earlier calls to the system. Call it when
@@ -381,7 +423,7 @@ pub unsafe extern "C" fn trit_transcribe_wav_json(
     })
 }
 
-/// Frees text from `trit_transcribe*`, `trit_transcribe_wav*`, or `trit_clean`.
+/// Frees text from `trit_transcribe*`, `trit_transcribe_wav*`, `trit_clean`, or `trit_gpu_info`.
 /// NULL is a no-op.
 ///
 /// # Safety
@@ -424,6 +466,7 @@ pub unsafe extern "C" fn trit_cleaner_load(model_dir: *const c_char) -> *mut Cle
 }
 
 /// `trit_cleaner_load` with a precision, as for `trit_load_with`.
+/// The device stays "cpu".
 ///
 /// # Safety
 /// `model_dir` and `precision` are NULL or NUL-terminated UTF-8 strings.
@@ -432,8 +475,21 @@ pub unsafe extern "C" fn trit_cleaner_load_with(
     model_dir: *const c_char,
     precision: *const c_char,
 ) -> *mut Cleaner {
+    trit_cleaner_load_ex(model_dir, precision, std::ptr::null())
+}
+
+/// `trit_cleaner_load_with` with a device, as for `trit_load_ex`.
+///
+/// # Safety
+/// `model_dir`, `precision`, and `device` are NULL or NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn trit_cleaner_load_ex(
+    model_dir: *const c_char,
+    precision: *const c_char,
+    device: *const c_char,
+) -> *mut Cleaner {
     guard(std::ptr::null_mut(), || {
-        let options = load_options(precision)?;
+        let options = load_options(precision, device)?;
         let explicit = if model_dir.is_null() {
             None
         } else {

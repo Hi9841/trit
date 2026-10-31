@@ -83,6 +83,9 @@ pub struct Ternary {
     codes: Vec<u8>,
     /// `[n / rows][k / GROUP][rows]`.
     scales: Vec<f32>,
+    /// A GPU copy of the codes and scales, present when the load asked for the GPU.
+    #[cfg(feature = "gpu")]
+    gpu: Option<Box<crate::gpu::Layer>>,
 }
 
 impl Ternary {
@@ -181,11 +184,81 @@ impl Ternary {
             k,
             codes: packed,
             scales: packed_scales,
+            #[cfg(feature = "gpu")]
+            gpu: None,
         }
+    }
+
+    /// The GPU copy, when `on_gpu` uploaded one.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_layer(&self) -> Option<&crate::gpu::Layer> {
+        self.gpu.as_deref()
+    }
+
+    /// Uploads codes (16 per `u32`) and scales when `device` is `Gpu`.
+    pub(crate) fn on_gpu(self, device: crate::Device) -> Result<Self, String> {
+        #[cfg(feature = "gpu")]
+        if device == crate::Device::Gpu {
+            let (codes, scales) = self.gpu_pack();
+            let uploaded = crate::gpu::Layer::ternary(self.n, self.k, &codes, &scales, None)?;
+            let mut layer = self;
+            layer.gpu = Some(Box::new(uploaded));
+            return Ok(layer);
+        }
+        #[cfg(not(feature = "gpu"))]
+        let _ = device;
+        Ok(self)
+    }
+
+    /// Row-major codes, 16 two-bit values per `u32`, and row-major scales.
+    #[cfg(feature = "gpu")]
+    fn gpu_pack(&self) -> (Vec<u32>, Vec<f32>) {
+        let rows = self.isa.rows();
+        let groups = self.k / GROUP;
+        let words = self.k / 16;
+        let mut codes = vec![0u32; self.n * words];
+        let mut scales = vec![0.0f32; self.n * groups];
+        for row in 0..self.n {
+            let block = row / rows;
+            let r = row % rows;
+            for group in 0..groups {
+                scales[row * groups + group] = self.scales[(block * groups + group) * rows + r];
+            }
+            for word in 0..words {
+                let mut packed = 0u32;
+                for lane in 0..16 {
+                    let code = u32::from(self.code_at(block, r, word * 16 + lane));
+                    packed |= code << (lane * 2);
+                }
+                codes[row * words + word] = packed;
+            }
+        }
+        (codes, scales)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn code_at(&self, block: usize, r: usize, kk: usize) -> u8 {
+        let rows = self.isa.rows();
+        if self.isa == Isa::Scalar {
+            return self.codes[block * self.k + kk];
+        }
+        let k16 = kk / 16;
+        let lane = kk % 16;
+        let byte = ((block * (self.k / 16) + k16) * rows + r) * 4 + lane % 4;
+        (self.codes[byte] >> ((lane / 4) * 2)) & 3
     }
 
     /// `x` is `m x k` f32; returns `m x n`.
     pub fn forward(&self, x: &[f32], m: usize) -> Buf {
+        #[cfg(feature = "gpu")]
+        if let Some(layer) = &self.gpu {
+            if !crate::gpu::host_products() {
+                match layer.forward(x, m, false) {
+                    Ok(out) => return out,
+                    Err(error) => crate::gpu::log_fallback(&error),
+                }
+            }
+        }
         let mut out = Buf::scratch(m * self.n);
         let q = Quantized::new(self.isa, x, m, self.k);
         let ptr = OutPtr(out.as_mut_ptr());

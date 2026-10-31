@@ -175,6 +175,7 @@ fn stacked(
             scales.extend(t.f32_len(&format!("{name}.scales"), out * (inp / group))?);
         }
         return Ternary::from_base3(&packed, &scales, names.len() * out, inp, group)
+            .and_then(|layer| layer.on_gpu(t.device()))
             .map(Linear::Ternary);
     }
     let parts: Vec<(&str, usize)> = names.iter().map(|name| (name.as_str(), out)).collect();
@@ -183,13 +184,31 @@ fn stacked(
 
 /// `name` (`.weight`, `.bias`): f32 under `Precision::Auto`, as this model's
 /// accuracy was measured, else the precision the caller asked for.
-pub(crate) fn dense(t: &Tensors, name: &str, out: usize, inp: usize) -> Result<Dense, String> {
+fn dense(t: &Tensors, name: &str, out: usize, inp: usize) -> Result<Dense, String> {
+    dense_in(t, name, out, inp, true)
+}
+
+/// `dense` with no GPU copy. The subsampler and the heads stay on the CPU.
+pub(crate) fn dense_host(t: &Tensors, name: &str, out: usize, inp: usize) -> Result<Dense, String> {
+    dense_in(t, name, out, inp, false)
+}
+
+fn dense_in(t: &Tensors, name: &str, out: usize, inp: usize, gpu: bool) -> Result<Dense, String> {
     if t.precision() != Precision::Auto {
-        return Dense::load(t, &[(name, out)], inp);
+        return if gpu {
+            Dense::load(t, &[(name, out)], inp)
+        } else {
+            Dense::load_cpu(t, &[(name, out)], inp)
+        };
     }
     let weight = t.f32_len(&format!("{name}.weight"), out * inp)?;
     let bias = t.f32_len(&format!("{name}.bias"), out)?;
-    Dense::new(weight, Some(bias), out, inp)
+    let layer = Dense::new(weight, Some(bias), out, inp)?;
+    if gpu {
+        layer.on_gpu(t.device())
+    } else {
+        Ok(layer)
+    }
 }
 
 /// Stride-2 convolution stack that turns 10 ms mel frames into 80 ms frames.
@@ -229,20 +248,20 @@ impl Subsampling {
                 )
             },
             dw1: tap_major(conv(2)?, ch),
-            pw1: dense(
+            pw1: dense_host(
                 t,
                 &format!("{}encoder.subsampling.layers.3", c.prefix),
                 ch,
                 ch,
             )?,
             dw2: tap_major(conv(5)?, ch),
-            pw2: dense(
+            pw2: dense_host(
                 t,
                 &format!("{}encoder.subsampling.layers.6", c.prefix),
                 ch,
                 ch,
             )?,
-            linear: dense(
+            linear: dense_host(
                 t,
                 &format!("{}encoder.subsampling.linear", c.prefix),
                 c.hidden,
@@ -767,6 +786,9 @@ pub struct Parakeet {
     head: Head,
     /// The speech head some checkpoints carry (Redux: `vad_head.*`).
     vad: Option<VadHead>,
+    /// The conformer, when this model was loaded on the GPU.
+    #[cfg(feature = "gpu")]
+    gpu_encoder: Option<crate::gpu::encoder::Encoder>,
 }
 
 /// Speech probability per 80 ms frame from the subsampler output, as
@@ -794,9 +816,9 @@ impl VadHead {
         }
         let hidden = 128;
         Ok(Some(Self {
-            proj: Dense::load(t, &[("vad_head.proj", hidden)], c.hidden)?,
-            ctx: Dense::load(t, &[("vad_head.ctx", hidden)], hidden * Self::KERNEL)?,
-            out: Dense::load(t, &[("vad_head.out", 1)], hidden)?,
+            proj: Dense::load_cpu(t, &[("vad_head.proj", hidden)], c.hidden)?,
+            ctx: Dense::load_cpu(t, &[("vad_head.ctx", hidden)], hidden * Self::KERNEL)?,
+            out: Dense::load_cpu(t, &[("vad_head.out", 1)], hidden)?,
         }))
     }
 
@@ -866,14 +888,130 @@ impl Parakeet {
             }
             HeadKind::Encoder => Head::Encoder,
         };
+        #[cfg(feature = "gpu")]
+        let gpu_encoder = if t.device() == crate::Device::Gpu {
+            match gpu_encoder(t, &blocks, c) {
+                Ok(encoder) => Some(encoder),
+                Err(error) => {
+                    crate::gpu::log_fallback(&error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             subsampling: Subsampling::load(t, c)?,
             blocks,
             head,
             vad: VadHead::load(t, c)?,
             config,
+            #[cfg(feature = "gpu")]
+            gpu_encoder,
         })
     }
+}
+
+/// Frames the first GPU position table fits. About 41 s of audio.
+#[cfg(feature = "gpu")]
+const GPU_REACH: usize = 511;
+
+/// Shorter takes stay on the CPU. The GPU tile does not fill the device.
+#[cfg(feature = "gpu")]
+const GPU_MIN_FRAMES: usize = 48;
+
+/// Keeps products on the CPU until dropped.
+#[cfg(feature = "gpu")]
+struct HostProducts;
+
+#[cfg(feature = "gpu")]
+impl HostProducts {
+    fn new() -> Self {
+        crate::gpu::use_host_products(true);
+        Self
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl Drop for HostProducts {
+    fn drop(&mut self) {
+        crate::gpu::use_host_products(false);
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_mat(linear: &Linear) -> Result<crate::gpu::encoder::Mat, String> {
+    let layer = match linear {
+        Linear::Ternary(layer) => layer.gpu_layer(),
+        Linear::Dense(layer) => layer.gpu_layer(),
+    };
+    layer
+        .map(crate::gpu::encoder::Mat::from_layer)
+        .ok_or_else(|| "encoder layer has no GPU weights".to_string())
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_encoder(
+    t: &Tensors,
+    blocks: &[Block],
+    c: &Config,
+) -> Result<crate::gpu::encoder::Encoder, String> {
+    let mut layers = Vec::with_capacity(blocks.len());
+    for (index, block) in blocks.iter().enumerate() {
+        let p = format!("{}encoder.layers.{index}", c.prefix);
+        let mut norms = Vec::with_capacity(5);
+        for name in [
+            "norm_feed_forward1",
+            "norm_self_att",
+            "norm_conv",
+            "norm_feed_forward2",
+            "norm_out",
+        ] {
+            let full = format!("{p}.{name}");
+            let weight = t.f32_len(&format!("{full}.weight"), c.hidden)?;
+            let bias_name = format!("{full}.bias");
+            let bias = if t.has(&bias_name) {
+                t.f32_len(&bias_name, c.hidden)?
+            } else {
+                vec![0.0; c.hidden]
+            };
+            norms.push((weight, bias));
+        }
+        layers.push(crate::gpu::encoder::LayerUpload {
+            norms,
+            mats: vec![
+                gpu_mat(&block.ff1.0)?,
+                gpu_mat(&block.ff1.1)?,
+                gpu_mat(&block.qkv)?,
+                gpu_mat(&block.o)?,
+                gpu_mat(&block.pw1)?,
+                gpu_mat(&block.pw2)?,
+                gpu_mat(&block.ff2.0)?,
+                gpu_mat(&block.ff2.1)?,
+            ],
+            rel_k: gpu_mat(&block.rel_k)?,
+            bias_u: block.bias_u.clone(),
+            bias_v: block.bias_v.clone(),
+            dw: block.dw_by_tap.clone(),
+            bn_scale: block.bn_scale.clone(),
+            bn_shift: block.bn_shift.clone(),
+        });
+    }
+    let sine = relative_positions(GPU_REACH + 1, c.hidden);
+    crate::gpu::encoder::Encoder::build(
+        crate::gpu::encoder::Cfg {
+            d: u32::try_from(c.hidden).map_err(|_| "hidden size does not fit".to_string())?,
+            f: u32::try_from(c.ff).map_err(|_| "feed-forward size does not fit".to_string())?,
+            heads: u32::try_from(c.heads).map_err(|_| "head count does not fit".to_string())?,
+            kernel: u32::try_from(c.conv_kernel)
+                .map_err(|_| "conv kernel does not fit".to_string())?,
+            input_scale: c.input_scale,
+            min_reach: POSITION_REACH as u32,
+        },
+        layers,
+        &sine,
+        GPU_REACH as u32,
+    )
 }
 
 impl Parakeet {
@@ -894,6 +1032,19 @@ impl Parakeet {
     }
 
     fn encode_subsampled(&self, mut x: Buf, t: usize) -> (Buf, usize) {
+        #[cfg(feature = "gpu")]
+        if let Some(encoder) = &self.gpu_encoder {
+            if t >= GPU_MIN_FRAMES {
+                let d = self.config.hidden;
+                match encoder.encode(&x, t, |reach| relative_positions(reach + 1, d)) {
+                    Ok(encoded) => return (encoded, t),
+                    Err(error) => crate::gpu::log_fallback(&error),
+                }
+            }
+        }
+        // A short take, or a GPU failure, uses the CPU products.
+        #[cfg(feature = "gpu")]
+        let _host = HostProducts::new();
         let c = &self.config;
         if c.input_scale != 1.0 {
             let scale = c.input_scale;
@@ -909,6 +1060,9 @@ impl Parakeet {
 
     /// Fills every layer's position table up front, so the first take does not wait.
     pub fn warm_positions(&self) {
+        // Project these rows on the CPU. The GPU product changes the sum order.
+        #[cfg(feature = "gpu")]
+        let _host = HostProducts::new();
         let shape = (self.config.hidden, self.config.heads);
         for block in &self.blocks {
             block

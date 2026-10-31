@@ -12,7 +12,7 @@ use crate::cpu::{buf::Buf, tensors::Tensors};
 use crate::models::config::Json;
 use crate::models::layers::argmax;
 use crate::text::bpe::Bpe;
-use crate::{Options, Precision, Task};
+use crate::{Device, Options, Precision, Task};
 use parking_lot::RwLock;
 use std::path::Path;
 
@@ -50,10 +50,15 @@ struct Tokens {
 }
 
 impl Whisper {
-    pub fn load(dir: &Path, config: &Json, precision: Precision) -> Result<Self, String> {
+    pub fn load(
+        dir: &Path,
+        config: &Json,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
         let config = model::Config::parse(config)?;
         let mel = WhisperMel::new(config.mels);
-        let tensors = Tensors::open_dir(dir, precision)?;
+        let tensors = Tensors::open_dir(dir, precision, device)?;
         let model = model::Whisper::load(&tensors, config)?;
         drop(tensors);
         let bpe = Bpe::open(&dir.join("tokenizer.json"))?;

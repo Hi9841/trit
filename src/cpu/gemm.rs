@@ -16,6 +16,9 @@ pub struct Dense {
     pub in_features: usize,
     weight: Weights,
     bias: Option<Vec<f32>>,
+    /// A GPU copy of the weights, present when the load asked for the GPU.
+    #[cfg(feature = "gpu")]
+    gpu: Option<Box<crate::gpu::Layer>>,
 }
 
 enum Weights {
@@ -76,6 +79,19 @@ impl Q8 {
         }
     }
 
+    #[cfg(feature = "gpu")]
+    fn to_f32(&self, n: usize, k: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; n * k];
+        for row in 0..n {
+            widen_q8(
+                &self.values[row * k..(row + 1) * k],
+                &self.scales[row * self.groups..(row + 1) * self.groups],
+                &mut out[row * k..(row + 1) * k],
+            );
+        }
+        out
+    }
+
     fn matmul(&self, x: &[f32], m: usize, k: usize, n: usize) -> Buf {
         fgemm::matmul_widened(x, m, k, n, |cols, panel| {
             for (j, row) in cols.enumerate() {
@@ -132,6 +148,24 @@ impl Dense {
         parts: &[(&str, usize)],
         in_features: usize,
     ) -> Result<Self, String> {
+        Self::load_in(t, parts, in_features, true)
+    }
+
+    /// `load`, with no GPU copy. The subsampler and the speech head use this.
+    pub(crate) fn load_cpu(
+        t: &super::tensors::Tensors,
+        parts: &[(&str, usize)],
+        in_features: usize,
+    ) -> Result<Self, String> {
+        Self::load_in(t, parts, in_features, false)
+    }
+
+    fn load_in(
+        t: &super::tensors::Tensors,
+        parts: &[(&str, usize)],
+        in_features: usize,
+        gpu: bool,
+    ) -> Result<Self, String> {
         let out_features: usize = parts.iter().map(|(_, rows)| rows).sum();
         let mut bias = Vec::with_capacity(out_features);
         let mut any_bias = false;
@@ -154,13 +188,23 @@ impl Dense {
             for (name, rows) in parts {
                 half.extend(t.f16_bits(&format!("{name}.weight"), rows * in_features)?);
             }
-            return Self::half(half, bias, out_features, in_features);
+            let layer = Self::half(half, bias, out_features, in_features)?;
+            return if gpu {
+                layer.on_gpu(t.device())
+            } else {
+                Ok(layer)
+            };
         }
         let mut weight = Vec::with_capacity(len);
         for (name, rows) in parts {
             weight.extend(t.f32_len(&format!("{name}.weight"), rows * in_features)?);
         }
-        Self::with_precision(weight, bias, out_features, in_features, precision)
+        let layer = Self::with_precision(weight, bias, out_features, in_features, precision)?;
+        if gpu {
+            layer.on_gpu(t.device())
+        } else {
+            Ok(layer)
+        }
     }
 
     /// Whether `load` stores a layer of this shape with int8 activations.
@@ -265,7 +309,41 @@ impl Dense {
             in_features,
             weight,
             bias,
+            #[cfg(feature = "gpu")]
+            gpu: None,
         })
+    }
+
+    /// The GPU copy, when `on_gpu` uploaded one.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_layer(&self) -> Option<&crate::gpu::Layer> {
+        self.gpu.as_deref()
+    }
+
+    /// Uploads a GPU copy when `device` is `Gpu`. The CPU weights stay.
+    pub(crate) fn on_gpu(self, device: crate::Device) -> Result<Self, String> {
+        #[cfg(feature = "gpu")]
+        if device == crate::Device::Gpu {
+            let uploaded = self.upload_gpu()?;
+            let mut layer = self;
+            layer.gpu = Some(Box::new(uploaded));
+            return Ok(layer);
+        }
+        #[cfg(not(feature = "gpu"))]
+        let _ = device;
+        Ok(self)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn upload_gpu(&self) -> Result<crate::gpu::Layer, String> {
+        let bias = self.bias.as_deref();
+        let (n, k) = (self.out_features, self.in_features);
+        match &self.weight {
+            Weights::F32(weight) => crate::gpu::Layer::f32(n, k, weight, bias),
+            Weights::F16(weight) => crate::gpu::Layer::f16_bits(n, k, weight, bias),
+            Weights::Q8(weight) => upload_wide(&weight.to_f32(n, k), n, k, bias),
+            Weights::Int8(weight) => upload_wide(&weight.dequant_f32(), n, k, bias),
+        }
     }
 
     /// `x` is `rows x in_features`; the result is `rows x out_features`.
@@ -279,6 +357,15 @@ impl Dense {
     }
 
     fn forward_then(&self, x: &[f32], rows: usize, relu: bool) -> Buf {
+        #[cfg(feature = "gpu")]
+        if let Some(layer) = &self.gpu {
+            if rows >= crate::gpu::MIN_ROWS && !crate::gpu::host_products() {
+                match layer.forward(x, rows, relu) {
+                    Ok(out) => return out,
+                    Err(error) => crate::gpu::log_fallback(&error),
+                }
+            }
+        }
         let n = self.out_features;
         let mut out = match &self.weight {
             Weights::F32(w) => fgemm::matmul(x, rows, self.in_features, w, n),
@@ -302,6 +389,27 @@ impl Dense {
             }
         });
         out
+    }
+}
+
+/// Int8 and Q8 weights become f16 on the GPU when the adapter has
+/// `SHADER_F16`, and f32 otherwise.
+#[cfg(feature = "gpu")]
+fn upload_wide(
+    weight: &[f32],
+    n: usize,
+    k: usize,
+    bias: Option<&[f32]>,
+) -> Result<crate::gpu::Layer, String> {
+    if crate::gpu::Gpu::get()?.shader_f16() {
+        let bits: Vec<u16> = weight
+            .iter()
+            .copied()
+            .map(super::tensors::f32_to_f16)
+            .collect();
+        crate::gpu::Layer::f16_bits(n, k, &bits, bias)
+    } else {
+        crate::gpu::Layer::f32(n, k, weight, bias)
     }
 }
 

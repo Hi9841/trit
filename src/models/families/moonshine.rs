@@ -13,7 +13,7 @@ use crate::models::layers::{
 use crate::models::parts::beam;
 use crate::models::parts::logit_bias::{self as bias, Bias, BiasWeights};
 use crate::text::sentencepiece::Tokenizer;
-use crate::{Options, Precision};
+use crate::{Device, Options, Precision};
 use parking_lot::RwLock;
 use std::path::Path;
 
@@ -117,9 +117,14 @@ pub struct Moonshine {
 }
 
 impl Moonshine {
-    pub fn load(dir: &Path, config: &Json, precision: Precision) -> Result<Self, String> {
+    pub fn load(
+        dir: &Path,
+        config: &Json,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
         let c = Config::parse(config)?;
-        let t = Tensors::open_dir(dir, precision)?;
+        let t = Tensors::open_dir(dir, precision, device)?;
         let d = c.d;
         let attn = |p: &str, n: &str| format!("{p}.{n}");
         let encoder = (0..c.encoder_layers)

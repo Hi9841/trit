@@ -8,7 +8,7 @@ use crate::audio::mel::MelFrontend;
 use crate::cpu::tensors::Tensors;
 use crate::models::config::Json;
 use crate::text::sentencepiece::Tokenizer;
-use crate::{Options, Precision, Segment};
+use crate::{Device, Options, Precision, Segment};
 use parking_lot::RwLock;
 use std::path::Path;
 
@@ -41,9 +41,14 @@ const FRAME_SECONDS: f32 = 0.08;
 const PAUSE_SECONDS: f32 = 1.0;
 
 impl Parakeet {
-    pub fn load(dir: &Path, config: &Json, precision: Precision) -> Result<Self, String> {
+    pub fn load(
+        dir: &Path,
+        config: &Json,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
         let config = model::Config::parse(config)?;
-        let tensors = Tensors::open_dir(dir, precision)?;
+        let tensors = Tensors::open_dir(dir, precision, device)?;
         let frontend = MelFrontend::new(config.mels);
         let model = model::Parakeet::load(&tensors, config)?;
         // The weight file is no longer needed; free it before the position

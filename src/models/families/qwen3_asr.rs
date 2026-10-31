@@ -13,7 +13,7 @@ use crate::models::config::Json;
 use crate::models::layers::{add_into, attention, linear, stacked, Gelu, Norm};
 use crate::models::parts::qwen3::Qwen3;
 use crate::text::bpe::Bpe;
-use crate::{Options, Precision};
+use crate::{Device, Options, Precision};
 use parking_lot::RwLock;
 use std::path::Path;
 
@@ -160,8 +160,13 @@ pub struct Qwen3Asr {
 }
 
 impl Qwen3Asr {
-    pub fn load(dir: &Path, json: &Json, precision: Precision) -> Result<Self, String> {
-        let t = Tensors::open_dir(dir, precision)?;
+    pub fn load(
+        dir: &Path,
+        json: &Json,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
+        let t = Tensors::open_dir(dir, precision, device)?;
         let encoder = AudioEncoder::load(&t, AudioConfig::parse(json)?)?;
         let decoder = Qwen3::from_tensors(&t, json, (TEXT, "thinker."))?;
         drop(t);

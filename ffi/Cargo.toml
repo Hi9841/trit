@@ -1,6 +1,6 @@
 [package]
 name = "trit-ffi"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 description = "The C ABI of Trit (include/trit.h), for Python, C#, Node, Go, and any language with a C FFI"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -11,7 +11,7 @@ name = "trit_ffi"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-trit = { path = ".." }
+trit = { path = "..", features = ["gpu"] }
 mimalloc = { version = "0.1", default-features = false }
 serde_json = "1.0"
 

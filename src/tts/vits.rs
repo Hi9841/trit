@@ -9,7 +9,7 @@ use crate::cpu::{activation, buf::Buf, team, tensors::Tensors};
 use crate::models::config::Json;
 use crate::models::layers::{Gelu, Norm};
 use crate::models::parts::conv::{Conv1d, Depthwise, Upsample};
-use crate::Precision;
+use crate::{Device, Precision};
 use std::cell::RefCell;
 use std::path::Path;
 
@@ -132,7 +132,7 @@ impl Vits {
         if config.ffn_kernel.is_multiple_of(2) || c.str("hidden_act").is_some_and(|a| a != "relu") {
             return Err("config.json: Trit runs VITS with an odd ffn_kernel_size and relu".into());
         }
-        let t = Tensors::open_dir(dir, Precision::F32)?;
+        let t = Tensors::open_dir(dir, Precision::F32, Device::Cpu)?;
         let d = config.hidden;
         let embed = t.f32_len("text_encoder.embed_tokens.weight", config.vocab * d)?;
         let encoder = (0..config.layers)
