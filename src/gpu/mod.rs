@@ -21,6 +21,10 @@ const FLAG_BIAS: u32 = 1;
 const FLAG_RELU: u32 = 2;
 /// Kept activation buffers of one size. A forward pass uses two.
 const POOL_PER_SIZE: usize = 4;
+/// Bytes of queued weight writes that wgpu may hold as staging buffers.
+/// Every `write_buffer` makes a staging buffer, and wgpu keeps all of them
+/// until the next submit: a load without a flush holds the whole model twice.
+const STAGED_FLUSH: u64 = 32 << 20;
 
 /// A dense product with fewer rows stays on the CPU: a decoder step has 1
 /// to 16 rows, and the trip to the GPU costs more than the CPU product.
@@ -78,6 +82,8 @@ pub struct Gpu {
     dummy: wgpu::Buffer,
     gate: Mutex<Pool>,
     weight_bytes: AtomicU64,
+    /// Bytes written since the last flush of the queued writes.
+    staged: AtomicU64,
 }
 
 struct Pool {
@@ -165,7 +171,7 @@ impl Gpu {
             required_features: required,
             required_limits: adapter.limits(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::Performance,
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             trace: wgpu::Trace::Off,
         }))
         .map_err(|error| format!("GPU device: {error}"))?;
@@ -244,6 +250,7 @@ impl Gpu {
                 staging_cap: 0,
             }),
             weight_bytes: AtomicU64::new(0),
+            staged: AtomicU64::new(0),
         })
     }
 
@@ -287,8 +294,15 @@ impl Gpu {
         if bytes.is_empty() {
             return Err(format!("{label} is empty"));
         }
-        let mut data = bytes.to_vec();
-        data.resize(data.len().next_multiple_of(4), 0);
+        let padded;
+        let data = if bytes.len().is_multiple_of(4) {
+            bytes
+        } else {
+            let mut copy = bytes.to_vec();
+            copy.resize(copy.len().next_multiple_of(4), 0);
+            padded = copy;
+            &padded
+        };
         let size = u64::try_from(data.len()).map_err(|_| format!("{label} is too large"))?;
         let limits = self.device.limits();
         if size > limits.max_buffer_size || size > limits.max_storage_buffer_binding_size {
@@ -302,9 +316,31 @@ impl Gpu {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.queue.write_buffer(&buffer, 0, &data);
+        self.queue.write_buffer(&buffer, 0, data);
         self.weight_bytes.fetch_add(size, Ordering::Relaxed);
+        if self.staged.fetch_add(size, Ordering::Relaxed) + size >= STAGED_FLUSH {
+            self.flush_writes();
+        }
         Ok(buffer)
+    }
+
+    /// Runs the queued writes and frees their staging buffers.
+    fn flush_writes(&self) {
+        self.staged.store(0, Ordering::Relaxed);
+        self.queue.submit([]);
+        self.instance.poll_all(true);
+    }
+
+    /// Frees the pooled activation and staging buffers, then lets the device
+    /// finish the destruction of every buffer that was dropped.
+    fn trim(&self) {
+        {
+            let mut pool = self.gate.lock();
+            pool.storage.clear();
+            pool.staging = None;
+            pool.staging_cap = 0;
+        }
+        self.flush_writes();
     }
 
     fn bias_buffer(&self, bias: Option<&[f32]>) -> Result<Option<wgpu::Buffer>, String> {
@@ -475,12 +511,9 @@ impl Layer {
     ) -> Result<Self, String> {
         let gpu = Gpu::get()?;
         check_len("f16", n, k, bits.len())?;
-        let mut packed = bits.to_vec();
-        if packed.len() % 2 == 1 {
-            packed.push(0);
-        }
+        // `upload` pads an odd count of halves to a whole word.
         Ok(Self {
-            kind: Kind::F16(gpu.upload("trit-f16", bytemuck::cast_slice(&packed))?),
+            kind: Kind::F16(gpu.upload("trit-f16", bytemuck::cast_slice(bits))?),
             n: dim(n)?,
             k: dim(k)?,
             bias: gpu.bias_buffer(bias)?,
@@ -545,6 +578,13 @@ pub(crate) enum Weights<'a> {
         codes: &'a wgpu::Buffer,
         scales: &'a wgpu::Buffer,
     },
+}
+
+/// Gives pooled GPU buffers back. Does nothing before the first GPU load.
+pub fn trim() {
+    if let Some(Ok(gpu)) = GPU.get() {
+        gpu.trim();
+    }
 }
 
 /// Bytes of weight buffers uploaded since the device was created.

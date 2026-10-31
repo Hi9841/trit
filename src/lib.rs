@@ -292,9 +292,13 @@ impl Trit {
 /// The engines take their temporaries from mimalloc (when the host's global
 /// allocator is mimalloc, as in the CLI, the C library, and TDT), which keeps
 /// freed pages for reuse. Call it after a load and when the app goes idle,
-/// not between calls: the next call would allocate the pages again.
+/// not between calls: the next call would allocate the pages again. With the
+/// `gpu` feature it also frees the pooled GPU buffers and the staging buffers
+/// of dropped GPU models.
 pub fn release_memory() {
     cpu::buf::clear_pool();
+    #[cfg(feature = "gpu")]
+    gpu::trim();
     // Each thread's heap keeps the pages its own frees left (layers load
     // on the workers), and mi_collect reaches only the calling thread's.
     // SAFETY: mi_collect only walks mimalloc's own free lists.
