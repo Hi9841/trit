@@ -563,3 +563,50 @@ probes kept outside git). Each kept change is a fix, not a speed claim.
 - `ab.py parakeet-tdt-0.6b-v3`, the same: 0 texts differ; errors takes 56, clean 58,
   other 124, tech 20 on both sides.
 - Clippy `-D warnings --release` and `cargo fmt --all --check`: clean.
+
+## Session 2026-11-01 (ultra)
+
+Branch `feat/parakeet-ultra` from `origin/main` (0.4.0). Machine: Ryzen 9 7950X3D,
+RTX 4090, Windows 11. Probe (not in the repo): `%TEMP%\ultra-scripts\floor`,
+`floor.exe <model> <clip> cpu|auto|switch` (memory after load, after 10 takes, after
+`release_memory`; `switch` = load on the GPU, one take, drop, load on the CPU).
+
+### Parakeet Ultra (moondream/parakeet-ultra)
+
+Parakeet TDT 0.6B v3 trained further, f16 matrices, f32 norms, plus `vad_head.*`.
+It loads with no engine change. CLI, CPU, 456 clips, whole clips: 260 errors (v3 262,
+Redux 356), 36.8 ms median on clean. On the GPU it is slower than on the CPU (101
+against 59 ms a take): its int8 CPU weights become f16 on the GPU.
+
+### G-001 the GPU path keeps memory
+
+- Hypothesis: `release_memory` does not clear the GPU pool, and the device allocates
+  large blocks, so a GPU model costs RAM and keeps it after the drop.
+- Change (`src/gpu/mod.rs`, `release_memory`): `MemoryHints::MemoryUsage`; weight uploads
+  flush the queued writes every 32 MB (wgpu kept one staging copy of the whole model
+  until the next submit); `gpu::trim` frees the pooled activation and staging buffers
+  and is called by `release_memory`. The device stays.
+- Test: 200 clean clips, Redux and Ultra, `--device gpu` and `--device cpu`, before and
+  after: 0 texts differ in the first round. Redux on the GPU is not stable run to run
+  (one punctuation difference per round, in both builds).
+- Result (probe, idle, working set / private MB): Redux GPU 736 / 1277 to 438 / 929;
+  Redux GPU dropped and released 358 / 731 to 100 / 390; Ultra GPU load peak working set
+  2143 to 1071 MB. CPU numbers and take times: same.
+- Decision: KEEP.
+- Left: the wgpu device and the driver keep about 75 MB working set and 300 MB private
+  after the drop. The CPU copy of GPU weights stays (short takes under 48 frames, the
+  decoder rows under 48, `warm_positions`, and the GPU fallback read it).
+
+### Open: Ultra on the website (owner: investigate first)
+
+- `bench/runtimes.py` (3 rounds): Trit int8 (the default) 200 errors, 36 ms a clip,
+  1050 MB; Trit f16 and f32 198 (127 ms); Transformers fp32 197 (248 ms, 3719 MB).
+  `wer_rule.py` would fail on Ultra, so Ultra is not in `TEST_MODELS` or
+  `bench/benchmarks.json` yet. The results are in `target/runtimes/results.jsonl`.
+- The gap by set: other 119 (int8) / 117 (f16) against 116; tech 20 / 19 against 19;
+  clean 56 / 57 against 57.
+- Next: find the layers whose int8 products cost the words (Ultra's source weights are
+  f16, so int8 is a second rounding), and the one clip where f16 loses a word.
+- Sensitivity: on Redux, a gain of 1.00003 (`/ 32767` against `/ 32768`) changes 15 of 46
+  take texts and 5 errors on `other`. Error counts that differ by a few words are within
+  this noise.
