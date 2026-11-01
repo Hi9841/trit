@@ -1,11 +1,11 @@
 ---
-// One section of README.md on its own page, with the index of every docs
+// One section of docs/reference.md on its own page, with the index of every docs
 // page and the pages before and after it.
 import Base from "../../layouts/Base.astro";
 import Header from "../../components/Header.astro";
 import Footer from "../../components/Footer.astro";
 import DocsBody from "../../components/DocsBody.astro";
-import { docPages, ordered, README, summaryOf, type DocPage } from "../../lib/docs";
+import { docPages, ordered, DOCS, summaryOf, type DocPage } from "../../lib/docs";
 import { render } from "../../lib/markdown";
 import { updatedOf } from "../../lib/repo";
 
@@ -18,8 +18,8 @@ interface Props {
 }
 
 const { doc } = Astro.props;
-const updated = updatedOf(["site/src/pages/docs/[id].astro", README]);
-const html = await render(doc.body, README, 1);
+const updated = updatedOf(["site/src/pages/docs/[id].astro", DOCS]);
+const html = await render(doc.body, DOCS, 1);
 
 const at = ordered.indexOf(doc);
 const before = ordered[at - 1];

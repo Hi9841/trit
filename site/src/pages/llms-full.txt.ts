@@ -1,5 +1,5 @@
 // llms-full.txt: everything an agent needs in one file: what Trit is, the
-// FAQ, the comparison, the docs (README.md) and the benchmark report.
+// FAQ, the comparison, the docs (docs/reference.md) and the benchmark report.
 import { findings, rivals, sharedOf } from "../lib/compare";
 import { faq, stat, tagline, version, whatIs } from "../lib/facts";
 import { readRepo } from "../lib/repo";
@@ -33,9 +33,9 @@ export function GET() {
     "## Compare",
     "",
     ...compare,
-    "## Docs (README.md)",
+    "## Docs (docs/reference.md)",
     "",
-    readRepo("README.md").replace(/^# Trit\s*/, ""),
+    readRepo("docs/reference.md").replace(/^# .*\n/, ""),
     "",
     "## Benchmark report (docs/engine-comparison.md)",
     "",

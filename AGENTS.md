@@ -3,7 +3,7 @@
 Trit is a CPU speech-to-text and text-to-speech engine in Rust with no
 inference library. It runs Parakeet, Canary, Whisper, and Moonshine
 checkpoints from Hugging Face, the S1-mini transcript cleaner, and the
-Kokoro-82M and VITS (Meta MMS-TTS) voices. [README.md](README.md) is the reference:
+Kokoro-82M and VITS (Meta MMS-TTS) voices. [docs/reference.md](docs/reference.md) is the reference:
 the API of each language, the models, and the options. This file gives the
 steps.
 
@@ -35,7 +35,7 @@ Do the steps in order. Each step ends on a check.
    `libtrit_ffi.dylib`) exist.
 
 3. **Get the model.** Use `parakeet-redux` unless the task asks for another
-   language or a smaller model (README, "Select a model"). `trit models`
+   language or a smaller model (docs/reference.md, "Select a model"). `trit models`
    prints the download command.
    Check: `trit doctor` reports the model as found.
 
@@ -43,7 +43,7 @@ Do the steps in order. Each step ends on a check.
    `trit transcribe <clip.wav> --model <name> --language en --format json`.
    Check: you have the text of one clip, from the CLI.
 
-5. **Write the integration** by the rules of README, "The contract". The
+5. **Write the integration** by the rules of docs/reference.md, "The contract". The
    rules that integrations get wrong most:
    - Convert the audio to 16 kHz mono `f32` in -1..1 before Trit. Trit does
      not resample, and microphones usually give 44.1 or 48 kHz.
@@ -58,7 +58,7 @@ Do the steps in order. Each step ends on a check.
 
 7. **License:** Trit is under PolyForm Noncommercial 1.0.0. If the program
    is commercial, tell the user before you ship it. The model has its own
-   license (README, "License").
+   license (docs/reference.md, "License").
 
 ## Change Trit
 
@@ -116,14 +116,14 @@ There are no unit tests. The checks are:
 - `src/gpu/`: matrix products and the Parakeet encoder on the GPU through wgpu (DX12, Vulkan, Metal). The `gpu` feature builds them; `trit-ffi` enables it. `auto` uses the CPU when the computer has no adapter, and a GPU error falls back to the CPU for that call. The shaders are `.wgsl` files read with `include_str!` (CI allows this in `src/gpu` only). Text must stay the same on `--device cpu` and in a build without `gpu`.
 - `src/audio/`, `src/text/`: frontends and tokenizers. `bpe.rs` encodes with hand-written pre-tokenizers (GPT-2 and Qwen); it matches Hugging Face `tokenizers` ids.
 - `src/main.rs`: the `trit` CLI. AXI rules: TOON on stdout, errors on stdout with a `help:` fix, exit 0/1/2, unknown flags fail with the valid list.
-- `ffi/`: `trit-ffi`, the C ABI. `include/trit.h` must match it by hand. Change both together, then the three bindings in `bindings/`, then the tables in README.md.
+- `ffi/`: `trit-ffi`, the C ABI. `include/trit.h` must match it by hand. Change both together, then the three bindings in `bindings/`, then the tables in docs/reference.md.
 
 ### Add a model family
 
 1. Read the reference implementation (Transformers `modeling_<family>.py`) and the tensor names (`model.safetensors` header). Note every norm epsilon, activation form, rotary layout, and scale.
 2. Reuse the parts in `src/models/parts/` that the config names (a FastConformer checkpoint needs only a new head or none). Put what is new in `parts/` when another family can share it, else in `src/models/families/<family>.rs`, from `layers.rs`, `Dense::load` layers, and `Dense::table` token tables.
 3. Add one row to `FAMILIES` in `src/models/mod.rs` and implement `Family` for the new type.
-4. Add the checkpoints you ran to `src/catalog.rs`, then run `trit skill > skill/SKILL.md` and update the README tables.
+4. Add the checkpoints you ran to `src/catalog.rs`, then run `trit skill > skill/SKILL.md` and update the tables in docs/reference.md (and in README.md when the model is in its short table).
 5. Check: the same text as the reference runtime on a few clips of `target/accuracy/tts16`.
 
 ### Rules the code does not show

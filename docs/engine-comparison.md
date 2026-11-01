@@ -208,7 +208,7 @@ Trit is called through its Python binding with `language="en"`.
 | Threads | Own teams of spinning workers: one per physical core of one L3 domain (Parakeet, S1-mini), all physical cores (Whisper) | `src/cpu/team.rs` |
 | Dictionary | Trie of token paths with a logit bonus (Parakeet, Canary, Moonshine); a previous-text prompt (Whisper) | `src/models/parakeet/bias.rs` |
 | Dependencies | `std`, `parking_lot`, `serde_json`, `miniz_oxide`, `mimalloc`. No inference library | `Cargo.toml` |
-| Ways in | `trit` CLI, Rust crate, C ABI, Python, C#, Node and Bun | [README.md](../README.md) |
+| Ways in | `trit` CLI, Rust crate, C ABI, Python, C#, Node and Bun | [reference.md](reference.md) |
 
 ## 5. Where Trit is behind
 

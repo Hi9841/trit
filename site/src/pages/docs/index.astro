@@ -5,17 +5,17 @@ import PageHead from "../../components/PageHead.astro";
 import Footer from "../../components/Footer.astro";
 import Cmd from "../../components/Cmd.astro";
 import DocsBody from "../../components/DocsBody.astro";
-import { anchorMap, landing, landingHref, README } from "../../lib/docs";
+import { anchorMap, landing, landingHref, DOCS } from "../../lib/docs";
 import { render } from "../../lib/markdown";
 import { links } from "../../lib/links";
 import { readRepo, updatedOf } from "../../lib/repo";
 import { idle, plugs } from "../../lib/sketch";
 
-const updated = updatedOf(["site/src/pages/docs/index.astro", README, "Cargo.toml"]);
+const updated = updatedOf(["site/src/pages/docs/index.astro", DOCS, "Cargo.toml"]);
 
-// The introduction of the README, then "Start here": the table that sends
+// The introduction of the reference, then "Start here": the table that sends
 // each task to its page.
-const parts = await Promise.all(landing.map(async (s, k) => ({ ...s, html: await render(s.body, README), k })));
+const parts = await Promise.all(landing.map(async (s, k) => ({ ...s, html: await render(s.body, DOCS), k })));
 
 const version = /^version = "([^"]+)"/m.exec(readRepo("Cargo.toml"))?.[1] ?? "";
 ---
@@ -31,7 +31,7 @@ const version = /^version = "([^"]+)"/m.exec(readRepo("Cargo.toml"))?.[1] ?? "";
       <p>
         Trit turns 16 kHz speech into text, and text into speech, on the CPU. Call it from the <code>trit</code>{" "}
         command, the Rust crate, or a C ABI with bindings for Python, C#, Node and Bun. These pages are the{" "}
-        <a href={`${links.repo}/blob/main/README.md`}>README.md</a> of Trit {version}, a section a page.
+        <a href={`${links.repo}/blob/main/docs/reference.md`}>reference</a> of Trit {version}, a section a page.
       </p>
       <Cmd command="cargo install --git https://github.com/Hi9841/trit" />
     </PageHead>
@@ -54,7 +54,7 @@ const version = /^version = "([^"]+)"/m.exec(readRepo("Cargo.toml"))?.[1] ?? "";
   <Footer updated={updated} />
 </Base>
 
-<!-- A link to a README heading on the old one-page docs (/docs/#rust) goes to its page now. -->
+<!-- A link to a reference heading on the old one-page docs (/docs/#rust) goes to its page now. -->
 <script is:inline define:vars={{ anchorMap }}>
   const target = anchorMap[decodeURIComponent(location.hash.slice(1))];
 

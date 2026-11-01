@@ -29,14 +29,14 @@ The one-page site of Trit, built with Astro. Run the commands in `site/`.
   `max-width: var(--measure)` (52ch: at most about 78 Geist characters).
 - The pages read the repository at build time (`src/lib/data.ts`,
   `src/lib/repo.ts`), so a rebuild picks up every change there:
-  - `/models`: `src/catalog.rs`, and the search order from the README.
+  - `/models`: `src/catalog.rs`, and the search order from `docs/reference.md`.
   - `/benchmarks`: `bench/runtimes-results.jsonl` for the tables, and
     the summary table, cleanup, method and reproduce sections of
     `docs/engine-comparison.md`. It leaves out the report's sections 4 and 5
     and the summary's numbered notes: they describe an earlier Trit.
-  - `/docs`: `README.md`, a page for each `## ` section (`src/lib/docs.ts`).
+  - `/docs`: `docs/reference.md`, a page for each `## ` section (`src/lib/docs.ts`).
     `/docs/` has the introduction and Start here; Contents and Performance
-    are left out. A README link to a heading goes to that heading's page,
+    are left out. A link to a heading of the reference goes to that heading's page,
     and an old `/docs/#heading` link moves to it.
 - The home page's numbers come from the same files; update them by hand.
 - Colours are tokens in `src/styles/global.css`: a light and a dark palette.

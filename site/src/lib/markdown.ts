@@ -2,21 +2,21 @@
 // ids, links rewritten for the site, and code highlighted for both themes.
 import { Marked, type Token, type Tokens } from "marked";
 import { codeToHtml, createCssVariablesTheme } from "shiki";
-import { docsHref, landingHref, README } from "./docs";
+import { docsHref, landingHref, DOCS } from "./docs";
 import { links } from "./links";
 import { blobUrl } from "./repo";
 import { slug } from "./sections";
 
 export { sections, slug, type Section } from "./sections";
 
-// Pages on this site that replace a file of the repository. The README is
+// Pages on this site that replace a file of the repository. The reference is
 // many pages: a link to one of its headings goes to the page of that heading.
 const onSite = new Map([["docs/engine-comparison.md", links.benchmarks]]);
 
 // A link relative to `from` (a file of the repository) becomes a site page,
 // a GitHub URL, or stays as it is.
 function rewrite(href: string, from: string) {
-  if (href.startsWith("#") && from === README) return docsHref(href.slice(1));
+  if (href.startsWith("#") && from === DOCS) return docsHref(href.slice(1));
 
   if (/^([a-z]+:|#|\/)/i.test(href)) return href;
   const [path, hash = ""] = href.split("#");
@@ -29,7 +29,7 @@ function rewrite(href: string, from: string) {
 
   const target = parts.join("/");
 
-  if (target === README) return hash ? docsHref(hash) : landingHref;
+  if (target === DOCS) return hash ? docsHref(hash) : landingHref;
 
   const page = onSite.get(target);
 
@@ -49,7 +49,7 @@ const escapeHtml = (text: string) =>
 // the theme and stays in two tones: ink, and muted comments.
 const theme = createCssVariablesTheme({ name: "site", variablePrefix: "--code-" });
 
-// The name a code block shows in its header. "text" blocks in the README are program output.
+// The name a code block shows in its header. "text" blocks in the reference are program output.
 const LANGUAGE = new Map([
   ["powershell", "PowerShell"],
   ["bash", "Shell"],

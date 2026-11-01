@@ -9,6 +9,7 @@ on:
     paths:
       - site/**
       - README.md
+      - docs/reference.md
       - Cargo.toml
       - src/catalog.rs
       - bench/benchmarks.json

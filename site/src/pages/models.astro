@@ -19,17 +19,17 @@ const families = [...new Set(catalog.map((m) => familyOf(m.kind)))].map((family)
 const updated = updatedOf([
   "site/src/pages/models.astro",
   "src/catalog.rs",
-  "README.md",
+  "docs/reference.md",
   "bench/benchmarks.json",
 ]);
 
 const largest = Math.max(...catalog.map((m) => m.mb));
 
-// From the README's Models section: everything after its table (the download
+// From the reference's Models section: everything after its table (the download
 // and where Trit looks for a model).
-const readme = (sections(readRepo("README.md")).find((s) => s.id === "models")?.body ?? "").split("\n");
+const readme = (sections(readRepo("docs/reference.md")).find((s) => s.id === "models")?.body ?? "").split("\n");
 const tableEnd = readme.findLastIndex((line) => line.startsWith("|"));
-const search = await render(readme.slice(tableEnd + 1).join("\n"), "README.md");
+const search = await render(readme.slice(tableEnd + 1).join("\n"), "docs/reference.md");
 ---
 
 <Base
