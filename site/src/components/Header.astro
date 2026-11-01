@@ -59,7 +59,7 @@ const page = (href: string) => (here === href || here.startsWith(`${href}/`) ? "
     gap: 10px;
     font-size: 20px;
     font-weight: 500;
-    letter-spacing: -0.02em;
+    letter-spacing: 0;
     text-decoration: none;
   }
   .mark :global(svg) {
@@ -77,10 +77,10 @@ const page = (href: string) => (here === href || here.startsWith(`${href}/`) ? "
     padding-right: 62px;
     align-items: center;
     gap: 32px;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
+    text-transform: none;
   }
   .nav a {
     color: var(--muted);

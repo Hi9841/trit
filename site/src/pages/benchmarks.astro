@@ -458,14 +458,12 @@ const cells = (r: Run) => [
     color: var(--muted);
   }
   .tag {
-    display: inline-block;
+    display: inline;
     margin-left: 8px;
-    padding: 0 6px;
-    border-radius: 2px;
-    background: var(--accent);
-    color: var(--paper);
-    font-size: 12px;
-    font-weight: 600;
+    background: none;
+    color: var(--accent-text);
+    font-size: 13px;
+    font-weight: 500;
     vertical-align: 1px;
   }
 
@@ -485,7 +483,7 @@ const cells = (r: Run) => [
     color: var(--muted);
   }
   .p1 {
-    font-weight: 650;
+    font-weight: 600;
     color: var(--ink);
   }
   .p4 {
@@ -509,10 +507,10 @@ const cells = (r: Run) => [
     border-top: 1px solid var(--rule);
   }
   .vs dt {
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    text-transform: none;
     color: var(--muted);
   }
   .vs .mine {
@@ -525,9 +523,9 @@ const cells = (r: Run) => [
   }
   .vs .mine sup {
     margin-left: 6px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
     color: var(--accent-text);
     vertical-align: 0.9em;
   }
