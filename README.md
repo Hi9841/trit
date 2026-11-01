@@ -653,6 +653,20 @@ Parakeet Redux. Other models run on the GPU and gain little; a decoder step
 | `TRIT_ISA` | `scalar`, `avx2`, or `avxvnni` forces another kernel path, for tests |
 | `TRIT_LIB` | The library path, for the Python and Node bindings |
 
+## Architecture
+
+Your program calls Trit through the Rust crate or the C ABI. The Python, C#,
+and Node bindings use the C ABI. Speech to text goes through the log-mel
+features, the encoder, the decoder, and the tokenizer, and S1-mini can then
+clean the text. Text to speech goes through the phonemizer and a voice. The
+loader reads Hugging Face checkpoints, and the weight cache maps the
+converted weights. The CPU kernels run the products, and the GPU can run
+some of them when the build has the `gpu` feature.
+
+<p align="center">
+  <img src="docs/images/architecture.png" alt="Trit architecture: programs call the Trit API through Rust or the C ABI; speech to text runs log-mel, encoder, decoder, tokenizer, and optional S1-mini cleanup; text to speech runs the phonemizer and a voice; the loader converts Hugging Face checkpoints into a mapped weight cache for the CPU kernels and the optional GPU." width="920">
+</p>
+
 ## Layout of the code
 
 | Folder or file | Part |
