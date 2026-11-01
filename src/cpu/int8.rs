@@ -12,6 +12,7 @@
 
 use super::buf::Buf;
 use super::kernels::{Isa, Quantized, GROUP};
+use super::store::Store;
 use super::team;
 
 #[derive(Clone, Copy)]
@@ -133,9 +134,9 @@ pub struct Int8 {
     pub k: usize,
     /// SIMD: `[n / rows][k / 4][rows][4]` bytes, so one load holds four
     /// consecutive inputs of `rows` outputs. Scalar: row-major `n x k`.
-    weights: Vec<i8>,
+    weights: Store<i8>,
     /// `[n / rows][k / GROUP][rows]`.
-    scales: Vec<f32>,
+    scales: Store<f32>,
 }
 
 impl Int8 {
@@ -192,8 +193,8 @@ impl Int8 {
             path,
             n,
             k,
-            weights,
-            scales,
+            weights: Store::weights(weights),
+            scales: Store::weights(scales),
         }
     }
 

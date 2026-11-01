@@ -610,3 +610,26 @@ against 59 ms a take): its int8 CPU weights become f16 on the GPU.
 - Sensitivity: on Redux, a gain of 1.00003 (`/ 32767` against `/ 32768`) changes 15 of 46
   take texts and 5 errors on `other`. Error counts that differ by a few words are within
   this noise.
+
+## Session 2026-11-01 (memory)
+
+### M-001 the weight cache (`cpu/store.rs`, PUBLIC API: `LoadOptions::cache`, `Trit::load_reporting`)
+
+- Measured: Parakeet Ultra, private memory 828 MB after load and `release_memory`,
+  live heap 734 MB (int8 encoder 592 MB, `RelCache` 70 MB, f32 joint and
+  subsampler 39 MB, LSTM and embedding 23 MB). mimalloc held about 120 MB
+  over the live heap (Redux too: 425 MB against 300 MB live); the
+  `MIMALLOC_ARENA_EAGER_COMMIT`, `MIMALLOC_PURGE_*` options did not change it.
+- Rejected: the system allocator as the global allocator. It removes the
+  gap (Redux 315 MB, Ultra 746 MB), but `ab.py` gives Redux 4.5 % and Ultra
+  4.0 % slower (p < 1e-38), 0 texts differ.
+- Change: large weight buffers are `Store`s. With `cache`, the first load
+  writes them to `<model>/.trit/`, then loads again from the mapped file; a
+  buffer is mapped only when its bytes equal the fresh conversion.
+- Result (probe, after `release_memory`): Redux private 425 -> 24 MB, working
+  set 324 -> 313 MB; Ultra private 828 -> 21 MB, working set 800 -> 747 MB.
+  Load: Redux 110 -> 146 ms, Ultra 354 -> 458 ms; first load 0.75 s and 2.0 s.
+- Gate: `ab.py` v0.4.1 against the cache build, 3 rounds, clean, other, tech,
+  takes: Redux 0 of 486 texts differ, errors 392 = 392, medians 30.2 and 30.1 ms
+  (per-clip ratio 1.006); Ultra 0 of 486, errors 255 = 255, 34.1 and 34.1 ms
+  (ratio 0.994). The two ratios go opposite ways: noise.

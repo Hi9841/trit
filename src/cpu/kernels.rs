@@ -11,6 +11,7 @@
 //! two shifts and a mask per weight vector cost less than the bytes they save.
 
 use super::buf::Buf;
+use super::store::Store;
 use super::team;
 use std::cell::RefCell;
 
@@ -80,9 +81,9 @@ pub struct Ternary {
     pub isa: Isa,
     pub n: usize,
     pub k: usize,
-    codes: Vec<u8>,
+    codes: Store<u8>,
     /// `[n / rows][k / GROUP][rows]`.
-    scales: Vec<f32>,
+    scales: Store<f32>,
     /// A GPU copy of the codes and scales, present when the load asked for the GPU.
     #[cfg(feature = "gpu")]
     gpu: Option<Box<crate::gpu::Layer>>,
@@ -182,8 +183,8 @@ impl Ternary {
             isa,
             n,
             k,
-            codes: packed,
-            scales: packed_scales,
+            codes: Store::weights(packed),
+            scales: Store::weights(packed_scales),
             #[cfg(feature = "gpu")]
             gpu: None,
         }

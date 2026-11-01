@@ -10,6 +10,7 @@ pub mod gemm;
 pub mod half;
 pub mod int8;
 pub mod kernels;
+pub mod store;
 pub mod team;
 pub mod tensors;
 mod torch_file;

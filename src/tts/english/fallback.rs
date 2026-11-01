@@ -146,6 +146,10 @@ pub struct Fallback {
 
 impl Fallback {
     pub fn load(dir: &Path) -> Result<Self, String> {
+        crate::cpu::store::in_turn(|| Self::load_now(dir))
+    }
+
+    fn load_now(dir: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(dir.join("config.json"))
             .map_err(|e| format!("cannot read {}: {e}", dir.join("config.json").display()))?;
         let c = Json::parse(&text)?;

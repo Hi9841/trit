@@ -103,6 +103,7 @@ impl Tensors {
             let error = |e: std::io::Error| format!("Could not read {}: {e}", path.display());
             let file = File::open(path).map_err(error)?;
             let total = file.metadata().map_err(error)?.len() as usize;
+            super::store::will_read(total as u64);
             let mut length = [0u8; 8];
             read_at(&file, &mut length, 0).map_err(error)?;
             let header_len = u64::from_le_bytes(length) as usize;
@@ -313,6 +314,12 @@ fn parse_header(
 
 /// Positional read of the whole buffer; safe to call from several threads.
 pub(super) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    read_exact_at(file, buf, offset)?;
+    super::store::did_read(buf.len() as u64);
+    Ok(())
+}
+
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::FileExt;

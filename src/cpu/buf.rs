@@ -56,6 +56,15 @@ impl Buf {
     }
 }
 
+impl Buf {
+    /// The values as a vector that leaves the pool.
+    pub fn into_vec(mut self) -> Vec<f32> {
+        let mut values = std::mem::take(&mut self.data);
+        values.truncate(self.len);
+        values
+    }
+}
+
 /// Frees every pooled buffer.
 pub fn clear_pool() {
     POOL.lock().clear();

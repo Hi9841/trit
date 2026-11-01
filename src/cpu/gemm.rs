@@ -5,6 +5,7 @@
 use super::buf::Buf;
 use super::fgemm;
 use super::int8::Int8;
+use super::store::Store;
 use super::team;
 
 /// Output rows per task of the bias and ReLU pass.
@@ -22,9 +23,9 @@ pub struct Dense {
 }
 
 enum Weights {
-    F32(Vec<f32>),
+    F32(Store<f32>),
     /// f16 bits, as stored; widened to f32 inside the product.
-    F16(Vec<u16>),
+    F16(Store<u16>),
     /// Int8 with a scale per row and 128 inputs; i8 activations.
     Int8(Int8),
     /// Int8 storage with a scale per row and 128 inputs, widened to f32 for
@@ -35,8 +36,8 @@ enum Weights {
 
 /// Rows of int8 values with one f32 scale per `Q8_GROUP` values.
 pub struct Q8 {
-    values: Vec<i8>,
-    scales: Vec<f32>,
+    values: Store<i8>,
+    scales: Store<f32>,
     groups: usize,
 }
 
@@ -73,8 +74,8 @@ impl Q8 {
             }
         });
         Self {
-            values,
-            scales,
+            values: Store::weights(values),
+            scales: Store::weights(scales),
             groups,
         }
     }
@@ -124,7 +125,13 @@ impl Dense {
         in_features: usize,
     ) -> Result<Self, String> {
         let len = weight.len();
-        Self::checked(Weights::F32(weight), len, bias, out_features, in_features)
+        Self::checked(
+            Weights::F32(Store::weights(weight)),
+            len,
+            bias,
+            out_features,
+            in_features,
+        )
     }
 
     /// A layer with f16 weights (as bits); half the memory of `new`.
@@ -135,7 +142,13 @@ impl Dense {
         in_features: usize,
     ) -> Result<Self, String> {
         let len = weight.len();
-        Self::checked(Weights::F16(weight), len, bias, out_features, in_features)
+        Self::checked(
+            Weights::F16(Store::weights(weight)),
+            len,
+            bias,
+            out_features,
+            in_features,
+        )
     }
 
     /// A layer from the model file: `parts` are tensor names (without
@@ -243,7 +256,7 @@ impl Dense {
             // A shape the int8 kernels cannot take: int8 storage, f32 math.
             Weights::Q8(Q8::quantize(&weight, out_features, in_features))
         } else {
-            Weights::F32(weight)
+            Weights::F32(Store::weights(weight))
         };
         Self::checked(weight, len, bias, out_features, in_features)
     }
@@ -260,12 +273,14 @@ impl Dense {
     ) -> Result<Self, String> {
         let len = rows * cols;
         let weight = match t.precision() {
-            Precision::F32 => Weights::F32(t.f32_len(name, len)?),
+            Precision::F32 => Weights::F32(Store::weights(t.f32_len(name, len)?)),
             Precision::Int8 => Weights::Q8(Q8::quantize(&t.f32_len(name, len)?, rows, cols)),
             Precision::Auto if cols >= INT8_TABLE_WIDTH => {
                 Weights::Q8(Q8::quantize(&t.f32_len(name, len)?, rows, cols))
             }
-            Precision::Auto | Precision::F16 => Weights::F16(t.f16_bits(name, len)?),
+            Precision::Auto | Precision::F16 => {
+                Weights::F16(Store::weights(t.f16_bits(name, len)?))
+            }
         };
         Self::checked(weight, len, None, rows, cols)
     }

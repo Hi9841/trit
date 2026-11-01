@@ -64,7 +64,7 @@ Every integration, in every language, follows these rules.
 | Model | A model is a Hugging Face folder with `config.json` and `model.safetensors`. Give a folder, a name from the [catalog](#models), or nothing (the default is `parakeet-redux`). |
 | Output | Plain text. An empty string means no speech. `segments` gives timed parts. |
 | Errors | Rust returns `Err(String)` with the cause and the fix. The C ABI returns NULL or -1; read `trit_last_error()`. The bindings raise `TritError` (Python, Node) or `TritException` (C#). |
-| Memory | Trit keeps a buffer pool (up to 16 MB) and scratch per thread for the next call. Call `release_memory()` when the program goes idle. |
+| Memory | Trit keeps a buffer pool (up to 16 MB) and scratch per thread for the next call. Call `release_memory()` when the program goes idle. With `LoadOptions::cache`, the weights are a mapped file, not private memory (see "Weight cache"). |
 | Language | `en` for English apps. Without a language, multilingual Whisper detects it. See [Languages](#languages). |
 
 ## Select a model
@@ -161,7 +161,8 @@ trit::release_memory();                                  // when the app goes id
 | Item | Meaning |
 |---|---|
 | `Trit::load(dir) -> Result<Trit, String>` | Loads a model folder; the family comes from `config.json` |
-| `Trit::load_with(dir, &LoadOptions { precision, device })` | The same with a `Precision` (`Auto`, `Int8`, `F16`, `F32`) and a `Device` (`Cpu` default, `Gpu`, `Auto`) |
+| `Trit::load_with(dir, &LoadOptions { precision, device, cache })` | The same with a `Precision` (`Auto`, `Int8`, `F16`, `F32`), a `Device` (`Cpu` default, `Gpu`, `Auto`), and `cache` (see "Weight cache") |
+| `Trit::load_reporting(dir, &LoadOptions, Option<Arc<dyn Fn(f32) + Send + Sync>>)` | `load_with`; the function gets the fraction loaded, 0 to 1, for a progress bar |
 | `Trit::transcribe(&self, &[f32]) -> String` | Text; the model detects the language |
 | `Trit::transcribe_with(&self, &[f32], &Options) -> String` | Text with `Options { language, task, beam, fallback }` |
 | `Trit::segments(&self, &[f32], &Options) -> Vec<Segment>` | Timed parts: `start`, `end` in seconds, `text` |
@@ -228,7 +229,7 @@ trit_free(engine);
 | `trit_release_memory(void)` | Gives memory that earlier calls freed back to the system |
 | `trit_last_error(void)` | The reason for the last failure on this thread |
 | `trit_free_text(char *)`, `trit_free(Trit *)`, `trit_cleaner_free(TritCleaner *)`, `trit_voice_free(TritVoice *)`, `trit_free_samples(float *, size_t count)` | Free. NULL is a no-op |
-| `trit_version(void)` | `"0.4.1"` |
+| `trit_version(void)` | `"0.5.0"` |
 
 Rules: strings are UTF-8. `language` is an ISO 639-1 code or NULL. Free
 every returned text with `trit_free_text`, and the samples of `trit_speak`
@@ -520,6 +521,28 @@ Both runtimes speak; Parakeet Redux transcribes both.
 - Text to speech is the one part of Trit with lists of words: the
   lexicons, the number words, and the tagger's weights. A voice needs them
   to say text. Speech to text has none.
+
+
+## Weight cache
+
+`LoadOptions { cache: true, .. }` (Rust API) keeps the converted weights of
+a model in `<model>/.trit/weights-<version>-<precision>-<kernels>.bin` and
+maps that file. The files of the model stay as published.
+
+- Memory: the weights count as file memory, shared and not private, and the
+  system can drop their pages under memory pressure and read them back from
+  the file, not from the page file. Parakeet Ultra: private memory 828 MB
+  without the cache, 21 MB with it; Parakeet Redux: 425 MB and 24 MB. The
+  working set falls by 10 to 50 MB too: the weights are not in the heap.
+- Disk: the file is the size of the weights in memory (Ultra 725 MB,
+  Redux 293 MB).
+- Time: the first load writes the file and loads again (Ultra 2.0 s, Redux
+  0.75 s). A later load takes about 100 ms more than one without the cache
+  (Ultra 0.46 s against 0.35 s), because it compares the file with the
+  fresh conversion.
+- Text: every load converts the weights and maps a buffer only when the file
+  holds the same bytes. A stale or damaged file only costs a rewrite; it
+  cannot change a transcript.
 
 ## Precision
 

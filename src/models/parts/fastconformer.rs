@@ -9,6 +9,7 @@ use crate::cpu::buf::Buf;
 use crate::cpu::fgemm;
 use crate::cpu::gemm::{Dense, Precision};
 use crate::cpu::kernels::Ternary;
+use crate::cpu::store::Store;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
 use crate::models::config::Json;
@@ -582,7 +583,9 @@ impl Block {
         });
         let positions = self
             .rel_cache
-            .rows(t, (d, heads), |table, rows| self.rel_k.forward(table, rows));
+            .rows(t, (d, heads), Store::owned, |table, rows| {
+                self.rel_k.forward(table, rows)
+            });
         let scale = 1.0 / (hd as f32).sqrt();
         let chunk = ATTENTION_ROWS.min(t);
         let chunks = t.div_ceil(chunk);
@@ -709,7 +712,7 @@ struct RelRows {
     reach: usize,
     /// Positions `reach` down to `-reach`, per head: `[head][position][hd]`,
     /// so the positions of a block of queries are consecutive rows.
-    rows: Buf,
+    rows: Store<f32>,
 }
 
 impl RelRows {
@@ -726,11 +729,13 @@ impl RelRows {
 }
 
 impl RelCache {
-    /// The table, grown first when `t` frames reach past it.
+    /// The table, grown first when `t` frames reach past it. `keep` stores
+    /// a new table: `Store::weights` at load, `Store::owned` after.
     fn rows(
         &self,
         t: usize,
         (d, heads): (usize, usize),
+        keep: fn(Vec<f32>) -> Store<f32>,
         project: impl Fn(&[f32], usize) -> Buf,
     ) -> Arc<RelRows> {
         if let Some(rows) = self.table.read().as_ref().filter(|r| r.reach + 1 >= t) {
@@ -754,7 +759,7 @@ impl RelCache {
         });
         let rows = Arc::new(RelRows {
             reach,
-            rows: by_head,
+            rows: keep(by_head.into_vec()),
         });
         *table = Some(Arc::clone(&rows));
         rows
@@ -1067,7 +1072,7 @@ impl Parakeet {
         for block in &self.blocks {
             block
                 .rel_cache
-                .rows(POSITION_REACH + 1, shape, |table, rows| {
+                .rows(POSITION_REACH + 1, shape, Store::weights, |table, rows| {
                     block.rel_k.forward(table, rows)
                 });
         }

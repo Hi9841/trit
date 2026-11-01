@@ -4,6 +4,7 @@
 
 use super::buf::Buf;
 use super::fgemm::{level, Level};
+use super::store::Store;
 use super::team;
 use super::tensors::f16_to_f32;
 
@@ -13,7 +14,7 @@ const ROWS_PER_TASK: usize = 128;
 pub struct HalfDense {
     pub out_features: usize,
     pub in_features: usize,
-    weight: Vec<u16>,
+    weight: Store<u16>,
     bias: Option<Vec<f32>>,
 }
 
@@ -36,7 +37,7 @@ impl HalfDense {
         Ok(Self {
             out_features,
             in_features,
-            weight,
+            weight: Store::weights(weight),
             bias,
         })
     }

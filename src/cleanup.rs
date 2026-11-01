@@ -139,6 +139,10 @@ impl Cleaner {
 
     /// `load`, with a choice of precision and device.
     pub fn load_with(dir: &Path, options: &crate::LoadOptions) -> Result<Self, String> {
+        crate::cpu::store::in_turn(|| Self::load_now(dir, options))
+    }
+
+    fn load_now(dir: &Path, options: &crate::LoadOptions) -> Result<Self, String> {
         let _team = crate::cpu::enter(crate::Spread::OneCache);
         let bpe = Bpe::open(&dir.join("tokenizer.json"))?;
         let stop = ["<|im_end|>", "<|endoftext|>"]

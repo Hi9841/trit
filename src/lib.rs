@@ -221,12 +221,20 @@ pub fn gpu_weight_bytes() -> u64 {
     }
 }
 
-/// How to load a model. `LoadOptions::default()` is `Precision::Auto` on the CPU.
-/// `TRIT_DEVICE` overrides `device` at load.
+/// How to load a model. `LoadOptions::default()` is `Precision::Auto` on the
+/// CPU, with no cache. `TRIT_DEVICE` overrides `device` at load.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LoadOptions {
     pub precision: Precision,
     pub device: Device,
+    /// Keep the converted weights in `<model>/.trit/` and map that file.
+    /// The weights then count as file memory, not private memory (about
+    /// 590 MB of Parakeet Ultra's 750 MB); the system can drop those pages
+    /// under memory pressure and read them back from the file. The file
+    /// takes the same space on disk. The first load writes it and loads
+    /// again. Every load still converts the weights and maps a buffer only
+    /// when the file holds the same bytes, so the text never changes.
+    pub cache: bool,
 }
 
 /// One loaded model. Load once and keep it. `Trit` is `Send + Sync`; calls
@@ -251,11 +259,25 @@ impl Trit {
         Self::load_with(model_dir, &LoadOptions::default())
     }
 
-    /// `load`, with a choice of precision and device.
+    /// `load`, with a choice of precision, device, and cache.
     pub fn load_with(model_dir: &Path, options: &LoadOptions) -> Result<Self, String> {
-        Ok(Self {
-            model: models::Model::load(model_dir, options.precision, options.device)?,
-        })
+        Self::load_reporting(model_dir, options, None)
+    }
+
+    /// `load_with`; `progress` gets the fraction of the load done, from 0
+    /// to 1, from the thread that loads.
+    pub fn load_reporting(
+        model_dir: &Path,
+        options: &LoadOptions,
+        progress: Option<std::sync::Arc<dyn Fn(f32) + Send + Sync>>,
+    ) -> Result<Self, String> {
+        let cache = options
+            .cache
+            .then(|| cpu::store::file_name(options.precision.name()));
+        let model = cpu::store::load(model_dir, cache, progress, release_memory, || {
+            models::Model::load(model_dir, options.precision, options.device)
+        })?;
+        Ok(Self { model })
     }
 
     /// The model family, for example `parakeet_tdt`.

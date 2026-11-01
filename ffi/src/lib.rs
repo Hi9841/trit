@@ -179,7 +179,11 @@ unsafe fn load_options(
     } else {
         Device::parse(text_arg(device, "device")?)?
     };
-    Ok(LoadOptions { precision, device })
+    Ok(LoadOptions {
+        precision,
+        device,
+        cache: false,
+    })
 }
 
 /// Returns the memory freed by earlier calls to the system. Call it when

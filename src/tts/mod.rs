@@ -139,6 +139,10 @@ impl Voice {
     /// `model.safetensors`, `vocab.json`, `tokenizer_config.json`). The
     /// weights stay f32.
     pub fn load(dir: &Path) -> Result<Self, String> {
+        crate::cpu::store::in_turn(|| Self::load_now(dir))
+    }
+
+    fn load_now(dir: &Path) -> Result<Self, String> {
         let _team = crate::cpu::enter(SPREAD);
         let model = if kokoro::is_kokoro(dir) {
             Model::Kokoro(Box::new(KokoroVoice {

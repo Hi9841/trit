@@ -640,7 +640,11 @@ fn load_options(parsed: &Parsed) -> Result<trit::LoadOptions, ExitCode> {
             .map_err(|e| usage_error(&e, &format!("--device {}", trit::Device::NAMES.join("|"))))?,
         None => trit::Device::Cpu,
     };
-    Ok(trit::LoadOptions { precision, device })
+    Ok(trit::LoadOptions {
+        precision,
+        device,
+        cache: false,
+    })
 }
 
 fn load_cleaner(
