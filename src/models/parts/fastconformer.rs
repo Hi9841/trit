@@ -66,10 +66,16 @@ pub struct Config {
 pub enum Attention {
     Full,
     /// `regular` local attention: keys `i - left ..= i + right`.
-    Band { left: usize, right: usize },
+    Band {
+        left: usize,
+        right: usize,
+    },
     /// `chunked_limited` (cache-aware streaming): chunks of `right + 1`
     /// frames; a query reads its own chunk and `left / (right + 1)` before it.
-    Chunked { chunk: usize, left_chunks: usize },
+    Chunked {
+        chunk: usize,
+        left_chunks: usize,
+    },
 }
 
 impl Attention {
@@ -86,7 +92,10 @@ impl Attention {
             return Err("config.json: an attention context with one open side".into());
         }
         let (left, right) = (left as usize, right as usize);
-        match json.str("encoder_config.attention_style").unwrap_or("regular") {
+        match json
+            .str("encoder_config.attention_style")
+            .unwrap_or("regular")
+        {
             "regular" => Ok(Self::Band { left, right }),
             "chunked_limited" => Ok(Self::Chunked {
                 chunk: right + 1,
@@ -709,7 +718,9 @@ impl Block {
                         // largest score is the largest of the ones kept.
                         row[..keys.start].fill(f32::NEG_INFINITY);
                         row[keys.end..].fill(f32::NEG_INFINITY);
-                        max = row[keys.clone()].iter().fold(f32::NEG_INFINITY, |m, v| m.max(*v));
+                        max = row[keys.clone()]
+                            .iter()
+                            .fold(f32::NEG_INFINITY, |m, v| m.max(*v));
                     }
                     row.iter_mut().for_each(|value| *value -= max);
                     activation::exp(row);

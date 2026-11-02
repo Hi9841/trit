@@ -1,7 +1,11 @@
-//! Canary (NVIDIA Canary 1B v2): the Parakeet FastConformer encoder and a
-//! transformer decoder that writes the text after a prompt of task tokens.
-//! Tensor names follow the Hugging Face `CanaryForConditionalGeneration`
-//! files; the prompt follows the model's `chat_template.jinja`.
+//! Canary (NVIDIA Canary 1B v2, 1B, 1B flash, 180M flash): the Parakeet
+//! FastConformer encoder and a transformer decoder that writes the text
+//! after a prompt of task tokens. Tensor names follow the Hugging Face
+//! `CanaryForConditionalGeneration` files; the prompt follows the model's
+//! `chat_template.jinja` (`canary2`), or Canary 1B's shorter `canary`
+//! prompt. A GGUF file gives the languages and the prompt format in its
+//! config, and the 180M model a projection from the encoder width to the
+//! decoder width.
 
 use crate::audio::mel::MelFrontend;
 use crate::cpu::{buf::Buf, gemm::Dense, team};
@@ -16,7 +20,7 @@ use crate::text::sentencepiece::Tokenizer;
 use crate::{Device, Options, Precision};
 use parking_lot::RwLock;
 
-/// Languages Canary 1B v2 reads and writes.
+/// Languages Canary 1B v2 reads and writes; a config's `languages` replaces them.
 const LANGUAGES: [&str; 25] = [
     "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt", "mt",
     "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
@@ -30,6 +34,10 @@ struct Config {
     vocab: usize,
     max_tokens: usize,
     eos: usize,
+    languages: Vec<String>,
+    /// Canary 1B's prompt: `<|startoftranscript|>`, the spoken language, the
+    /// task, the language to write, and punctuation. Else the `canary2` prompt.
+    short_prompt: bool,
 }
 
 impl Config {
@@ -49,6 +57,14 @@ impl Config {
             vocab: num("vocab_size")?,
             max_tokens: num("max_position_embeddings")?,
             eos: num("eos_token_id")?,
+            languages: match json.get("languages").as_array() {
+                Some(list) => list
+                    .iter()
+                    .filter_map(|code| code.as_str().map(str::to_string))
+                    .collect(),
+                None => LANGUAGES.iter().map(|code| code.to_string()).collect(),
+            },
+            short_prompt: json.str("prompt_format") == Some("canary"),
         })
     }
 }
@@ -69,13 +85,16 @@ struct Layer {
 pub struct Canary {
     config: Config,
     encoder: Encoder,
+    /// From the encoder width to the decoder width, when they differ.
+    projection: Option<Dense>,
     frontend: MelFrontend,
     layers: Vec<Layer>,
     embed: Dense,
     embed_norm: Norm,
     norm: Norm,
     head: Dense,
-    /// Sinusoidal positions, `max_tokens x d`, already divided by `sqrt(d)`.
+    /// Sinusoidal positions, `max_tokens x d`, already divided by `sqrt(d)`:
+    /// the file's own table, or computed in the Transformers layout.
     positions: Vec<f32>,
     tokenizer: Tokenizer,
     dictionary: RwLock<Option<Bias>>,
@@ -97,6 +116,7 @@ impl Canary {
         let encoder_config = EncoderConfig::parse(config)?;
         let t = files.tensors(precision, device)?;
         let frontend = MelFrontend::new(encoder_config.mels);
+        let width = encoder_config.hidden;
         let encoder = Encoder::load(&t, encoder_config)?;
         encoder.warm_positions();
         let d = c.d;
@@ -119,15 +139,30 @@ impl Canary {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let projection = match t.has("model.encoder_decoder_proj.weight") {
+            true => Some(linear(&t, "model.encoder_decoder_proj", d, width)?),
+            false if width == d => None,
+            false => {
+                return Err(
+                    "Canary: the encoder and decoder differ in width, with no projection".into(),
+                )
+            }
+        };
         Ok(Self {
             encoder,
+            projection,
             frontend,
             layers,
             embed: Dense::table(&t, "model.decoder.embed_tokens.weight", c.vocab, d)?,
             embed_norm: Norm::load(&t, "model.decoder.embedding_layernorm", d)?,
             norm: Norm::load(&t, "model.decoder.norm", d)?,
             head: linear(&t, "proj_out", c.vocab, d)?,
-            positions: sinusoids(c.max_tokens, d),
+            // The model's own table when the file has it (a NeMo or GGUF
+            // file interleaves sine and cosine); else the Transformers table.
+            positions: match t.has("model.decoder.pos_enc") {
+                true => t.f32_len("model.decoder.pos_enc", c.max_tokens * d)?,
+                false => sinusoids(c.max_tokens, d),
+            },
             tokenizer: Tokenizer::parse(&files.read("tokenizer.json")?)?,
             dictionary: RwLock::new(None),
             config: c,
@@ -164,10 +199,14 @@ impl Canary {
             return String::new();
         }
         let (encoded, t) = self.encoder.encode(&features, frames);
+        let encoded = match &self.projection {
+            Some(projection) => projection.forward(&encoded, t),
+            None => encoded,
+        };
         let language = options
             .language
             .as_deref()
-            .filter(|code| LANGUAGES.contains(code))
+            .filter(|code| self.config.languages.iter().any(|known| known == code))
             .unwrap_or("en");
         let lang = format!("<|{language}|>");
         // The second language token is the language to write.
@@ -175,20 +214,29 @@ impl Canary {
             crate::Task::Transcribe => lang.clone(),
             crate::Task::Translate => "<|en|>".to_string(),
         };
-        let prompt: Option<Vec<usize>> = [
-            "<|startofcontext|>",
-            "<|startoftranscript|>",
-            "<|emo:undefined|>",
-            &lang,
-            &target,
-            "<|pnc|>",
-            "<|noitn|>",
-            "<|notimestamp|>",
-            "<|nodiarize|>",
-        ]
-        .iter()
-        .map(|token| self.tokenizer.id(token))
-        .collect();
+        let task = match options.task {
+            crate::Task::Transcribe => "<|transcribe|>",
+            crate::Task::Translate => "<|translate|>",
+        };
+        let tokens: &[&str] = if self.config.short_prompt {
+            &["<|startoftranscript|>", &lang, task, &target, "<|pnc|>"]
+        } else {
+            &[
+                "<|startofcontext|>",
+                "<|startoftranscript|>",
+                "<|emo:undefined|>",
+                &lang,
+                &target,
+                "<|pnc|>",
+                "<|noitn|>",
+                "<|notimestamp|>",
+                "<|nodiarize|>",
+            ]
+        };
+        let prompt: Option<Vec<usize>> = tokens
+            .iter()
+            .map(|token| self.tokenizer.id(token))
+            .collect();
         let Some(prompt) = prompt else {
             return String::new();
         };

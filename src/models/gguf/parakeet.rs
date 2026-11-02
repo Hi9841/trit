@@ -35,7 +35,11 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
                 "it is a cache-aware streaming model; Trit does not run those yet",
             ))
         }
-        other => return Err(unsupported(&format!("attention style `{other}` is not run"))),
+        other => {
+            return Err(unsupported(&format!(
+                "attention style `{other}` is not run"
+            )))
+        }
     };
     let kernel = enc("conv_kernel")?;
     let conv = |key: &str, default: u64| {
@@ -101,16 +105,13 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     config["blank_token_id"] = json!(blank);
     config["decoder_hidden_size"] = json!(g.num("stt.parakeet.predictor.hidden")?);
     config["num_decoder_layers"] = json!(g.num("stt.parakeet.predictor.n_layers")?);
-    config["max_symbols_per_step"] = json!(g
-        .get("stt.parakeet.tdt.max_symbols")
-        .as_u64()
-        .unwrap_or(10));
+    config["max_symbols_per_step"] =
+        json!(g.get("stt.parakeet.tdt.max_symbols").as_u64().unwrap_or(10));
     if model_type == "parakeet_tdt" {
         config["durations"] = g.get("stt.parakeet.tdt.durations").clone();
     }
     Ok(config)
 }
-
 
 /// A transcribe.cpp tensor name as the Hugging Face Parakeet checkpoint
 /// names it (`scripts/convert-parakeet.py` names them from NeMo's), or

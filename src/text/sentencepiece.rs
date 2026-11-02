@@ -18,21 +18,31 @@ impl Tokenizer {
     pub fn parse(text: &str) -> Result<Self, String> {
         let json: serde_json::Value =
             serde_json::from_str(text).map_err(|e| format!("tokenizer.json is not JSON: {e}"))?;
-        let vocab = json["model"]["vocab"]
-            .as_object()
-            .ok_or("tokenizer.json has no model.vocab")?;
-        let size = vocab
-            .values()
-            .filter_map(serde_json::Value::as_u64)
-            .max()
-            .map_or(0, |max| max as usize + 1);
+        // A map of piece to id (BPE), or a list of `[piece, score]` whose
+        // position is the id (Unigram): a list keeps a piece that several
+        // ids share, as an aggregate tokenizer (Canary) has.
+        let vocab = &json["model"]["vocab"];
+        let entries: Vec<(String, usize)> = if let Some(list) = vocab.as_array() {
+            list.iter()
+                .enumerate()
+                .map(|(id, entry)| (entry[0].as_str().unwrap_or_default().to_string(), id))
+                .collect()
+        } else {
+            vocab
+                .as_object()
+                .ok_or("tokenizer.json has no model.vocab")?
+                .iter()
+                .filter_map(|(piece, id)| Some((piece.clone(), id.as_u64()? as usize)))
+                .collect()
+        };
+        let size = entries.iter().map(|(_, id)| id + 1).max().unwrap_or(0);
         let mut pieces = vec![String::new(); size];
         let mut ids = HashMap::new();
-        for (piece, id) in vocab {
-            if let Some(id) = id.as_u64() {
-                pieces[id as usize] = piece.clone();
-                ids.insert(piece.clone(), id as usize);
-            }
+        for (piece, id) in entries {
+            pieces[id] = piece.clone();
+            // The first id of a shared piece (Canary: the special tokens'
+            // range, then the first language's).
+            ids.entry(piece).or_insert(id);
         }
         let mut special = vec![false; size];
         for added in json["added_tokens"].as_array().into_iter().flatten() {
@@ -247,10 +257,11 @@ pub fn tokenizer_json(pieces: &[String], scores: &[f32], kinds: &[u64]) -> Resul
             .then(kb.1.cmp(&ka.1))
             .then(kb.2.cmp(&ka.2))
     });
-    let vocab: serde_json::Map<String, serde_json::Value> = pieces
+    // A list, so a piece that several ids share keeps every id.
+    let vocab: Vec<serde_json::Value> = pieces
         .iter()
-        .enumerate()
-        .map(|(id, piece)| (piece.clone(), serde_json::json!(id)))
+        .zip(scores)
+        .map(|(piece, score)| serde_json::json!([piece, score]))
         .collect();
     let merges: Vec<serde_json::Value> = pairs
         .iter()
@@ -263,7 +274,7 @@ pub fn tokenizer_json(pieces: &[String], scores: &[f32], kinds: &[u64]) -> Resul
         .map(|(id, piece)| serde_json::json!({ "id": id, "content": piece, "special": true }))
         .collect();
     Ok(serde_json::json!({
-        "model": { "type": "BPE", "vocab": vocab, "merges": merges },
+        "model": { "type": "Unigram", "vocab": vocab, "merges": merges },
         "added_tokens": added,
     })
     .to_string())

@@ -50,7 +50,11 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
 /// The decoding rules of `generation_config.json`: the special tokens, the
 /// languages, and the suppressed tokens.
 pub fn generation(g: &Gguf) -> Result<Value, String> {
-    let languages = g.get("general.languages").as_array().cloned().unwrap_or_default();
+    let languages = g
+        .get("general.languages")
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let mut lang_to_id = Map::new();
     for code in languages.iter().filter_map(Value::as_str) {
         let tag = format!("<|{code}|>");

@@ -6,11 +6,12 @@
 //! runs as Q8_0). The family loaders then run as for a Hugging Face folder.
 //!
 //! Read: `parakeet` (TDT, RNNT, CTC; full or local attention), `whisper`,
-//! and `moonshine`.
+//! `moonshine`, and `canary`.
 
 use crate::cpu::tensors::Tensors;
 use crate::{Device, Precision};
 
+mod canary;
 mod moonshine;
 mod parakeet;
 mod whisper;
@@ -21,6 +22,7 @@ enum Arch {
     Parakeet,
     Whisper,
     Moonshine,
+    Canary,
 }
 
 /// What a tensor of the file becomes.
@@ -142,8 +144,9 @@ impl Gguf {
             Some("parakeet") => Ok(Arch::Parakeet),
             Some("whisper") => Ok(Arch::Whisper),
             Some("moonshine") => Ok(Arch::Moonshine),
+            Some("canary") => Ok(Arch::Canary),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, and moonshine",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, and canary",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -177,6 +180,7 @@ impl Gguf {
                 Arch::Parakeet => parakeet::hf_name(name).map(Name::To),
                 Arch::Whisper => whisper::hf_name(name),
                 Arch::Moonshine => moonshine::hf_name(name),
+                Arch::Canary => canary::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -207,13 +211,18 @@ impl Gguf {
         let fail = |e: String| format!("{}: {e}", self.path.display());
         match (arch, name) {
             (Arch::Parakeet, "config.json") => parakeet::config(self).map(|v| v.to_string()),
-            (Arch::Whisper, "config.json") => whisper::config(self).map(|v| v.to_string()).map_err(fail),
+            (Arch::Whisper, "config.json") => {
+                whisper::config(self).map(|v| v.to_string()).map_err(fail)
+            }
             (Arch::Moonshine, "config.json") => {
                 moonshine::config(self).map(|v| v.to_string()).map_err(fail)
             }
-            (Arch::Whisper, "generation_config.json") => {
-                whisper::generation(self).map(|v| v.to_string()).map_err(fail)
+            (Arch::Canary, "config.json") => {
+                canary::config(self).map(|v| v.to_string()).map_err(fail)
             }
+            (Arch::Whisper, "generation_config.json") => whisper::generation(self)
+                .map(|v| v.to_string())
+                .map_err(fail),
             (_, "tokenizer.json") => self.tokenizer_json(),
             _ => Err(format!("{} has no {name}", self.path.display())),
         }
