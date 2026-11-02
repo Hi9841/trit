@@ -10,12 +10,12 @@
 use crate::audio::{self, whisper_mel::WhisperMel};
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
 use crate::models::config::Json;
+use crate::models::files::Files;
 use crate::models::layers::{add_into, attention, linear, stacked, Gelu, Norm};
 use crate::models::parts::qwen3::Qwen3;
 use crate::text::bpe::Bpe;
 use crate::{Device, Options, Precision};
 use parking_lot::RwLock;
-use std::path::Path;
 
 /// Longest window per pass. The reference takes up to 20 minutes at once;
 /// two minutes keep the decoder's caches near 100 MB.
@@ -161,12 +161,12 @@ pub struct Qwen3Asr {
 
 impl Qwen3Asr {
     pub fn load(
-        dir: &Path,
+        files: &Files,
         json: &Json,
         precision: Precision,
         device: Device,
     ) -> Result<Self, String> {
-        let t = Tensors::open_dir(dir, precision, device)?;
+        let t = files.tensors(precision, device)?;
         let encoder = AudioEncoder::load(&t, AudioConfig::parse(json)?)?;
         let decoder = Qwen3::from_tensors(&t, json, (TEXT, "thinker."))?;
         drop(t);
@@ -175,7 +175,7 @@ impl Qwen3Asr {
                 "config.json: the audio encoder and the language model differ in width".into(),
             );
         }
-        let bpe = Bpe::open_dir(dir)?;
+        let bpe = Bpe::from_files(files)?;
         let id = |token: &str| {
             bpe.id(token)
                 .ok_or_else(|| format!("the tokenizer has no {token}"))

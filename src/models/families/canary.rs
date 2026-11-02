@@ -4,8 +4,9 @@
 //! files; the prompt follows the model's `chat_template.jinja`.
 
 use crate::audio::mel::MelFrontend;
-use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
+use crate::cpu::{buf::Buf, gemm::Dense, team};
 use crate::models::config::Json;
+use crate::models::files::Files;
 use crate::models::layers::{
     add_into, argmax, attention, attention_with, linear, stacked, HeadMajor, Norm,
 };
@@ -14,7 +15,6 @@ use crate::models::parts::logit_bias::{self as bias, Bias, BiasWeights};
 use crate::text::sentencepiece::Tokenizer;
 use crate::{Device, Options, Precision};
 use parking_lot::RwLock;
-use std::path::Path;
 
 /// Languages Canary 1B v2 reads and writes.
 const LANGUAGES: [&str; 25] = [
@@ -88,14 +88,14 @@ type Caches = (Vec<Vec<f32>>, Vec<Vec<f32>>);
 
 impl Canary {
     pub fn load(
-        dir: &Path,
+        files: &Files,
         config: &Json,
         precision: Precision,
         device: Device,
     ) -> Result<Self, String> {
         let c = Config::parse(config)?;
         let encoder_config = EncoderConfig::parse(config)?;
-        let t = Tensors::open_dir(dir, precision, device)?;
+        let t = files.tensors(precision, device)?;
         let frontend = MelFrontend::new(encoder_config.mels);
         let encoder = Encoder::load(&t, encoder_config)?;
         encoder.warm_positions();
@@ -128,7 +128,7 @@ impl Canary {
             norm: Norm::load(&t, "model.decoder.norm", d)?,
             head: linear(&t, "proj_out", c.vocab, d)?,
             positions: sinusoids(c.max_tokens, d),
-            tokenizer: Tokenizer::open(&dir.join("tokenizer.json"))?,
+            tokenizer: Tokenizer::parse(&files.read("tokenizer.json")?)?,
             dictionary: RwLock::new(None),
             config: c,
         })

@@ -208,12 +208,17 @@ impl Tensors {
 
     /// How to store tensor `name`: the precision the caller asked for, or,
     /// under `Precision::Auto` in a GGUF file, the type it is stored in
-    /// (Q8_0, F16, or F32).
+    /// (Q8_0, F16, or F32; Q8_0 for ggml's other block types).
     pub fn precision_of(&self, name: &str) -> Precision {
         if self.precision != Precision::Auto || !self.native {
             return self.precision;
         }
         match self.entries.get(name).map(|entry| entry.dtype.as_str()) {
+            // No kernel runs ggml's other block types: they are expanded at
+            // load and held as Q8_0 (`ggml_quants`).
+            Some(dtype) if super::ggml_quants::BlockType::from_name(dtype).is_some() => {
+                Precision::Q8_0
+            }
             Some("Q8_0") => Precision::Q8_0,
             Some("F16") => Precision::F16,
             Some("F32") => Precision::F32,
@@ -295,6 +300,9 @@ impl Tensors {
             let count = (entry.end - entry.start) / Q8_0_BYTES * 32;
             return Ok(self.q8_0(name, count)?.to_f32());
         }
+        if let Some(block) = super::ggml_quants::BlockType::from_name(&entry.dtype) {
+            return Ok(block.expand(&self.raw(name, entry)?));
+        }
         let width = match entry.dtype.as_str() {
             "F32" => 4,
             "F16" | "BF16" => 2,
@@ -344,7 +352,8 @@ impl Tensors {
     /// F32 and BF16 are rounded to the nearest f16 as they are read.
     pub fn f16_bits(&self, name: &str, len: usize) -> Result<Vec<u16>, String> {
         let entry = self.entry(name)?;
-        if entry.dtype == "Q8_0" {
+        if entry.dtype == "Q8_0" || super::ggml_quants::BlockType::from_name(&entry.dtype).is_some()
+        {
             return Ok(self
                 .f32_len(name, len)?
                 .into_iter()

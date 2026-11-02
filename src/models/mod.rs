@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod families;
+pub mod files;
 pub mod gguf;
 pub mod layers;
 pub mod nemo;
@@ -43,10 +44,19 @@ impl Package {
         nemo::find(dir).is_some() != gguf::find(dir).is_some()
     }
 
-    pub fn config(&self) -> Result<config::Json, String> {
+    /// Whether the package gives file `name` of a Hugging Face folder.
+    pub fn provides(&self, name: &str) -> bool {
         match self {
-            Self::Nemo(archive) => archive.config(),
-            Self::Gguf(file) => file.config(),
+            Self::Nemo(archive) => archive.provides(name),
+            Self::Gguf(file) => file.provides(name),
+        }
+    }
+
+    /// File `name` of a Hugging Face folder of this model.
+    pub fn file(&self, name: &str) -> Result<String, String> {
+        match self {
+            Self::Nemo(archive) => archive.file(name),
+            Self::Gguf(file) => file.file(name),
         }
     }
 
@@ -58,13 +68,6 @@ impl Package {
         match self {
             Self::Nemo(archive) => archive.tensors(precision, device),
             Self::Gguf(file) => file.tensors(precision, device),
-        }
-    }
-
-    pub fn tokenizer(&self) -> Result<crate::text::sentencepiece::Tokenizer, String> {
-        match self {
-            Self::Nemo(archive) => archive.tokenizer(),
-            Self::Gguf(file) => file.tokenizer(),
         }
     }
 }
@@ -79,7 +82,7 @@ pub trait Family: Send + Sync {
     fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String>;
 }
 
-type Load = fn(&Path, &config::Json, Precision, Device) -> Result<Box<dyn Family>, String>;
+type Load = fn(&files::Files, &config::Json, Precision, Device) -> Result<Box<dyn Family>, String>;
 
 /// One `model_type` Trit runs: the worker spread its products need, and
 /// how to load it.
@@ -94,42 +97,42 @@ pub const FAMILIES: [Row; 8] = [
     Row {
         model_type: "parakeet_tdt",
         spread: Spread::OneCache,
-        load: |dir, c, p, d| Ok(Box::new(parakeet::Parakeet::load(dir, c, p, d)?)),
+        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
     },
     Row {
         model_type: "parakeet_rnnt",
         spread: Spread::OneCache,
-        load: |dir, c, p, d| Ok(Box::new(parakeet::Parakeet::load(dir, c, p, d)?)),
+        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
     },
     Row {
         model_type: "parakeet_ctc",
         spread: Spread::OneCache,
-        load: |dir, c, p, d| Ok(Box::new(parakeet::Parakeet::load(dir, c, p, d)?)),
+        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
     },
     Row {
         model_type: "whisper",
         spread: Spread::AllCores,
-        load: |dir, c, p, d| Ok(Box::new(whisper::Whisper::load(dir, c, p, d)?)),
+        load: |files, c, p, d| Ok(Box::new(whisper::Whisper::load(files, c, p, d)?)),
     },
     Row {
         model_type: "moonshine",
         spread: Spread::OneCache,
-        load: |dir, c, p, d| Ok(Box::new(moonshine::Moonshine::load(dir, c, p, d)?)),
+        load: |files, c, p, d| Ok(Box::new(moonshine::Moonshine::load(files, c, p, d)?)),
     },
     Row {
         model_type: "canary",
         spread: Spread::OneCache,
-        load: |dir, c, p, d| Ok(Box::new(canary::Canary::load(dir, c, p, d)?)),
+        load: |files, c, p, d| Ok(Box::new(canary::Canary::load(files, c, p, d)?)),
     },
     Row {
         model_type: "wav2vec2",
         spread: Spread::OneCache,
-        load: |dir, c, p, d| Ok(Box::new(wav2vec2::Wav2Vec2::load(dir, c, p, d)?)),
+        load: |files, c, p, d| Ok(Box::new(wav2vec2::Wav2Vec2::load(files, c, p, d)?)),
     },
     Row {
         model_type: "qwen3_asr",
         spread: Spread::OneCache,
-        load: |dir, c, p, d| Ok(Box::new(qwen3_asr::Qwen3Asr::load(dir, c, p, d)?)),
+        load: |files, c, p, d| Ok(Box::new(qwen3_asr::Qwen3Asr::load(files, c, p, d)?)),
     },
 ];
 
@@ -149,17 +152,8 @@ pub struct Model(Box<dyn Family>);
 
 impl Model {
     pub fn load(dir: &Path, precision: Precision, device: Device) -> Result<Self, String> {
-        // A folder with one published `.nemo` or `.gguf` file and no `config.json`.
-        let package = Package::find(dir)?;
-        let config = match &package {
-            Some(package) => package.config()?,
-            None => {
-                let text = std::fs::read_to_string(dir.join("config.json")).map_err(|e| {
-                    format!("cannot read {}: {e}", dir.join("config.json").display())
-                })?;
-                config::Json::parse(&text)?
-            }
-        };
+        let files = files::Files::open(dir)?;
+        let config = config::Json::parse(&files.read("config.json")?)?;
         let kind = config
             .str("model_type")
             .ok_or("config.json has no `model_type`")?;
@@ -181,12 +175,7 @@ impl Model {
             })?;
         let device = crate::active_device(device)?;
         let _team = crate::cpu::enter(row.spread);
-        // A package's config names a Parakeet type only.
-        if let Some(package) = package {
-            let model = parakeet::Parakeet::load_package(&package, &config, precision, device)?;
-            return Ok(Self(Box::new(model)));
-        }
-        Ok(Self((row.load)(dir, &config, precision, device)?))
+        Ok(Self((row.load)(&files, &config, precision, device)?))
     }
 
     pub fn kind(&self) -> &'static str {

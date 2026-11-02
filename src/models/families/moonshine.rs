@@ -4,8 +4,9 @@
 //! `MoonshineForConditionalGeneration` files.
 
 use crate::audio;
-use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
+use crate::cpu::{activation, buf::Buf, gemm::Dense, team};
 use crate::models::config::Json;
+use crate::models::files::Files;
 use crate::models::layers::{
     add_into, argmax, attention, attention_with, conv_columns, linear, stacked, Gelu, HeadMajor,
     Norm, Rotary,
@@ -15,7 +16,6 @@ use crate::models::parts::logit_bias::{self as bias, Bias, BiasWeights};
 use crate::text::sentencepiece::Tokenizer;
 use crate::{Device, Options, Precision};
 use parking_lot::RwLock;
-use std::path::Path;
 
 /// Moonshine reads at most about 6.5 tokens per second of speech.
 const TOKENS_PER_SECOND: f32 = 6.5;
@@ -118,13 +118,13 @@ pub struct Moonshine {
 
 impl Moonshine {
     pub fn load(
-        dir: &Path,
+        files: &Files,
         config: &Json,
         precision: Precision,
         device: Device,
     ) -> Result<Self, String> {
         let c = Config::parse(config)?;
-        let t = Tensors::open_dir(dir, precision, device)?;
+        let t = files.tensors(precision, device)?;
         let d = c.d;
         let attn = |p: &str, n: &str| format!("{p}.{n}");
         let encoder = (0..c.encoder_layers)
@@ -197,7 +197,7 @@ impl Moonshine {
             decoder_norm: Norm::load(&t, "model.decoder.norm", d)?,
             embed: Dense::table(&t, "model.decoder.embed_tokens.weight", c.vocab, d)?,
             rotary: Rotary::interleaved(c.rotary_dims, c.rope_base),
-            tokenizer: Tokenizer::open(&dir.join("tokenizer.json"))?,
+            tokenizer: Tokenizer::parse(&files.read("tokenizer.json")?)?,
             dictionary: RwLock::new(None),
             config: c,
         })

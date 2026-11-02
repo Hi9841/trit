@@ -5,12 +5,11 @@
 //! (`Precision::Q8_0`). The tensor names become the names of the Hugging
 //! Face Parakeet checkpoint, so the Parakeet loader runs unchanged.
 //!
-//! Read: Parakeet TDT and RNNT with full attention (`general.architecture`
+//! Read: Parakeet TDT, RNNT, and CTC with full attention (`general.architecture`
 //! `parakeet`). Other architectures and streaming-only models are an error.
 
 use crate::cpu::tensors::Tensors;
 use crate::models::config::Json;
-use crate::text::sentencepiece::Tokenizer;
 use crate::{Device, Precision};
 use serde_json::{json, Map, Value};
 use std::fs::File;
@@ -85,14 +84,19 @@ impl Gguf {
         let data = here.div_ceil(alignment) * alignment;
         let mut tensors = Vec::with_capacity(infos.len());
         for (name, kind, count, offset) in infos {
-            let (dtype, bytes) = match kind {
-                0 => ("F32", count * 4),
-                1 => ("F16", count * 2),
-                8 if count % 32 == 0 => ("Q8_0", count / 32 * 34),
-                30 => ("BF16", count * 2),
-                other => {
+            let block = crate::cpu::ggml_quants::BlockType::from_ggml(kind);
+            let (dtype, bytes) = match (kind, block) {
+                (0, _) => ("F32", count * 4),
+                (1, _) => ("F16", count * 2),
+                (8, _) if count % 32 == 0 => ("Q8_0", count / 32 * 34),
+                (30, _) => ("BF16", count * 2),
+                (_, Some((block, name))) if count % block.block().0 as u64 == 0 => {
+                    let (values, size) = block.block();
+                    (name, count / values as u64 * size as u64)
+                }
+                (other, _) => {
                     return Err(fail(format!(
-                        "tensor {name} has ggml type {other}; Trit reads F32, F16, BF16, and Q8_0"
+                        "tensor {name} has ggml type {other}; Trit reads F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, and Q6_K"
                     )))
                 }
             };
@@ -137,6 +141,7 @@ impl Gguf {
         let model_type = match head {
             "tdt" => "parakeet_tdt",
             "rnnt" => "parakeet_rnnt",
+            "ctc" => "parakeet_ctc",
             other => return Err(unsupported(&format!("head `{other}` is not read"))),
         };
         let enc = |key: &str| self.num(&format!("stt.parakeet.encoder.{key}"));
@@ -174,13 +179,9 @@ impl Gguf {
         {
             return Err(unsupported("its audio features differ from Parakeet's"));
         }
+        let blank = self.num("tokenizer.ggml.blank_token_id")?;
         let mut config = json!({
             "model_type": model_type,
-            "vocab_size": self.num("stt.parakeet.predictor.vocab")?,
-            "blank_token_id": self.num("tokenizer.ggml.blank_token_id")?,
-            "decoder_hidden_size": self.num("stt.parakeet.predictor.hidden")?,
-            "num_decoder_layers": self.num("stt.parakeet.predictor.n_layers")?,
-            "max_symbols_per_step": self.get("stt.parakeet.tdt.max_symbols").as_u64().unwrap_or(10),
             "encoder_config": {
                 "hidden_size": enc("d_model")?,
                 "intermediate_size": enc("d_ff")?,
@@ -195,6 +196,21 @@ impl Gguf {
                 "scale_input": self.get("stt.parakeet.encoder.xscaling").as_bool().unwrap_or(false),
             },
         });
+        if model_type == "parakeet_ctc" {
+            // The CTC head writes one logit per token and one for the blank,
+            // the last id, which Trit calls the pad token.
+            config["vocab_size"] = json!(blank + 1);
+            config["pad_token_id"] = json!(blank);
+            return Ok(Json::from_value(config));
+        }
+        config["vocab_size"] = json!(self.num("stt.parakeet.predictor.vocab")?);
+        config["blank_token_id"] = json!(blank);
+        config["decoder_hidden_size"] = json!(self.num("stt.parakeet.predictor.hidden")?);
+        config["num_decoder_layers"] = json!(self.num("stt.parakeet.predictor.n_layers")?);
+        config["max_symbols_per_step"] = json!(self
+            .get("stt.parakeet.tdt.max_symbols")
+            .as_u64()
+            .unwrap_or(10));
         if model_type == "parakeet_tdt" {
             config["durations"] = self.get("stt.parakeet.tdt.durations").clone();
         }
@@ -213,8 +229,22 @@ impl Gguf {
         Tensors::open_gguf(&self.path, renamed, precision, device)
     }
 
+    /// The files a Hugging Face folder of this model holds.
+    pub fn provides(&self, name: &str) -> bool {
+        matches!(name, "config.json" | "tokenizer.json")
+    }
+
+    /// `config.json`, or `tokenizer.json` from the `tokenizer.ggml.*` lists.
+    pub fn file(&self, name: &str) -> Result<String, String> {
+        match name {
+            "config.json" => Ok(self.config()?.to_text()),
+            "tokenizer.json" => self.sentencepiece_json(),
+            _ => Err(format!("{} has no {name}", self.path.display())),
+        }
+    }
+
     /// The tokenizer from `tokenizer.ggml.tokens`, `scores`, and `token_type`.
-    pub fn tokenizer(&self) -> Result<Tokenizer, String> {
+    fn sentencepiece_json(&self) -> Result<String, String> {
         let list = |key: &str| {
             self.get(key)
                 .as_array()
@@ -232,13 +262,8 @@ impl Gguf {
             .iter()
             .map(|kind| kind.as_u64().unwrap_or(1))
             .collect::<Vec<_>>();
-        if scores.len() != pieces.len() || kinds.len() != pieces.len() {
-            return Err(format!(
-                "{}: the tokenizer lists differ in length",
-                self.path.display()
-            ));
-        }
-        Tokenizer::from_pieces(pieces, &scores, &kinds)
+        crate::text::sentencepiece::tokenizer_json(&pieces, &scores, &kinds)
+            .map_err(|e| format!("{}: {e}", self.path.display()))
     }
 }
 
@@ -298,6 +323,7 @@ fn hf_name(name: &str) -> Option<String> {
         ("joint.enc.", "encoder_projector."),
         ("joint.pred.", "decoder.decoder_projector."),
         ("joint.out.", "joint.head."),
+        ("head.ctc.", "ctc_head."),
         ("vad.", "vad_head."),
     ] {
         if let Some(rest) = name.strip_prefix(from) {

@@ -29,17 +29,13 @@ enum Split {
 }
 
 impl Bpe {
-    /// The tokenizer of a model folder: `tokenizer.json`, or the older
+    /// The tokenizer of a model: `tokenizer.json`, or the older
     /// `vocab.json`, `merges.txt`, and `tokenizer_config.json` (Qwen3-ASR).
-    pub fn open_dir(dir: &Path) -> Result<Self, String> {
-        let json = dir.join("tokenizer.json");
-        if json.is_file() {
-            return Self::open(&json);
+    pub fn from_files(files: &crate::models::files::Files) -> Result<Self, String> {
+        if files.has("tokenizer.json") {
+            return Self::parse(&files.read("tokenizer.json")?);
         }
-        let read = |name: &str| {
-            std::fs::read_to_string(dir.join(name))
-                .map_err(|e| format!("cannot read {}: {e}", dir.join(name).display()))
-        };
+        let read = |name: &str| files.read(name);
         let vocab: serde_json::Value = serde_json::from_str(&read("vocab.json")?)
             .map_err(|e| format!("vocab.json is not JSON: {e}"))?;
         let merges = read("merges.txt")?;
@@ -77,8 +73,13 @@ impl Bpe {
     pub fn open(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        Self::parse(&text)
+    }
+
+    /// The tokenizer of a `tokenizer.json`'s text.
+    pub fn parse(text: &str) -> Result<Self, String> {
         let json: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| format!("tokenizer.json is not JSON: {e}"))?;
+            serde_json::from_str(text).map_err(|e| format!("tokenizer.json is not JSON: {e}"))?;
         let vocab = json["model"]["vocab"]
             .as_object()
             .ok_or("tokenizer.json has no model.vocab")?;

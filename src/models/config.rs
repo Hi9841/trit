@@ -12,9 +12,14 @@ impl Json {
             .map_err(|e| format!("config.json is not JSON: {e}"))
     }
 
-    /// A config built in code (the config of a `.nemo` archive).
+    /// A config built in code (the config of a `.nemo` or `.gguf` file).
     pub fn from_value(value: Value) -> Self {
         Self(value)
+    }
+
+    /// The config as the text of a `config.json`.
+    pub fn to_text(&self) -> String {
+        self.0.to_string()
     }
 
     /// The value at `path`, keys joined by dots (`encoder_config.hidden_size`);

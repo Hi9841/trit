@@ -3,7 +3,6 @@
 //! pieces: `▁` marks the start of a word.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 pub const WORD_START: char = '\u{2581}';
 
@@ -16,12 +15,6 @@ pub struct Tokenizer {
 }
 
 impl Tokenizer {
-    pub fn open(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("Could not read {}: {e}", path.display()))?;
-        Self::parse(&text)
-    }
-
     pub fn parse(text: &str) -> Result<Self, String> {
         let json: serde_json::Value =
             serde_json::from_str(text).map_err(|e| format!("tokenizer.json is not JSON: {e}"))?;
@@ -67,93 +60,6 @@ impl Tokenizer {
             if let Some((a, b)) = pair {
                 merges.entry((a.to_string(), b.to_string())).or_insert(rank);
             }
-        }
-        Ok(Self {
-            pieces,
-            special,
-            ids,
-            merges,
-        })
-    }
-
-    /// Reads a SentencePiece model (`tokenizer.model`, a protobuf), as a
-    /// `.nemo` archive holds it.
-    pub fn from_sentencepiece(bytes: &[u8]) -> Result<Self, String> {
-        let mut pieces = Vec::new();
-        let mut scores = Vec::new();
-        let mut kinds = Vec::new();
-        for (field, value) in protobuf_fields(bytes)? {
-            // ModelProto.pieces = 1.
-            let Protobuf::Bytes(entry) = value else {
-                continue;
-            };
-            if field != 1 {
-                continue;
-            }
-            let (mut piece, mut score, mut kind) = (String::new(), 0.0f32, 1u64);
-            for (field, value) in protobuf_fields(entry)? {
-                match (field, value) {
-                    (1, Protobuf::Bytes(text)) => {
-                        piece = String::from_utf8(text.to_vec())
-                            .map_err(|_| "a piece is not UTF-8".to_string())?;
-                    }
-                    (2, Protobuf::Fixed32(bits)) => score = f32::from_bits(bits),
-                    (3, Protobuf::Varint(value)) => kind = value,
-                    _ => {}
-                }
-            }
-            pieces.push(piece);
-            scores.push(score);
-            kinds.push(kind);
-        }
-        Self::from_pieces(pieces, &scores, &kinds)
-    }
-
-    /// A SentencePiece BPE vocabulary: each piece, its score, and its type
-    /// (1 normal, 2 unknown, 3 control, 4 user defined, 5 unused, 6 byte),
-    /// as a SentencePiece model and GGUF's `tokenizer.ggml.*` list them.
-    /// Unknown and control pieces are special. The merges are the ones
-    /// Transformers derives (`generate_merges` of `convert_slow_tokenizer.py`):
-    /// every split of a piece into two pieces of the vocabulary, the highest
-    /// piece score first.
-    pub fn from_pieces(pieces: Vec<String>, scores: &[f32], kinds: &[u64]) -> Result<Self, String> {
-        if pieces.is_empty() {
-            return Err("the tokenizer has no pieces".into());
-        }
-        let special: Vec<bool> = kinds.iter().map(|kind| matches!(kind, 2 | 3)).collect();
-        let ids: HashMap<String, usize> = pieces
-            .iter()
-            .enumerate()
-            .map(|(id, piece)| (piece.clone(), id))
-            .collect();
-        let mut pairs: Vec<(String, String, f32)> = Vec::new();
-        for ((piece, score), _) in pieces
-            .iter()
-            .zip(scores)
-            .zip(&special)
-            .filter(|(_, special)| !**special)
-        {
-            let chars: Vec<(usize, char)> = piece.char_indices().collect();
-            let mut local: Vec<(String, String, f32)> = chars
-                .iter()
-                .skip(1)
-                .map(|(at, _)| (piece[..*at].to_string(), piece[*at..].to_string(), *score))
-                .filter(|(left, right, _)| ids.contains_key(left) && ids.contains_key(right))
-                .collect();
-            local.sort_by_key(|(left, right, _)| (ids[left], ids[right]));
-            pairs.extend(local);
-        }
-        // Python's stable sort with reverse=True on (score, len(left), len(right)).
-        pairs.sort_by(|a, b| {
-            let key = |p: &(String, String, f32)| (p.2, p.0.chars().count(), p.1.chars().count());
-            let (ka, kb) = (key(a), key(b));
-            kb.0.total_cmp(&ka.0)
-                .then(kb.1.cmp(&ka.1))
-                .then(kb.2.cmp(&ka.2))
-        });
-        let mut merges = HashMap::new();
-        for (rank, (left, right, _)) in pairs.into_iter().enumerate() {
-            merges.entry((left, right)).or_insert(rank);
         }
         Ok(Self {
             pieces,
@@ -265,6 +171,102 @@ impl Tokenizer {
         }
         Some(ids)
     }
+}
+
+/// A SentencePiece model (`tokenizer.model`, a protobuf, as a `.nemo`
+/// archive holds it) as the `tokenizer.json` that `Tokenizer::parse` reads.
+pub fn sentencepiece_json(bytes: &[u8]) -> Result<String, String> {
+    let mut pieces = Vec::new();
+    let mut scores = Vec::new();
+    let mut kinds = Vec::new();
+    for (field, value) in protobuf_fields(bytes)? {
+        // ModelProto.pieces = 1.
+        let Protobuf::Bytes(entry) = value else {
+            continue;
+        };
+        if field != 1 {
+            continue;
+        }
+        let (mut piece, mut score, mut kind) = (String::new(), 0.0f32, 1u64);
+        for (field, value) in protobuf_fields(entry)? {
+            match (field, value) {
+                (1, Protobuf::Bytes(text)) => {
+                    piece = String::from_utf8(text.to_vec())
+                        .map_err(|_| "a piece is not UTF-8".to_string())?;
+                }
+                (2, Protobuf::Fixed32(bits)) => score = f32::from_bits(bits),
+                (3, Protobuf::Varint(value)) => kind = value,
+                _ => {}
+            }
+        }
+        pieces.push(piece);
+        scores.push(score);
+        kinds.push(kind);
+    }
+    tokenizer_json(&pieces, &scores, &kinds)
+}
+
+/// A SentencePiece BPE vocabulary as a `tokenizer.json`: each piece, its
+/// score, and its type (1 normal, 2 unknown, 3 control, 4 user defined,
+/// 5 unused, 6 byte), as a SentencePiece model and GGUF's
+/// `tokenizer.ggml.*` lists give them. Unknown and control pieces are
+/// special. The merges are the ones Transformers derives (`generate_merges`
+/// of `convert_slow_tokenizer.py`): every split of a piece into two pieces
+/// of the vocabulary, the highest piece score first.
+pub fn tokenizer_json(pieces: &[String], scores: &[f32], kinds: &[u64]) -> Result<String, String> {
+    if pieces.is_empty() || scores.len() != pieces.len() || kinds.len() != pieces.len() {
+        return Err("the tokenizer lists are empty or differ in length".into());
+    }
+    let special: Vec<bool> = kinds.iter().map(|kind| matches!(kind, 2 | 3)).collect();
+    let ids: HashMap<&str, usize> = pieces
+        .iter()
+        .enumerate()
+        .map(|(id, piece)| (piece.as_str(), id))
+        .collect();
+    let mut pairs: Vec<(&str, &str, f32)> = Vec::new();
+    for ((piece, score), _) in pieces
+        .iter()
+        .zip(scores)
+        .zip(&special)
+        .filter(|(_, special)| !**special)
+    {
+        let mut local: Vec<(&str, &str, f32)> = piece
+            .char_indices()
+            .skip(1)
+            .map(|(at, _)| (&piece[..at], &piece[at..], *score))
+            .filter(|(left, right, _)| ids.contains_key(left) && ids.contains_key(right))
+            .collect();
+        local.sort_by_key(|(left, right, _)| (ids[left], ids[right]));
+        pairs.extend(local);
+    }
+    // Python's stable sort with reverse=True on (score, len(left), len(right)).
+    pairs.sort_by(|a, b| {
+        let key = |p: &(&str, &str, f32)| (p.2, p.0.chars().count(), p.1.chars().count());
+        let (ka, kb) = (key(a), key(b));
+        kb.0.total_cmp(&ka.0)
+            .then(kb.1.cmp(&ka.1))
+            .then(kb.2.cmp(&ka.2))
+    });
+    let vocab: serde_json::Map<String, serde_json::Value> = pieces
+        .iter()
+        .enumerate()
+        .map(|(id, piece)| (piece.clone(), serde_json::json!(id)))
+        .collect();
+    let merges: Vec<serde_json::Value> = pairs
+        .iter()
+        .map(|(left, right, _)| serde_json::json!([left, right]))
+        .collect();
+    let added: Vec<serde_json::Value> = pieces
+        .iter()
+        .enumerate()
+        .filter(|(id, _)| special[*id])
+        .map(|(id, piece)| serde_json::json!({ "id": id, "content": piece, "special": true }))
+        .collect();
+    Ok(serde_json::json!({
+        "model": { "type": "BPE", "vocab": vocab, "merges": merges },
+        "added_tokens": added,
+    })
+    .to_string())
 }
 
 /// One field of a protobuf message.

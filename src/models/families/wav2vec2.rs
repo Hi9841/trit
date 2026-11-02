@@ -8,9 +8,9 @@
 use crate::audio;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
 use crate::models::config::Json;
+use crate::models::files::Files;
 use crate::models::layers::{add_into, attention, conv_columns, linear, stacked, Gelu, Norm};
 use crate::{Device, Precision};
-use std::path::Path;
 
 /// Longest window per pass: attention grows with the square of the frames
 /// (50 per second).
@@ -138,13 +138,13 @@ pub struct Wav2Vec2 {
 
 impl Wav2Vec2 {
     pub fn load(
-        dir: &Path,
+        files: &Files,
         json: &Json,
         precision: Precision,
         device: Device,
     ) -> Result<Self, String> {
         let c = Config::parse(json)?;
-        let t = Tensors::open_dir(dir, precision, device)?;
+        let t = files.tensors(precision, device)?;
         let p = "wav2vec2";
         let d = c.d;
         let mut convs = Vec::with_capacity(c.convs.len());
@@ -192,10 +192,10 @@ impl Wav2Vec2 {
         })
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-        let normalize = std::fs::read_to_string(dir.join("preprocessor_config.json"))
+        let normalize = files
+            .json("preprocessor_config.json")
             .ok()
-            .and_then(|text| Json::parse(&text).ok())
-            .and_then(|json| json.flag("do_normalize"))
+            .and_then(|json| json["do_normalize"].as_bool())
             .unwrap_or(true);
         Ok(Self {
             projection: linear(
@@ -209,7 +209,7 @@ impl Wav2Vec2 {
             encoder_norm: Norm::load(&t, &format!("{p}.encoder.layer_norm"), d)?,
             layers,
             head: linear(&t, "lm_head", c.vocab, d)?,
-            tokens: vocabulary(dir, c.vocab)?,
+            tokens: vocabulary(files, c.vocab)?,
             normalize,
             convs,
             config: c,
@@ -418,16 +418,12 @@ fn group_norm(x: &mut [f32], channels: usize, weight: &[f32], bias: &[f32]) {
 /// The text of each token id from `vocab.json`: the word delimiter (`|`,
 /// or `word_delimiter_token` of `tokenizer_config.json`) is a space, and
 /// special tokens (`<pad>`, `<s>`, `<unk>`) are empty.
-fn vocabulary(dir: &Path, size: usize) -> Result<Vec<String>, String> {
-    let path = dir.join("vocab.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("vocab.json is not JSON: {e}"))?;
-    let delimiter = std::fs::read_to_string(dir.join("tokenizer_config.json"))
+fn vocabulary(files: &Files, size: usize) -> Result<Vec<String>, String> {
+    let json = files.json("vocab.json")?;
+    let delimiter = files
+        .json("tokenizer_config.json")
         .ok()
-        .and_then(|text| Json::parse(&text).ok())
-        .and_then(|json| json.str("word_delimiter_token").map(str::to_string))
+        .and_then(|json| json["word_delimiter_token"].as_str().map(str::to_string))
         .unwrap_or_else(|| "|".to_string());
     let mut tokens = vec![String::new(); size];
     for (token, id) in json.as_object().ok_or("vocab.json is not a map")? {

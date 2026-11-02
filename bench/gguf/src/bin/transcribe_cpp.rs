@@ -1,7 +1,8 @@
 //! transcribe.cpp on a GGUF file, as Hex 3.2.0 calls it on the CPU
 //! (`src/transcription/gguf_session.rs`, `local_transcriber.rs`): one
 //! model, a new session for every clip, segment timestamps when the model
-//! has them, language "en". `HEXENG_THREADS` sets the session's threads.
+//! has them, language "en". `HEXENG_THREADS` sets the session's threads;
+//! `HEXENG_LANGUAGE` the language (`auto`: the model detects it).
 use transcribe_cpp::{Backend, Model, ModelOptions, RunOptions, SessionOptions, TimestampKind};
 
 fn main() {
@@ -32,7 +33,11 @@ fn main() {
         } else {
             TimestampKind::Segment
         },
-        language: Some("en".into()),
+        language: match std::env::var("HEXENG_LANGUAGE").as_deref() {
+            Ok("auto") => None,
+            Ok(code) => Some(code.to_string()),
+            Err(_) => Some("en".into()),
+        },
         ..Default::default()
     };
     let session_options = SessionOptions {

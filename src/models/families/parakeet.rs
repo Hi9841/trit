@@ -5,13 +5,11 @@
 use crate::models::parts::{dictionary, fastconformer as model, logit_bias as bias};
 
 use crate::audio::mel::MelFrontend;
-use crate::cpu::tensors::Tensors;
 use crate::models::config::Json;
-use crate::models::Package;
+use crate::models::files::Files;
 use crate::text::sentencepiece::Tokenizer;
 use crate::{Device, Options, Precision, Segment};
 use parking_lot::RwLock;
-use std::path::Path;
 
 pub use bias::BiasWeights;
 
@@ -43,33 +41,12 @@ const PAUSE_SECONDS: f32 = 1.0;
 
 impl Parakeet {
     pub fn load(
-        dir: &Path,
+        files: &Files,
         config: &Json,
         precision: Precision,
         device: Device,
     ) -> Result<Self, String> {
-        let tensors = Tensors::open_dir(dir, precision, device)?;
-        Self::from_parts(config, tensors, || {
-            Tokenizer::open(&dir.join("tokenizer.json"))
-        })
-    }
-
-    /// The model of a NeMo archive or GGUF file; `config` is `package.config()`.
-    pub fn load_package(
-        package: &Package,
-        config: &Json,
-        precision: Precision,
-        device: Device,
-    ) -> Result<Self, String> {
-        let tensors = package.tensors(precision, device)?;
-        Self::from_parts(config, tensors, || package.tokenizer())
-    }
-
-    fn from_parts(
-        config: &Json,
-        tensors: Tensors,
-        tokenizer: impl FnOnce() -> Result<Tokenizer, String>,
-    ) -> Result<Self, String> {
+        let tensors = files.tensors(precision, device)?;
         let config = model::Config::parse(config)?;
         let frontend = MelFrontend::new(config.mels);
         let model = model::Parakeet::load(&tensors, config)?;
@@ -77,7 +54,7 @@ impl Parakeet {
         // tables grow, so load does not hold both at its peak.
         drop(tensors);
         model.warm_positions();
-        let tokenizer = tokenizer()?;
+        let tokenizer = Tokenizer::parse(&files.read("tokenizer.json")?)?;
         // Only token ids: the joint row holds the durations after them.
         let vocab = model.config.vocab;
         // The blank, the last id, has no piece.

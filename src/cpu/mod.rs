@@ -7,6 +7,7 @@ pub mod activation;
 pub mod buf;
 pub mod fgemm;
 pub mod gemm;
+pub mod ggml_quants;
 pub mod half;
 pub mod int8;
 pub mod kernels;

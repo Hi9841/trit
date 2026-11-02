@@ -8,13 +8,13 @@ use crate::audio::{
     self,
     whisper_mel::{WhisperMel, WINDOW_SAMPLES},
 };
-use crate::cpu::{buf::Buf, tensors::Tensors};
+use crate::cpu::buf::Buf;
 use crate::models::config::Json;
+use crate::models::files::Files;
 use crate::models::layers::argmax;
 use crate::text::bpe::Bpe;
 use crate::{Device, Options, Precision, Task};
 use parking_lot::RwLock;
-use std::path::Path;
 
 /// OpenAI Whisper's rule for a window of silence or noise: when the model
 /// gives `<|nospeech|>` more than this probability after the start token...
@@ -51,20 +51,19 @@ struct Tokens {
 
 impl Whisper {
     pub fn load(
-        dir: &Path,
+        files: &Files,
         config: &Json,
         precision: Precision,
         device: Device,
     ) -> Result<Self, String> {
         let config = model::Config::parse(config)?;
         let mel = WhisperMel::new(config.mels);
-        let tensors = Tensors::open_dir(dir, precision, device)?;
+        let tensors = files.tensors(precision, device)?;
         let model = model::Whisper::load(&tensors, config)?;
         drop(tensors);
-        let bpe = Bpe::open(&dir.join("tokenizer.json"))?;
-        let generation = std::fs::read_to_string(dir.join("generation_config.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
+        let bpe = Bpe::parse(&files.read("tokenizer.json")?)?;
+        let generation = files
+            .json("generation_config.json")
             .unwrap_or(serde_json::Value::Null);
         let tokens = Tokens::new(&bpe, &generation)?;
         Ok(Self {

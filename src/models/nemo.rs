@@ -13,7 +13,6 @@
 
 use crate::cpu::tensors::Tensors;
 use crate::models::config::Json;
-use crate::text::sentencepiece::Tokenizer;
 use crate::{Device, Precision};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -171,14 +170,28 @@ impl Archive {
         Tensors::open_torch_in(&self.path, range, hf_name, precision, device)
     }
 
+    /// The files a Hugging Face folder of this model holds.
+    pub fn provides(&self, name: &str) -> bool {
+        matches!(name, "config.json" | "tokenizer.json")
+    }
+
+    /// `config.json`, or `tokenizer.json` from the SentencePiece model.
+    pub fn file(&self, name: &str) -> Result<String, String> {
+        match name {
+            "config.json" => Ok(self.config()?.to_text()),
+            "tokenizer.json" => self.tokenizer_json(),
+            _ => Err(format!("{} has no {name}", self.path.display())),
+        }
+    }
+
     /// The SentencePiece model that `tokenizer.model_path` names.
-    pub fn tokenizer(&self) -> Result<Tokenizer, String> {
+    fn tokenizer_json(&self) -> Result<String, String> {
         let name = self.yaml["tokenizer"]["model_path"]
             .as_str()
             .map(|path| path.trim_start_matches("nemo:").to_string())
             .ok_or("model_config.yaml has no tokenizer.model_path")?;
         let range = self.member(&name)?;
-        Tokenizer::from_sentencepiece(&self.read(range)?)
+        crate::text::sentencepiece::sentencepiece_json(&self.read(range)?)
             .map_err(|e| format!("{}: {name}: {e}", self.path.display()))
     }
 

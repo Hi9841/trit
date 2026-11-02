@@ -6,9 +6,9 @@
 
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
 use crate::models::config::Json;
+use crate::models::files::Files;
 use crate::models::layers::{add_into, argmax, attention, linear, stacked, RmsNorm, Rotary};
 use crate::{Device, Precision};
-use std::path::Path;
 
 struct Config {
     d: usize,
@@ -80,12 +80,11 @@ pub struct Prefix {
 }
 
 impl Qwen3 {
-    pub fn load(dir: &Path, precision: Precision, device: Device) -> Result<Self, String> {
+    pub fn load(files: &Files, precision: Precision, device: Device) -> Result<Self, String> {
         let device = crate::active_device(device)?;
-        let text = std::fs::read_to_string(dir.join("config.json"))
-            .map_err(|e| format!("cannot read config.json: {e}"))?;
-        let t = Tensors::open_dir(dir, precision, device)?;
-        Self::from_tensors(&t, &Json::parse(&text)?, ("", ""))
+        let config = Json::parse(&files.read("config.json")?)?;
+        let t = files.tensors(precision, device)?;
+        Self::from_tensors(&t, &config, ("", ""))
     }
 
     /// The model whose config is under `config_at` and whose tensor names

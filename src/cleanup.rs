@@ -155,7 +155,11 @@ impl Cleaner {
                 dir.display()
             ));
         }
-        let model = Qwen3::load(dir, options.precision, options.device)?;
+        let model = Qwen3::load(
+            &crate::models::files::Files::open(dir)?,
+            options.precision,
+            options.device,
+        )?;
         let system = model.prefix(&bpe.encode(&system_prefix()));
         Ok(Self {
             model,
