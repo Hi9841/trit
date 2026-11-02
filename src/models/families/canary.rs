@@ -38,6 +38,8 @@ struct Config {
     /// Canary 1B's prompt: `<|startoftranscript|>`, the spoken language, the
     /// task, the language to write, and punctuation. Else the `canary2` prompt.
     short_prompt: bool,
+    /// A token before the prompt (Cohere Transcribe's `▁`).
+    start: Option<usize>,
 }
 
 impl Config {
@@ -65,6 +67,7 @@ impl Config {
                 None => LANGUAGES.iter().map(|code| code.to_string()).collect(),
             },
             short_prompt: json.str("prompt_format") == Some("canary"),
+            start: json.num("prompt_start_token_id").ok(),
         })
     }
 }
@@ -156,7 +159,11 @@ impl Canary {
             embed: Dense::table(&t, "model.decoder.embed_tokens.weight", c.vocab, d)?,
             embed_norm: Norm::load(&t, "model.decoder.embedding_layernorm", d)?,
             norm: Norm::load(&t, "model.decoder.norm", d)?,
-            head: linear(&t, "proj_out", c.vocab, d)?,
+            // Cohere Transcribe has no `proj_out`: the token table and a bias.
+            head: match t.has("proj_out.weight") {
+                true => linear(&t, "proj_out", c.vocab, d)?,
+                false => linear(&t, "model.decoder.embed_tokens", c.vocab, d)?,
+            },
             // The model's own table when the file has it (a NeMo or GGUF
             // file interleaves sine and cosine); else the Transformers table.
             positions: match t.has("model.decoder.pos_enc") {
@@ -237,9 +244,12 @@ impl Canary {
             .iter()
             .map(|token| self.tokenizer.id(token))
             .collect();
-        let Some(prompt) = prompt else {
+        let Some(mut prompt) = prompt else {
             return String::new();
         };
+        if let Some(start) = self.config.start {
+            prompt.insert(0, start);
+        }
         let ids = self.generate(
             &encoded,
             t,

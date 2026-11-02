@@ -13,6 +13,7 @@ use crate::{Device, Precision};
 
 mod canary;
 mod canary_qwen;
+mod cohere;
 mod fun_asr;
 mod gigaam;
 mod granite_ctc;
@@ -42,6 +43,7 @@ enum Arch {
     MoonshineStreaming,
     GraniteSpeech,
     Voxtral,
+    Cohere,
 }
 
 /// What a tensor of the file becomes.
@@ -174,8 +176,9 @@ impl Gguf {
             Some("moonshine_streaming") => Ok(Arch::MoonshineStreaming),
             Some("granite_speech") => Ok(Arch::GraniteSpeech),
             Some("voxtral") => Ok(Arch::Voxtral),
+            Some("cohere_asr") => Ok(Arch::Cohere),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, moonshine_streaming, granite_speech, and voxtral",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, moonshine_streaming, granite_speech, voxtral, and cohere_asr",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -222,6 +225,7 @@ impl Gguf {
                 Arch::MoonshineStreaming => moonshine::hf_name(name),
                 Arch::GraniteSpeech => granite_speech::hf_name(name),
                 Arch::Voxtral => voxtral::hf_name(name),
+                Arch::Cohere => cohere::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -260,6 +264,9 @@ impl Gguf {
             }
             (Arch::Canary, "config.json") => {
                 canary::config(self).map(|v| v.to_string()).map_err(fail)
+            }
+            (Arch::Cohere, "config.json") => {
+                cohere::config(self).map(|v| v.to_string()).map_err(fail)
             }
             (Arch::Voxtral, "config.json") => {
                 voxtral::config(self).map(|v| v.to_string()).map_err(fail)
