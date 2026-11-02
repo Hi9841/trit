@@ -124,15 +124,17 @@ struct DecoderLayer {
 
 /// Moonshine's conv stem and encoder layers, or Moonshine Streaming's encoder.
 enum Encoder {
-    Conv {
-        conv1: Dense,
-        group_norm: (Vec<f32>, Vec<f32>),
-        conv2: Dense,
-        conv3: Dense,
-        layers: Vec<EncoderLayer>,
-        norm: Norm,
-    },
+    Conv(Box<ConvEncoder>),
     Streaming(Box<StreamingEncoder>),
+}
+
+struct ConvEncoder {
+    conv1: Dense,
+    group_norm: (Vec<f32>, Vec<f32>),
+    conv2: Dense,
+    conv3: Dense,
+    layers: Vec<EncoderLayer>,
+    norm: Norm,
 }
 
 pub struct Moonshine {
@@ -224,7 +226,7 @@ impl Moonshine {
         let mut c = c;
         let encoder = match c.streaming.take() {
             Some(stream) => Encoder::Streaming(Box::new(StreamingEncoder::load(&t, stream, d)?)),
-            None => Encoder::Conv {
+            None => Encoder::Conv(Box::new(ConvEncoder {
                 conv1: linear(&t, "model.encoder.conv1", d, 127)?,
                 group_norm: (
                     t.f32_len("model.encoder.groupnorm.weight", d)?,
@@ -234,7 +236,7 @@ impl Moonshine {
                 conv3: linear(&t, "model.encoder.conv3", d, 3 * 2 * d)?,
                 layers,
                 norm: Norm::load(&t, "model.encoder.layer_norm", d)?,
-            },
+            })),
         };
         Ok(Self {
             encoder,
@@ -268,7 +270,7 @@ impl Moonshine {
         for window in audio::windows(samples, WINDOW_SAMPLES) {
             // The encoder needs at least one output frame.
             let least = match &self.encoder {
-                Encoder::Conv { .. } => 127 + 64 * (6 + 2 * 3),
+                Encoder::Conv(_) => 127 + 64 * (6 + 2 * 3),
                 Encoder::Streaming(stream) => stream.min_samples(),
             };
             if window.len() < least || audio::is_silent(window) {
@@ -296,14 +298,14 @@ impl Moonshine {
     fn encode(&self, samples: &[f32]) -> (Buf, usize) {
         let (conv1, group_norm, conv2, conv3, layers, norm) = match &self.encoder {
             Encoder::Streaming(stream) => return stream.encode(samples),
-            Encoder::Conv {
-                conv1,
-                group_norm,
-                conv2,
-                conv3,
-                layers,
-                norm,
-            } => (conv1, group_norm, conv2, conv3, layers, norm),
+            Encoder::Conv(stem) => (
+                &stem.conv1,
+                &stem.group_norm,
+                &stem.conv2,
+                &stem.conv3,
+                &stem.layers,
+                &stem.norm,
+            ),
         };
         let c = &self.config;
         let d = c.d;
