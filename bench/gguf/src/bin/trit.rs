@@ -21,11 +21,15 @@ fn main() {
     trit::release_memory();
     let load_ms = started.elapsed().as_secs_f64() * 1000.0;
     eprintln!("trit: {} {precision}, {}", engine.kind(), trit::cpu_path());
-    let options = match std::env::var("TRIT_LANGUAGE").as_deref() {
+    let mut options = match std::env::var("TRIT_LANGUAGE").as_deref() {
         Ok("auto") => trit::Options::default(),
         Ok(code) => trit::Options::language(code),
         Err(_) => trit::Options::language("en"),
     };
+    // TRIT_BEAM: beams of a model that searches (Whisper, Moonshine); 1 is greedy.
+    if let Some(beam) = std::env::var("TRIT_BEAM").ok().and_then(|v| v.parse().ok()) {
+        options.beam = beam;
+    }
     gguf_bench::run(&args, "trit", load_ms, |pcm| {
         engine.transcribe_with(pcm, &options)
     });
