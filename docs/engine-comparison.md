@@ -237,3 +237,61 @@ python bench/runtimes_report.py
 `bench/runtimes.py --list` shows every engine; a model name (for example
 `whisper-turbo`) runs all runtimes of that model. Details are in
 [bench/README.md](../bench/README.md).
+
+## 7. One GGUF file, two engines: Trit and transcribe.cpp
+
+Trit and [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp),
+the engine of [Hex](https://github.com/anomalyco/hex), read the very same
+GGUF file (`handy-computer/parakeet-*-gguf`), so the model and its
+quantization are the same: Q8_0, F16, or F32, as the file stores it.
+transcribe.cpp is built as Hex 3.2.0 builds its Windows release
+(`-DGGML_NATIVE=OFF`: AVX2, no OpenMP) and called as Hex calls it: a new
+session per clip, language `en`, segment timestamps. Trit runs with the
+file's stored types (`--precision auto`), at its default (AVX-512) and with
+`TRIT_ISA=avx2`, the instruction set of the transcribe.cpp build. Both use 8
+threads on the same 8 cores. A time is the median clean clip; the median of
+three rounds, with the lowest and highest round. Errors are over the 456
+clips; "Same text" counts the clips where Trit wrote what transcribe.cpp
+wrote. Run it with `bench/gguf.py`; raw results:
+[bench/gguf-results.json](../bench/gguf-results.json).
+
+<!-- gguf:start -->
+| Model | Quant | Engine | ISA | Errors | Clean WER | Other WER | Median clean clip | Speed | Working set | Same text |
+|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Parakeet Unified English 0.6B (RNNT) | Q8_0 | Trit | AVX-512 VNNI | 178 | 1.40 % | 2.60 % | 50 ms (50-50) | 121x | 1063 MB | 355 |
+| Parakeet Unified English 0.6B (RNNT) | Q8_0 | Trit | AVX2 | 178 | 1.40 % | 2.60 % | 86 ms (86-86) | 69x | 1030 MB | 353 |
+| Parakeet Unified English 0.6B (RNNT) | Q8_0 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 178 | 1.42 % | 2.57 % | 156 ms (156-157) | 38x | 1046 MB |  |
+| Parakeet Unified English 0.6B (RNNT) | F16 | Trit | AVX-512 VNNI | 179 | 1.42 % | 2.60 % | 117 ms (114-117) | 52x | 1469 MB | 358 |
+| Parakeet Unified English 0.6B (RNNT) | F16 | Trit | AVX2 | 179 | 1.42 % | 2.60 % | 118 ms (118-134) | 45x | 1471 MB | 358 |
+| Parakeet Unified English 0.6B (RNNT) | F16 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 181 | 1.47 % | 2.60 % | 134 ms (133-134) | 45x | 1531 MB |  |
+| Parakeet Unified English 0.6B (RNNT) | F32 | Trit | AVX-512 VNNI | 179 | 1.42 % | 2.60 % | 125 ms (124-127) | 48x | 2622 MB | 358 |
+| Parakeet Unified English 0.6B (RNNT) | F32 | Trit | AVX2 | 179 | 1.42 % | 2.60 % | 130 ms (128-131) | 46x | 2630 MB | 358 |
+| Parakeet Unified English 0.6B (RNNT) | F32 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 181 | 1.47 % | 2.60 % | 147 ms (147-148) | 41x | 2420 MB |  |
+| Parakeet TDT 0.6B v2 | Q8_0 | Trit | AVX-512 VNNI | 186 | 1.47 % | 2.57 % | 47 ms (47-47) | 128x | 1022 MB | 440 |
+| Parakeet TDT 0.6B v2 | Q8_0 | Trit | AVX2 | 185 | 1.47 % | 2.54 % | 83 ms (82-83) | 72x | 1025 MB | 439 |
+| Parakeet TDT 0.6B v2 | Q8_0 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 186 | 1.47 % | 2.57 % | 154 ms (154-155) | 39x | 1045 MB |  |
+| Parakeet TDT 0.6B v2 | F16 | Trit | AVX-512 VNNI | 187 | 1.47 % | 2.57 % | 112 ms (112-112) | 54x | 1480 MB | 443 |
+| Parakeet TDT 0.6B v2 | F16 | Trit | AVX2 | 187 | 1.47 % | 2.57 % | 115 ms (114-116) | 53x | 1455 MB | 443 |
+| Parakeet TDT 0.6B v2 | F16 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 186 | 1.45 % | 2.57 % | 131 ms (131-131) | 46x | 1529 MB |  |
+| Parakeet TDT 0.6B v2 | F32 | Trit | AVX-512 VNNI | 187 | 1.47 % | 2.57 % | 122 ms (122-129) | 47x | 2619 MB | 444 |
+| Parakeet TDT 0.6B v2 | F32 | Trit | AVX2 | 187 | 1.47 % | 2.57 % | 127 ms (126-128) | 48x | 2622 MB | 444 |
+| Parakeet TDT 0.6B v2 | F32 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 186 | 1.45 % | 2.57 % | 145 ms (145-146) | 41x | 2418 MB |  |
+| Parakeet TDT 0.6B v3 | Q8_0 | Trit | AVX-512 VNNI | 212 | 1.55 % | 3.30 % | 49 ms (49-49) | 123x | 1029 MB | 434 |
+| Parakeet TDT 0.6B v3 | Q8_0 | Trit | AVX2 | 212 | 1.55 % | 3.30 % | 85 ms (84-85) | 70x | 1021 MB | 433 |
+| Parakeet TDT 0.6B v3 | Q8_0 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 209 | 1.52 % | 3.25 % | 156 ms (156-157) | 38x | 1090 MB |  |
+| Parakeet TDT 0.6B v3 | F16 | Trit | AVX-512 VNNI | 213 | 1.52 % | 3.33 % | 112 ms (112-113) | 54x | 1466 MB | 442 |
+| Parakeet TDT 0.6B v3 | F16 | Trit | AVX2 | 213 | 1.52 % | 3.33 % | 116 ms (116-116) | 52x | 1499 MB | 442 |
+| Parakeet TDT 0.6B v3 | F16 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 211 | 1.52 % | 3.28 % | 133 ms (133-134) | 45x | 1583 MB |  |
+| Parakeet TDT 0.6B v3 | F32 | Trit | AVX-512 VNNI | 213 | 1.52 % | 3.33 % | 127 ms (124-132) | 47x | 2663 MB | 441 |
+| Parakeet TDT 0.6B v3 | F32 | Trit | AVX2 | 213 | 1.52 % | 3.33 % | 127 ms (127-128) | 48x | 2650 MB | 441 |
+| Parakeet TDT 0.6B v3 | F32 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 211 | 1.52 % | 3.28 % | 147 ms (147-147) | 41x | 2489 MB |  |
+| Parakeet Ultra 0.6B | Q8_0 | Trit | AVX-512 VNNI | 205 | 1.50 % | 3.15 % | 49 ms (49-49) | 123x | 1040 MB | 446 |
+| Parakeet Ultra 0.6B | Q8_0 | Trit | AVX2 | 203 | 1.45 % | 3.15 % | 85 ms (85-85) | 70x | 1032 MB | 448 |
+| Parakeet Ultra 0.6B | Q8_0 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 201 | 1.45 % | 3.09 % | 156 ms (155-157) | 38x | 1090 MB |  |
+| Parakeet Ultra 0.6B | F16 | Trit | AVX-512 VNNI | 203 | 1.52 % | 3.09 % | 112 ms (112-113) | 54x | 1490 MB | 454 |
+| Parakeet Ultra 0.6B | F16 | Trit | AVX2 | 203 | 1.52 % | 3.09 % | 116 ms (116-117) | 52x | 1481 MB | 454 |
+| Parakeet Ultra 0.6B | F16 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 201 | 1.52 % | 3.04 % | 132 ms (132-133) | 45x | 1584 MB |  |
+| Parakeet Ultra 0.6B | F32 | Trit | AVX-512 VNNI | 203 | 1.52 % | 3.09 % | 124 ms (124-124) | 49x | 2645 MB | 454 |
+| Parakeet Ultra 0.6B | F32 | Trit | AVX2 | 203 | 1.52 % | 3.09 % | 127 ms (127-127) | 48x | 2647 MB | 454 |
+| Parakeet Ultra 0.6B | F32 | transcribe.cpp (Hex 3.2.0 build) | AVX2 | 201 | 1.52 % | 3.04 % | 146 ms (146-146) | 41x | 2491 MB |  |
+<!-- gguf:end -->

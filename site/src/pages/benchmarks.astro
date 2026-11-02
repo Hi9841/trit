@@ -13,6 +13,11 @@ import {
   medalTable,
   ordinal,
   place,
+  quantName,
+  sameFileDate,
+  sameFileModels,
+  sameFileThreads,
+  sameFileTrio,
   speechMetrics,
   type Metric,
 } from "../lib/data";
@@ -22,7 +27,14 @@ import { readRepo, updatedOf } from "../lib/repo";
 import { measure } from "../lib/sketch";
 
 const REPORT = "docs/engine-comparison.md";
-const updated = updatedOf(["site/src/pages/benchmarks.astro", REPORT, "bench/benchmarks.json"]);
+
+const updated = updatedOf([
+  "site/src/pages/benchmarks.astro",
+  REPORT,
+  "bench/benchmarks.json",
+  "bench/gguf-results.json",
+]);
+
 const report = sections(readRepo(REPORT));
 const part = (id: string) => report.find((s) => s.id === id);
 
@@ -104,6 +116,15 @@ function summaryOf(runs: Run[]) {
     };
   });
 }
+
+const sameFileCells = (r: (typeof sameFileModels)[number]["quants"][number]["runs"][number]) => [
+  `${Math.round(r.speed)}×`,
+  `${r.clean_wer.toFixed(2)} %`,
+  `${r.other_wer.toFixed(2)} %`,
+  `${r.errors}`,
+  mb(r.run_ws_mb),
+  r.same_text_as_transcribe_cpp === undefined ? "—" : `${r.same_text_as_transcribe_cpp} / 456`,
+];
 
 const cells = (r: Run) => [
   `${Math.round(r.speed)}×`,
@@ -266,6 +287,114 @@ const cells = (r: Run) => [
                         })}
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </details>
+            </div>
+          </section>
+        );
+      })
+    }
+
+    <section class="grid same-file" aria-labelledby="same-file">
+      <div class="prose">
+        <h2 id="same-file">One GGUF file, two engines</h2>
+        <p>
+          Trit and <a href={links.transcribeCpp}>transcribe.cpp</a>, the engine of <a href={links.hex}>Hex</a>,
+          read the very same GGUF file: the same model and the same quantization (Q8_0, F16 or F32, as the file
+          stores it). transcribe.cpp is built as Hex 3.2.0 builds its Windows release (AVX2) and called as Hex
+          calls it. Both run {sameFileThreads} threads on the same {sameFileThreads} cores. Trit runs at its
+          default (AVX-512) and with AVX2, the instruction set of the transcribe.cpp build.
+        </p>
+        <p class="meta">
+          {sameFileDate} · 456 clips · a time is the median clean clip of three rounds ·{" "}
+          <a href={links.sameFileResults}>raw results</a> · <a href={links.sameFileBench}>bench/gguf.py</a>
+        </p>
+      </div>
+    </section>
+
+    {
+      sameFileModels.map((m, i) => {
+        const q8 = sameFileTrio(m.quants.find((q) => q.quant === "q8_0")!.runs);
+        const slowest = Math.max(...m.quants.flatMap((q) => q.runs.map((r) => r.clean_ms_hi)));
+        const versus = [
+          { name: "Time per clip, Q8_0", mine: q8.trit.clean_ms, theirs: q8.them.clean_ms, text: (x: number) => `${Math.round(x)} ms` },
+          { name: "Errors, Q8_0", mine: q8.trit.errors, theirs: q8.them.errors, text: (x: number) => `${x}` },
+          { name: "Memory after all clips, Q8_0", mine: q8.trit.run_ws_mb, theirs: q8.them.run_ws_mb, text: mb },
+        ];
+
+        return (
+          <section class="grid model" aria-labelledby={`g-${i}`}>
+            <div class="title">
+              <h2 id={`g-${i}`}>{m.name}, one GGUF file</h2>
+              <p>
+                Q8_0: Trit is {times(q8.them.clean_ms / q8.avx2.clean_ms)} faster with the same instruction set
+                (AVX2), and {times(q8.them.clean_ms / q8.trit.clean_ms)} at its default.
+              </p>
+              <p class="won">
+                Files: <a href={`https://huggingface.co/${m.repo}`}>{m.repo}</a>
+              </p>
+            </div>
+            <div class="data-table">
+              <dl class="vs">
+                {versus.map((v) => (
+                  <div>
+                    <dt>{v.name}</dt>
+                    <dd class="mine">
+                      {v.text(v.mine)}
+                      {v.mine <= v.theirs ? <sup>1st</sup> : null}
+                    </dd>
+                    <dd class="theirs">
+                      {v.text(v.theirs)}
+                      <span>transcribe.cpp</span>
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+              <details>
+                <summary>All {m.quants.reduce((n, q) => n + q.runs.length, 0)} runs: Q8_0, F16 and F32</summary>
+                <table>
+                  <colgroup>
+                    <col class="c-runtime" />
+                    <col class="c-time" />
+                    <col span="6" class="c-num" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th scope="col">Engine</th>
+                      <th scope="col">Time per clip</th>
+                      <th scope="col" class="num">Speed</th>
+                      <th scope="col" class="num">Clean WER</th>
+                      <th scope="col" class="num">Other WER</th>
+                      <th scope="col" class="num">Errors</th>
+                      <th scope="col" class="num">MB after all clips</th>
+                      <th scope="col" class="num">Same text as transcribe.cpp</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {m.quants.flatMap((q) =>
+                      q.runs.map((r) => (
+                        <tr class:list={{ trit: r.engine !== "transcribe.cpp", default: r.engine === "trit" }}>
+                          <th scope="row">
+                            {r.runtime}
+                            {r.engine === "trit" ? <span class="tag">default</span> : null}
+                            <span>
+                              {quantName(q.quant)} · {r.isa}
+                            </span>
+                          </th>
+                          <TimeCell
+                            ms={r.clean_ms}
+                            lo={r.clean_ms_lo}
+                            hi={r.clean_ms_hi}
+                            rounds={r.rounds}
+                            slowest={slowest}
+                          />
+                          {sameFileCells(r).map((text) => (
+                            <td class="num">{text}</td>
+                          ))}
+                        </tr>
+                      )),
+                    )}
                   </tbody>
                 </table>
               </details>
@@ -562,15 +691,30 @@ const cells = (r: Run) => [
   .report {
     margin-top: 64px;
   }
-  .report .prose {
+  .report .prose,
+  .same-file .prose {
     grid-column: 4 / -1;
+  }
+  .same-file {
+    margin-top: 128px;
+  }
+  .same-file p {
+    max-width: var(--measure);
+    line-height: 1.6;
+  }
+  .same-file a,
+  .won a {
+    text-decoration: underline;
+    text-decoration-color: var(--rule);
+    text-underline-offset: 4px;
   }
   @media (max-width: 900px) {
     .verdict p,
     .title,
     .legend,
     .data-table,
-    .report .prose {
+    .report .prose,
+    .same-file .prose {
       grid-column: 1 / -1;
     }
     .title {

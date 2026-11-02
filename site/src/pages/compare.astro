@@ -3,8 +3,8 @@ import Base from "../layouts/Base.astro";
 import Header from "../components/Header.astro";
 import PageHead from "../components/PageHead.astro";
 import Footer from "../components/Footer.astro";
-import { ROWS, findings, rivals, sharedOf, trit } from "../lib/compare";
-import { benchDate } from "../lib/data";
+import { ROWS, findings, rivals, sameFileFindings, sharedOf, trit } from "../lib/compare";
+import { benchDate, quantName, sameFileDate, sameFileModels } from "../lib/data";
 import { links } from "../lib/links";
 import { updatedOf } from "../lib/repo";
 
@@ -12,6 +12,7 @@ const updated = updatedOf([
   "site/src/pages/compare.astro",
   "site/src/lib/compare.ts",
   "bench/benchmarks.json",
+  "bench/gguf-results.json",
 ]);
 
 const columns = [trit, ...rivals];
@@ -19,22 +20,22 @@ const ms = (x: number) => `${Math.round(x)} ms`;
 ---
 
 <Base
-  title="Trit vs whisper.cpp, faster-whisper and sherpa-onnx"
-  description="Trit against whisper.cpp, faster-whisper and sherpa-onnx: license, models, GPU, streaming, and measured time, errors and memory on the same clips and the same CPU."
+  title="Trit vs whisper.cpp, faster-whisper, sherpa-onnx and transcribe.cpp"
+  description="Trit against whisper.cpp, faster-whisper, sherpa-onnx and transcribe.cpp (the engine of Hex): license, models, GPU, streaming, and measured time, errors and memory on the same clips, the same CPU, and for transcribe.cpp the same GGUF files."
   updated={updated}
 >
   <Header />
   <main id="content">
     <PageHead title="Trit, or one of the others?">
       <p>
-        whisper.cpp, faster-whisper and sherpa-onnx are the runtimes people pick for speech to text on a CPU. This page
-        puts Trit next to each: what it is, what it measured on the same clips and the same computer, and when the
-        other one is the better choice.
+        whisper.cpp, faster-whisper, sherpa-onnx and transcribe.cpp (the engine of Hex) are the runtimes people pick
+        for speech to text on a CPU. This page puts Trit next to each: what it is, what it measured on the same clips
+        and the same computer, and when the other one is the better choice. transcribe.cpp and Trit read the very same
+        GGUF files.
       </p>
       <p class="meta">
-        Measured {benchDate} on an AMD Ryzen 9 7950X3D, CPU only. All runtimes: <a href={links.benchmarks}
-          >Benchmarks</a
-        >.
+        Measured {benchDate} (transcribe.cpp: {sameFileDate}) on an AMD Ryzen 9 7950X3D, CPU only. All runtimes:
+        <a href={links.benchmarks}>Benchmarks</a>.
       </p>
     </PageHead>
 
@@ -86,6 +87,56 @@ const ms = (x: number) => `${Math.round(x)} ms`;
               </p>
             </div>
             <div class="body">
+              {rival.sameFile &&
+                sameFileModels.map((m) => {
+                  const found = sameFileFindings(m);
+
+                  return (
+                    <div class="model">
+                      <h3>{found.model}, one GGUF file</h3>
+                      <ul class="found">
+                        {found.lines.map((line) => (
+                          <li>{line}</li>
+                        ))}
+                      </ul>
+                      <div class="data-table">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th scope="col">Engine</th>
+                              <th scope="col" class="num">
+                                Time per clip
+                              </th>
+                              <th scope="col" class="num">
+                                Errors, all clips
+                              </th>
+                              <th scope="col" class="num">
+                                MB after all clips
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {m.quants.flatMap((q) =>
+                              q.runs.map((r) => (
+                                <tr class:list={{ us: r.engine !== "transcribe.cpp" }}>
+                                  <th scope="row">
+                                    {r.runtime}
+                                    <span>
+                                      {quantName(q.quant)} · {r.isa}
+                                    </span>
+                                  </th>
+                                  <td class="num">{ms(r.clean_ms)}</td>
+                                  <td class="num">{r.errors}</td>
+                                  <td class="num">{r.run_ws_mb}</td>
+                                </tr>
+                              )),
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })}
               {shared.map((s) => {
                 const found = findings(s, rival);
 

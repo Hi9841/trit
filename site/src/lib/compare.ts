@@ -1,7 +1,7 @@
-// Trit against the three runtimes people pick for speech to text on a CPU.
+// Trit against the runtimes people pick for speech to text on a CPU.
 // What each one is comes from its own documentation; what it measured comes
 // from the benchmark (data.ts), so the two cannot disagree.
-import { benches, type Bench, type Run } from "./data";
+import { benches, quantName, sameFileTrio, type Bench, type Run, type SameFileModel } from "./data";
 
 /** The facts of one runtime, the rows of the comparison table. */
 export interface Facts {
@@ -34,7 +34,7 @@ export const trit: Facts = {
   license: "PolyForm Noncommercial 1.0.0",
   commercial: "On request",
   models: "Parakeet, Canary, Whisper, Moonshine",
-  files: "Hugging Face safetensors, as published",
+  files: "Hugging Face safetensors, GGUF and NeMo (Parakeet), as published",
   gpu: "No, CPU only",
   streaming: "No, whole clips",
   callFrom: "CLI, Rust, C, Python, C#, Node, Bun",
@@ -47,6 +47,8 @@ export interface Rival extends Facts {
   slug: string;
   /** When this runtime is the better choice. */
   pick: string[];
+  /** Measured on the same GGUF files (gguf-results.json), not in benchmarks.json. */
+  sameFile?: boolean;
 }
 
 export const rivals: Rival[] = [
@@ -107,6 +109,26 @@ export const rivals: Rival[] = [
       "You also need text to speech, speaker labels or keyword spotting.",
     ],
   },
+  {
+    runtime: "transcribe.cpp",
+    slug: "transcribe-cpp",
+    name: "transcribe.cpp",
+    url: "https://github.com/handy-computer/transcribe.cpp",
+    license: "MIT",
+    commercial: "Yes",
+    models: "16 families: Parakeet, Whisper, Canary, Qwen3-ASR, Moonshine and more",
+    files: "Converted to GGUF",
+    gpu: "Yes: Metal, Vulkan, CUDA",
+    streaming: "Yes, with streaming models",
+    callFrom: "C, C++, Rust, Python, Swift, TypeScript",
+    arm: "Yes, also Apple Silicon (Metal)",
+    sameFile: true,
+    pick: [
+      "You have a GPU or a Mac with Apple Silicon: it runs on Metal, Vulkan and CUDA, as Hex does.",
+      "You need live text while the speaker talks, with a streaming model.",
+      "You need a model family Trit does not run, or commercial use without asking for a license.",
+    ],
+  },
 ];
 
 /** One model that both Trit and a rival ran: Trit's default and every setting of the rival. */
@@ -126,6 +148,28 @@ export const sharedOf = (rival: Rival): Shared[] =>
 
 const min = (runs: Run[], value: (r: Run) => number) =>
   runs.reduce((best, r) => (value(r) < value(best) ? r : best));
+
+const ms = (x: number) => `${Math.round(x)} ms`;
+
+/** What the same-file benchmark found for one model, one sentence per quantization. */
+export function sameFileFindings(m: SameFileModel) {
+  const lines = m.quants.map(({ quant, runs }) => {
+    const { trit, avx2, them } = sameFileTrio(runs);
+
+    const sameIsa =
+      them.clean_ms > avx2.clean_ms
+        ? `Trit is ${(them.clean_ms / avx2.clean_ms).toFixed(1)}× faster with the same instruction set`
+        : `transcribe.cpp is ${(avx2.clean_ms / them.clean_ms).toFixed(1)}× faster with the same instruction set`;
+
+    return (
+      `${quantName(quant)}: Trit takes ${ms(trit.clean_ms)} a clip at its default and ${ms(avx2.clean_ms)} with ` +
+      `AVX2; transcribe.cpp takes ${ms(them.clean_ms)}. ${sameIsa}. Errors: Trit ${trit.errors}, ` +
+      `transcribe.cpp ${them.errors}.`
+    );
+  });
+
+  return { model: m.name, lines };
+}
 
 /** What the benchmark found for one model, in sentences. */
 export function findings({ bench, trit, runs }: Shared, rival: Rival) {

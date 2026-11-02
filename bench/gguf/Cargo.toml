@@ -1,0 +1,30 @@
+# Trit and transcribe.cpp (the engine of Hex) on the same GGUF file.
+# Its own workspace: transcribe.cpp builds ggml with CMake, which the Trit
+# build must not need. Run it with `bench/gguf.py`.
+[package]
+name = "gguf-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+trit = { path = "../.." }
+mimalloc = { version = "0.1", default-features = false }
+hound = "3.5.1"
+serde_json = "1"
+# The transcribe.cpp commit that Hex 3.2.0 pins (Hex's Cargo.toml).
+transcribe-cpp = "=0.4.1"
+
+[patch.crates-io]
+transcribe-cpp = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "7045d1c0fe7cee37747b2792977421d435e75fca" }
+transcribe-cpp-sys = { git = "https://github.com/anomalyco/transcribe.cpp", rev = "7045d1c0fe7cee37747b2792977421d435e75fca" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

@@ -9,6 +9,8 @@ export interface Model {
   kind: string;
   languages: string;
   mb: number;
+  /** The one file Trit reads (a .nemo or .gguf), when it reads no Hugging Face files. */
+  file?: string;
 }
 
 const FAMILY = new Map([
@@ -51,17 +53,18 @@ const FILES = new Map(
 
 /** The command `trit models` prints: every file named, no glob. */
 export const downloadCommand = (m: Model) =>
-  `hf download ${m.repo} ${(FILES.get(m.kind) ?? FILES.get("_") ?? []).join(" ")} --local-dir models/${m.name}`;
+  `hf download ${m.repo} ${(m.file ? [m.file] : (FILES.get(m.kind) ?? FILES.get("_") ?? [])).join(" ")} --local-dir models/${m.name}`;
 
-const KNOWN = /Known \{\s*name: "([^"]+)",\s*repo: "([^"]+)",\s*kind: "([^"]+)",\s*languages: "([^"]+)",\s*mb: (\d+),/g;
+const KNOWN =
+  /Known \{\s*name: "([^"]+)",\s*repo: "([^"]+)",\s*kind: "([^"]+)",\s*languages: "([^"]+)",\s*mb: (\d+),\s*file: (?:Some\("([^"]+)"\)|None),/g;
 
-export const catalog: Model[] = [...CATALOG_RS.matchAll(KNOWN)].map((m) => ({
-  name: m[1],
-  repo: m[2],
-  kind: m[3],
-  languages: m[4],
-  mb: Number(m[5]),
-}));
+export const catalog: Model[] = [...CATALOG_RS.matchAll(KNOWN)].map((m) => {
+  const model: Model = { name: m[1], repo: m[2], kind: m[3], languages: m[4], mb: Number(m[5]) };
+
+  if (m[6]) model.file = m[6];
+
+  return model;
+});
 
 export const DEFAULT_MODEL = "parakeet-redux";
 
@@ -257,3 +260,76 @@ export const tritCleanup = cleanup.find((r) => r.default);
 // Trit's default run of a catalog model, when it was measured.
 export const tritRunOf = (name: string) =>
   benches.find((b) => b.model === (BENCH_KEY.get(name) ?? name))?.runs.find((r) => r.default);
+
+// ---------- one GGUF file, two engines: bench/gguf-results.json ----------
+// Written by bench/gguf.py: Trit and transcribe.cpp (the engine of Hex) read
+// the very same file, so the model and its quantization are the same.
+
+export interface SameFileRun {
+  model: string;
+  name: string;
+  repo: string;
+  /** q8_0, f16 or f32: the type the file stores. */
+  quant: string;
+  engine: string;
+  runtime: string;
+  isa: string;
+  errors: number;
+  wer: number;
+  clean_wer: number;
+  other_wer: number;
+  /** Median clean clip: the median of the rounds, and the lowest and highest round. */
+  clean_ms: number;
+  clean_ms_lo: number;
+  clean_ms_hi: number;
+  rounds: number;
+  speed: number;
+  run_ws_mb: number;
+  /** Clips (of 456) where Trit wrote the same text as transcribe.cpp. */
+  same_text_as_transcribe_cpp?: number;
+}
+
+export interface SameFileModel {
+  model: string;
+  name: string;
+  repo: string;
+  /** Each quantization's runs: Trit (AVX-512), Trit (AVX2), transcribe.cpp. */
+  quants: { quant: string; runs: SameFileRun[] }[];
+}
+
+const sameFile: { date: string; cpu: string; clips: number; threads: number; rows: SameFileRun[] } = JSON.parse(
+  readRepo("bench/gguf-results.json"),
+);
+
+export const sameFileDate = sameFile.date;
+export const sameFileThreads = sameFile.threads;
+
+export const sameFileModels: SameFileModel[] = [...new Set(sameFile.rows.map((r) => r.model))].map((model) => {
+  const rows = sameFile.rows.filter((r) => r.model === model);
+
+  return {
+    model,
+    name: rows[0]!.name,
+    repo: rows[0]!.repo,
+    quants: [...new Set(rows.map((r) => r.quant))].map((quant) => ({
+      quant,
+      runs: rows.filter((r) => r.quant === quant),
+    })),
+  };
+});
+
+/** Trit at its default and at AVX2, and transcribe.cpp, for one file. */
+export function sameFileTrio(runs: SameFileRun[]) {
+  const pick = (engine: string) => {
+    const run = runs.find((r) => r.engine === engine);
+
+    if (!run) throw new Error(`gguf-results.json has no ${engine} run`);
+
+    return run;
+  };
+
+  return { trit: pick("trit"), avx2: pick("trit-avx2"), them: pick("transcribe.cpp") };
+}
+
+/** "Q8_0" for "q8_0": the name the GGUF file uses. */
+export const quantName = (quant: string) => quant.toUpperCase();

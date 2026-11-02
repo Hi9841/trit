@@ -1,0 +1,10 @@
+# Build transcribe.cpp as Hex 3.2.0 builds its Windows release: the static
+# C runtime (Hex's .cargo/config.toml) and a portable CPU floor
+# (scripts/build-windows.sh: -DGGML_NATIVE=OFF, which is AVX2 on x86-64).
+# Build from a clean target folder: a CMake cache from another build keeps its flags.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+CMAKE_ARGS = "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
+TRANSCRIBE_CMAKE_ARGS = "-DGGML_NATIVE=OFF"
