@@ -8,6 +8,7 @@ pub mod fun_asr;
 pub mod granite_ctc;
 pub mod granite_speech;
 pub mod moonshine;
+pub mod moss;
 pub mod parakeet;
 pub mod qwen3_asr;
 pub mod sensevoice;
