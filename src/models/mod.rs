@@ -5,13 +5,69 @@
 
 pub mod config;
 pub mod families;
+pub mod gguf;
 pub mod layers;
+pub mod nemo;
 pub mod parts;
 
 use families::{canary, moonshine, parakeet, qwen3_asr, wav2vec2, whisper};
 
 use crate::{BiasWeights, Device, Options, Precision, Segment, Spread};
 use std::path::Path;
+
+/// A model that one published file holds, in place of `config.json` and
+/// `model.safetensors`: an NVIDIA NeMo archive or a GGUF file. Each gives
+/// the config, tensor names, and tokenizer of the Hugging Face checkpoint.
+pub enum Package {
+    Nemo(nemo::Archive),
+    Gguf(gguf::Gguf),
+}
+
+impl Package {
+    /// The package of a model folder: its one `.nemo` or `.gguf` file, when
+    /// the folder has no `config.json`.
+    pub fn find(dir: &Path) -> Result<Option<Self>, String> {
+        match (nemo::find(dir), gguf::find(dir)) {
+            (Some(_), Some(_)) => Err(format!(
+                "{} holds a .nemo and a .gguf file; keep one model per folder",
+                dir.display()
+            )),
+            (Some(path), None) => nemo::Archive::open(&path).map(|a| Some(Self::Nemo(a))),
+            (None, Some(path)) => gguf::Gguf::open(&path).map(|g| Some(Self::Gguf(g))),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// Whether `dir` holds a package (`find` would open one).
+    pub fn in_folder(dir: &Path) -> bool {
+        nemo::find(dir).is_some() != gguf::find(dir).is_some()
+    }
+
+    pub fn config(&self) -> Result<config::Json, String> {
+        match self {
+            Self::Nemo(archive) => archive.config(),
+            Self::Gguf(file) => file.config(),
+        }
+    }
+
+    pub fn tensors(
+        &self,
+        precision: Precision,
+        device: Device,
+    ) -> Result<crate::cpu::tensors::Tensors, String> {
+        match self {
+            Self::Nemo(archive) => archive.tensors(precision, device),
+            Self::Gguf(file) => file.tensors(precision, device),
+        }
+    }
+
+    pub fn tokenizer(&self) -> Result<crate::text::sentencepiece::Tokenizer, String> {
+        match self {
+            Self::Nemo(archive) => archive.tokenizer(),
+            Self::Gguf(file) => file.tokenizer(),
+        }
+    }
+}
 
 /// What every family does with audio.
 pub trait Family: Send + Sync {
@@ -93,9 +149,17 @@ pub struct Model(Box<dyn Family>);
 
 impl Model {
     pub fn load(dir: &Path, precision: Precision, device: Device) -> Result<Self, String> {
-        let text = std::fs::read_to_string(dir.join("config.json"))
-            .map_err(|e| format!("cannot read {}: {e}", dir.join("config.json").display()))?;
-        let config = config::Json::parse(&text)?;
+        // A folder with one published `.nemo` or `.gguf` file and no `config.json`.
+        let package = Package::find(dir)?;
+        let config = match &package {
+            Some(package) => package.config()?,
+            None => {
+                let text = std::fs::read_to_string(dir.join("config.json")).map_err(|e| {
+                    format!("cannot read {}: {e}", dir.join("config.json").display())
+                })?;
+                config::Json::parse(&text)?
+            }
+        };
         let kind = config
             .str("model_type")
             .ok_or("config.json has no `model_type`")?;
@@ -117,6 +181,11 @@ impl Model {
             })?;
         let device = crate::active_device(device)?;
         let _team = crate::cpu::enter(row.spread);
+        // A package's config names a Parakeet type only.
+        if let Some(package) = package {
+            let model = parakeet::Parakeet::load_package(&package, &config, precision, device)?;
+            return Ok(Self(Box::new(model)));
+        }
         Ok(Self((row.load)(dir, &config, precision, device)?))
     }
 

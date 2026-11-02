@@ -7,6 +7,7 @@ use crate::models::parts::{dictionary, fastconformer as model, logit_bias as bia
 use crate::audio::mel::MelFrontend;
 use crate::cpu::tensors::Tensors;
 use crate::models::config::Json;
+use crate::models::Package;
 use crate::text::sentencepiece::Tokenizer;
 use crate::{Device, Options, Precision, Segment};
 use parking_lot::RwLock;
@@ -47,21 +48,42 @@ impl Parakeet {
         precision: Precision,
         device: Device,
     ) -> Result<Self, String> {
-        let config = model::Config::parse(config)?;
         let tensors = Tensors::open_dir(dir, precision, device)?;
+        Self::from_parts(config, tensors, || {
+            Tokenizer::open(&dir.join("tokenizer.json"))
+        })
+    }
+
+    /// The model of a NeMo archive or GGUF file; `config` is `package.config()`.
+    pub fn load_package(
+        package: &Package,
+        config: &Json,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
+        let tensors = package.tensors(precision, device)?;
+        Self::from_parts(config, tensors, || package.tokenizer())
+    }
+
+    fn from_parts(
+        config: &Json,
+        tensors: Tensors,
+        tokenizer: impl FnOnce() -> Result<Tokenizer, String>,
+    ) -> Result<Self, String> {
+        let config = model::Config::parse(config)?;
         let frontend = MelFrontend::new(config.mels);
         let model = model::Parakeet::load(&tensors, config)?;
         // The weight file is no longer needed; free it before the position
         // tables grow, so load does not hold both at its peak.
         drop(tensors);
         model.warm_positions();
-        let tokenizer = Tokenizer::open(&dir.join("tokenizer.json"))?;
+        let tokenizer = tokenizer()?;
         // Only token ids: the joint row holds the durations after them.
         let vocab = model.config.vocab;
         // The blank, the last id, has no piece.
         if tokenizer.len() + 1 < vocab {
             return Err(format!(
-                "tokenizer.json has {} pieces; the model has {vocab} tokens",
+                "the tokenizer has {} pieces; the model has {vocab} tokens",
                 tokenizer.len()
             ));
         }

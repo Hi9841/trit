@@ -497,7 +497,21 @@ pub struct Quantized {
 
 impl Quantized {
     pub fn new(isa: Isa, x: &[f32], m: usize, k: usize) -> Self {
-        let groups = k / GROUP;
+        Self::grouped(isa, x, m, k, GROUP, false)
+    }
+
+    /// `new` with `group` values per scale (a multiple of 32). With
+    /// `half_scales` each scale is rounded to f16 after the codes are made
+    /// from the f32 scale, as ggml's `quantize_row_q8_0` stores it.
+    pub fn grouped(
+        isa: Isa,
+        x: &[f32],
+        m: usize,
+        k: usize,
+        group: usize,
+        half_scales: bool,
+    ) -> Self {
+        let groups = k / group;
         // Reuse this thread's buffer: a fresh one would fault in new pages.
         let mut values = QUANTIZED.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
         // The quantizer writes every value of the first m x k, so a buffer that
@@ -524,7 +538,7 @@ impl Quantized {
                 };
                 let src = &x[row * k..(row + 1) * k];
                 for g in 0..groups {
-                    let span = g * GROUP..(g + 1) * GROUP;
+                    let span = g * group..(g + 1) * group;
                     let (scale, sum) = match isa {
                         #[cfg(target_arch = "x86_64")]
                         // SAFETY: Isa::detect confirmed the CPU features.
@@ -538,7 +552,11 @@ impl Quantized {
                         },
                         Isa::Scalar => quantize_scalar(&src[span.clone()], &mut values[span]),
                     };
-                    scales[g] = scale;
+                    scales[g] = if half_scales {
+                        super::tensors::f16_to_f32(super::tensors::f32_to_f16(scale))
+                    } else {
+                        scale
+                    };
                     sums[g] = sum;
                 }
             }
@@ -574,7 +592,7 @@ fn group_scale(max: f32) -> f32 {
     }
 }
 
-/// One 128-value group to i8, rounding half to even like `cvtps2dq`.
+/// One group (a multiple of 32 values) to i8, rounding half to even like `cvtps2dq`.
 fn quantize_scalar(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     let scale = group_scale(src.iter().fold(0.0f32, |m, v| m.max(v.abs())));
     let inv = 1.0 / scale;
@@ -593,14 +611,14 @@ unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     use std::arch::x86_64::*;
     let p = src.as_ptr();
     let mut vmax = _mm512_setzero_ps();
-    for i in 0..GROUP / 16 {
+    for i in 0..src.len() / 16 {
         vmax = _mm512_max_ps(vmax, _mm512_abs_ps(_mm512_loadu_ps(p.add(i * 16))));
     }
     let scale = group_scale(_mm512_reduce_max_ps(vmax));
     let inv = _mm512_set1_ps(1.0 / scale);
     let limit = _mm512_set1_epi32(127);
     let mut vsum = _mm512_setzero_si512();
-    for i in 0..GROUP / 16 {
+    for i in 0..src.len() / 16 {
         let q = _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_loadu_ps(p.add(i * 16)), inv));
         let q = _mm512_max_epi32(
             _mm512_min_epi32(q, limit),
@@ -622,7 +640,7 @@ unsafe fn quantize_avx2(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     let p = src.as_ptr();
     let sign = _mm256_set1_ps(-0.0);
     let mut vmax = _mm256_setzero_ps();
-    for i in 0..GROUP / 8 {
+    for i in 0..src.len() / 8 {
         vmax = _mm256_max_ps(vmax, _mm256_andnot_ps(sign, _mm256_loadu_ps(p.add(i * 8))));
     }
     let mut lanes = [0.0f32; 8];
@@ -633,7 +651,7 @@ unsafe fn quantize_avx2(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     let low = _mm256_set1_epi32(-127);
     let order = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
     let mut vsum = _mm256_setzero_si256();
-    for i in 0..GROUP / 32 {
+    for i in 0..src.len() / 32 {
         let mut q = [_mm256_setzero_si256(); 4];
         for (j, lane) in q.iter_mut().enumerate() {
             let v = _mm256_mul_ps(_mm256_loadu_ps(p.add(i * 32 + j * 8)), inv);

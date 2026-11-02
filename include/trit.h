@@ -48,10 +48,13 @@ Trit *trit_load(const char *model_dir);
 
 /* trit_load with a precision for the weights:
  *   "auto" or NULL: int8 for layers 384 wide and more, f16 below (fastest
- *                   at the reference accuracy)
+ *                   at the reference accuracy); a GGUF file keeps the
+ *                   types it stores (Q8_0, F16, F32)
  *   "int8": int8 everywhere (least memory; narrow models lose some accuracy)
  *   "f16":  f16 weights, f32 math
  *   "f32":  f32 weights, as the reference runtimes hold them (slowest)
+ *   "q8_0": ggml's Q8_0 (blocks of 32 int8 values with an f16 scale, int8
+ *           activations), as llama.cpp and transcribe.cpp run it
  * The device stays "cpu". NULL on failure, also for an unknown precision. */
 Trit *trit_load_with(const char *model_dir, const char *precision);
 

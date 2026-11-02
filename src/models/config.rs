@@ -12,6 +12,11 @@ impl Json {
             .map_err(|e| format!("config.json is not JSON: {e}"))
     }
 
+    /// A config built in code (the config of a `.nemo` archive).
+    pub fn from_value(value: Value) -> Self {
+        Self(value)
+    }
+
     /// The value at `path`, keys joined by dots (`encoder_config.hidden_size`);
     /// `Null` when a key is absent.
     pub fn get(&self, path: &str) -> &Value {

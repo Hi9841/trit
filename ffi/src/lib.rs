@@ -108,7 +108,7 @@ pub unsafe extern "C" fn trit_load(model_dir: *const c_char) -> *mut Trit {
     trit_load_with(model_dir, std::ptr::null())
 }
 
-/// `trit_load` with a precision: "auto" (NULL), "int8", "f16", or "f32".
+/// `trit_load` with a precision: "auto" (NULL), "int8", "f16", "f32", or "q8_0".
 /// The device stays "cpu".
 ///
 /// # Safety

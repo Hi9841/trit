@@ -32,7 +32,7 @@ usage: trit transcribe <path>... [--model <dir>] [--language <code>] [--dictiona
   --timestamps    timed segments too: sentences for Parakeet, windows of up to 30 s (40 s Canary) for the others
   --cleanup       clean each transcript with S1-mini (see `trit clean --help`); ms then includes it
   --cleanup-model <dir>, --styling, --structure, --context  as for `trit clean`
-  --precision     auto (default: int8 for layers 384 wide and more, f16 below), int8 (least memory), f16, f32 (as the reference runtimes)
+  --precision     auto (default: int8 for layers 384 wide and more, f16 below; a GGUF file keeps its stored types), int8 (least memory), f16, f32 (as the reference runtimes), q8_0 (ggml's Q8_0, as llama.cpp and transcribe.cpp run it)
   --device        cpu (default), gpu, auto. auto uses the GPU, or the CPU when the computer has no adapter. TRIT_DEVICE overrides
   --beam <n>      beams for Whisper, Moonshine, and Canary (default: 5 for Whisper and Moonshine, 1 (greedy) for Canary; at most 16)
   --format        toon (default), json (full text, for programs), text (one transcript per line)
@@ -56,7 +56,7 @@ usage: trit clean <text>... [--model <dir>] [--styling <s>] [--structure <s>] [-
   --styling       casual, semi-casual, semi-formal (default), formal
   --structure     prose (default), lists
   --context       general (default), email
-  --precision     auto (default), int8, f16, f32; as for `trit transcribe`
+  --precision     auto (default), int8, f16, f32, q8_0; as for `trit transcribe`
   --device        cpu (default), gpu, auto; as for `trit transcribe`. TRIT_DEVICE overrides
   --format        toon (default), json, text
 examples:
@@ -123,6 +123,11 @@ examples:
 | parakeet-tdt-0.6b-v3 | parakeet_tdt | 25 European | 2508 |
 | parakeet-ultra | parakeet_tdt | 25 European | 1255 |
 | parakeet-rnnt-0.6b | parakeet_rnnt | en | 2467 |
+| parakeet-unified-en-0.6b | parakeet_rnnt | en | 2474 |
+| parakeet-unified-en-0.6b-q8_0 | parakeet_rnnt | en | 731 |
+| parakeet-tdt-0.6b-v3-q8_0 | parakeet_tdt | 25 European | 740 |
+| parakeet-tdt-0.6b-v2-q8_0 | parakeet_tdt | en | 730 |
+| parakeet-ultra-q8_0 | parakeet_tdt | 25 European | 740 |
 | parakeet-ctc-0.6b | parakeet_ctc | en | 2436 |
 | canary-1b-v2 | canary | 25 European | 3916 |
 | whisper-tiny | whisper | 99 | 151 |

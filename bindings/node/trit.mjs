@@ -105,7 +105,8 @@ export class Trit {
   /**
    * @param {string | null} model a folder, a `trit models` name, or null for the default.
    * @param {{precision?: string, device?: string}} options precision: "auto" (default; int8 for layers 384 wide and
-   *   more, f16 below), "int8" (least memory), "f16", or "f32" (as the reference).
+   *   more, f16 below; a GGUF file keeps its stored types), "int8" (least memory), "f16", "f32" (as the reference),
+   *   or "q8_0" (ggml's Q8_0).
    *   device: "cpu" (default), "gpu", or "auto" (the GPU, or the CPU when the computer has no adapter).
    *   TRIT_DEVICE overrides device.
    */

@@ -4,7 +4,7 @@
 //! Tensors are read from the files one at a time. Reading the whole 178 MB
 //! file into one buffer kept that memory in the process after load.
 
-use super::gemm::Precision;
+use super::gemm::{Blocks, Precision};
 use crate::Device;
 use std::collections::HashMap;
 use std::fs::File;
@@ -19,7 +19,13 @@ pub struct Tensors {
     entries: HashMap<String, Entry>,
     precision: Precision,
     device: Device,
+    /// A GGUF file: under `Precision::Auto` each tensor keeps the type it is
+    /// stored in (`precision_of`), as the runtime that wrote it runs it.
+    native: bool,
 }
+
+/// Bytes of one ggml Q8_0 block: an f16 scale and 32 int8 codes.
+const Q8_0_BYTES: usize = 34;
 
 struct Entry {
     dtype: String,
@@ -93,6 +99,46 @@ impl Tensors {
             entries,
             precision,
             device: Device::Cpu,
+            native: false,
+        })
+    }
+
+    /// Opens the PyTorch checkpoint at `base..base + len` of `path` (the
+    /// `model_weights.ckpt` of a `.nemo` archive). `rename` gives each
+    /// tensor its Trit name, or `None` to leave it out.
+    pub fn open_torch_in(
+        path: &Path,
+        (base, len): (usize, usize),
+        rename: impl Fn(&str) -> Option<String>,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
+        let error = |e: std::io::Error| format!("Could not read {}: {e}", path.display());
+        let file = File::open(path).map_err(error)?;
+        super::store::will_read(len as u64);
+        let found = super::torch_file::tensors_in(&file, base, len)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let entries = found
+            .into_iter()
+            .filter_map(|tensor| {
+                let name = rename(&tensor.name)?;
+                Some((
+                    name,
+                    Entry {
+                        dtype: tensor.dtype.to_string(),
+                        file: 0,
+                        start: tensor.start,
+                        end: tensor.end,
+                    },
+                ))
+            })
+            .collect();
+        Ok(Self {
+            files: vec![file],
+            entries,
+            precision,
+            device,
+            native: false,
         })
     }
 
@@ -121,12 +167,85 @@ impl Tensors {
             entries,
             precision,
             device,
+            native: false,
         })
     }
 
-    /// How `Dense::load` stores the layers of this file.
-    pub fn precision(&self) -> Precision {
-        self.precision
+    /// Opens a GGUF file's tensors: `(name, dtype, start, end)`, byte ranges
+    /// of `path`. Its types are kept under `Precision::Auto`.
+    pub fn open_gguf(
+        path: &Path,
+        tensors: Vec<(String, String, usize, usize)>,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
+        let error = |e: std::io::Error| format!("Could not read {}: {e}", path.display());
+        let file = File::open(path).map_err(error)?;
+        let total: usize = tensors.iter().map(|(_, _, start, end)| end - start).sum();
+        super::store::will_read(total as u64);
+        let entries = tensors
+            .into_iter()
+            .map(|(name, dtype, start, end)| {
+                (
+                    name,
+                    Entry {
+                        dtype,
+                        file: 0,
+                        start,
+                        end,
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            files: vec![file],
+            entries,
+            precision,
+            device,
+            native: true,
+        })
+    }
+
+    /// How to store tensor `name`: the precision the caller asked for, or,
+    /// under `Precision::Auto` in a GGUF file, the type it is stored in
+    /// (Q8_0, F16, or F32).
+    pub fn precision_of(&self, name: &str) -> Precision {
+        if self.precision != Precision::Auto || !self.native {
+            return self.precision;
+        }
+        match self.entries.get(name).map(|entry| entry.dtype.as_str()) {
+            Some("Q8_0") => Precision::Q8_0,
+            Some("F16") => Precision::F16,
+            Some("F32") => Precision::F32,
+            _ => Precision::Auto,
+        }
+    }
+
+    /// The tensor as Q8_0 blocks of `len` values: as stored when its dtype
+    /// is Q8_0, else quantized as ggml quantizes (`Blocks::quantize`).
+    pub fn q8_0(&self, name: &str, len: usize) -> Result<Blocks, String> {
+        let entry = self.entry(name)?;
+        if entry.dtype != "Q8_0" {
+            return Ok(Blocks::quantize(&self.f32_len(name, len)?));
+        }
+        let bytes = self.raw(name, entry)?;
+        let count = bytes.len() / Q8_0_BYTES * 32;
+        if count != len || bytes.len() % Q8_0_BYTES != 0 {
+            return Err(format!("tensor {name} has {count} values, expected {len}"));
+        }
+        let mut blocks = Blocks {
+            codes: Vec::with_capacity(len),
+            scales: Vec::with_capacity(len / 32),
+        };
+        for block in bytes.as_chunks::<Q8_0_BYTES>().0 {
+            blocks
+                .scales
+                .push(f16_to_f32(u16::from_le_bytes([block[0], block[1]])));
+            blocks
+                .codes
+                .extend(block[2..].iter().map(|b| i8::from_ne_bytes([*b])));
+        }
+        Ok(blocks)
     }
 
     /// `Cpu`, or `Gpu` when this load uploads weight copies.
@@ -169,9 +288,13 @@ impl Tensors {
         Ok(())
     }
 
-    /// The tensor as f32 values, from F32, F16, or BF16 storage.
+    /// The tensor as f32 values, from F32, F16, BF16, or Q8_0 storage.
     pub fn f32(&self, name: &str) -> Result<Vec<f32>, String> {
         let entry = self.entry(name)?;
+        if entry.dtype == "Q8_0" {
+            let count = (entry.end - entry.start) / Q8_0_BYTES * 32;
+            return Ok(self.q8_0(name, count)?.to_f32());
+        }
         let width = match entry.dtype.as_str() {
             "F32" => 4,
             "F16" | "BF16" => 2,
@@ -221,6 +344,13 @@ impl Tensors {
     /// F32 and BF16 are rounded to the nearest f16 as they are read.
     pub fn f16_bits(&self, name: &str, len: usize) -> Result<Vec<u16>, String> {
         let entry = self.entry(name)?;
+        if entry.dtype == "Q8_0" {
+            return Ok(self
+                .f32_len(name, len)?
+                .into_iter()
+                .map(f32_to_f16)
+                .collect());
+        }
         let width = match entry.dtype.as_str() {
             "F32" => 4,
             "F16" | "BF16" => 2,
@@ -313,7 +443,7 @@ fn parse_header(
 }
 
 /// Positional read of the whole buffer; safe to call from several threads.
-pub(super) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+pub(crate) fn read_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
     read_exact_at(file, buf, offset)?;
     super::store::did_read(buf.len() as u64);
     Ok(())

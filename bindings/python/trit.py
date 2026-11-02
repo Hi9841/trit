@@ -179,7 +179,8 @@ class Trit:
     ):
         """`model`: a folder, a `trit models` name, or None for the default.
         `precision`: "auto" (None; int8 for layers 384 wide and more, f16
-        below), "int8" (least memory), "f16", or "f32" (as the reference).
+        below; a GGUF file keeps its stored types), "int8" (least memory),
+        "f16", "f32" (as the reference), or "q8_0" (ggml's Q8_0).
         `device`: "cpu" (default), "gpu", or "auto". "auto" uses the GPU, or
         the CPU when the computer has no adapter. TRIT_DEVICE overrides it."""
         self._handle = None

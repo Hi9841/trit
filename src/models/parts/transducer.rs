@@ -9,7 +9,7 @@ use super::dictionary::{Candidate, Check, Dictionary, CAPITAL_PRIOR};
 use super::fastconformer::{dense_host, Config};
 use crate::cpu::activation;
 use crate::cpu::buf::Buf;
-use crate::cpu::gemm::{Dense, Precision};
+use crate::cpu::gemm::{Blocks, Dense, Precision};
 use crate::cpu::half::HalfDense;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
@@ -26,7 +26,11 @@ enum DecoderLayer {
 impl DecoderLayer {
     /// `name` (`.weight`, `.bias`) from the file.
     fn load(t: &Tensors, name: &str, out: usize, inp: usize) -> Result<Self, String> {
-        if matches!(t.precision(), Precision::F32 | Precision::Int8) {
+        let precision = t.precision_of(&format!("{name}.weight"));
+        if matches!(
+            precision,
+            Precision::F32 | Precision::Int8 | Precision::Q8_0
+        ) {
             return Dense::load_cpu(t, &[(name, out)], inp).map(Self::Dense);
         }
         let weight = t.f16_bits(&format!("{name}.weight"), out * inp)?;
@@ -100,13 +104,24 @@ impl Transducer {
         let lstm = (0..c.decoder_layers)
             .map(|l| -> Result<Lstm, String> {
                 let b_ih = t.f32_len(&format!("decoder.lstm.bias_ih_l{l}"), 4 * dh)?;
-                let b_hh = t.f32_len(&format!("decoder.lstm.bias_hh_l{l}"), 4 * dh)?;
+                // A GGUF file stores the sum of the two biases as `bias_ih`.
+                let hh_bias = format!("decoder.lstm.bias_hh_l{l}");
+                let b_hh = if t.has(&hh_bias) {
+                    t.f32_len(&hh_bias, 4 * dh)?
+                } else {
+                    vec![0.0; 4 * dh]
+                };
                 // LSTM weights carry no `.weight` suffix.
                 let (ih, hh) = (
                     format!("decoder.lstm.weight_ih_l{l}"),
                     format!("decoder.lstm.weight_hh_l{l}"),
                 );
-                let gates = match t.precision() {
+                let gates = match t.precision_of(&ih) {
+                    Precision::Q8_0 => {
+                        let (w_ih, w_hh) = (t.q8_0(&ih, 4 * dh * dh)?, t.q8_0(&hh, 4 * dh * dh)?);
+                        let joined = Blocks::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
+                        DecoderLayer::Dense(Dense::q8_0(joined, None, 4 * dh, 2 * dh)?)
+                    }
                     precision @ (Precision::F32 | Precision::Int8) => {
                         let (w_ih, w_hh) =
                             (t.f32_len(&ih, 4 * dh * dh)?, t.f32_len(&hh, 4 * dh * dh)?);
@@ -134,7 +149,7 @@ impl Transducer {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             encoder_projector: dense_host(t, "encoder_projector", dh, c.hidden)?,
-            embedding: match t.precision() {
+            embedding: match t.precision_of("decoder.embedding.weight") {
                 Precision::Auto => Dense::new(
                     t.f32_len("decoder.embedding.weight", c.vocab * dh)?,
                     None,

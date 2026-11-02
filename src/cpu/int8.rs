@@ -1,7 +1,10 @@
-//! Int8 weights with one scale per row and 128-value group, quantized at
-//! load from f32 or f16. Activations go through the same i8 quantizer as
-//! the ternary layers (`kernels::Quantized`), so a product is i8 x i8 dot
-//! products in i32, one f32 scale pair per group.
+//! Int8 weights with one scale per row and group of inputs: 128-value
+//! groups quantized at load from f32 or f16 (`Precision::Int8`), or ggml's
+//! Q8_0 blocks of 32 with f16 scales, taken as stored (`Precision::Q8_0`).
+//! Activations go through the same i8 quantizer as the ternary layers
+//! (`kernels::Quantized`), in groups of the same size, so a product is
+//! i8 x i8 dot products in i32, one f32 scale pair per group. Q8_0 rounds
+//! the activation scales to f16, as ggml's `vec_dot_q8_0_q8_0` reads them.
 //!
 //! VNNI (AVX-512, or 256-bit AVX-VNNI on Intel client CPUs without
 //! AVX-512): `vpdpbusd` multiplies unsigned by signed bytes, so each weight
@@ -79,14 +82,15 @@ impl Path {
 macro_rules! vnni256_task {
     ($self:ident, $q:ident, $block:ident, $out:ident, $dpbusd:ident) => {{
         use std::arch::x86_64::*;
-        let (k, k4s, groups) = ($self.k, $self.k / 4, $self.k / GROUP);
+        let (k, k4s, groups) = ($self.k, $self.k / 4, $self.k / $self.group);
+        let quads = $self.group / 4;
         let mut frame0 = 0;
         while frame0 < $q.m {
             let frames = ($q.m - frame0).min(4);
             let mut acc = [_mm256_setzero_ps(); 4];
             for g in 0..groups {
                 let mut dots = [_mm256_setzero_si256(); 4];
-                for k4 in g * (GROUP / 4)..(g + 1) * (GROUP / 4) {
+                for k4 in g * quads..(g + 1) * quads {
                     let w = _mm256_loadu_si256(
                         $self.weights.as_ptr().add(($block * k4s + k4) * 32).cast(),
                     );
@@ -132,17 +136,67 @@ pub struct Int8 {
     path: Path,
     pub n: usize,
     pub k: usize,
+    /// Inputs per scale: `GROUP`, or `Q8_0_BLOCK` for ggml Q8_0 weights.
+    group: usize,
+    /// Round each activation scale to f16 (Q8_0).
+    half_scales: bool,
     /// SIMD: `[n / rows][k / 4][rows][4]` bytes, so one load holds four
     /// consecutive inputs of `rows` outputs. Scalar: row-major `n x k`.
     weights: Store<i8>,
-    /// `[n / rows][k / GROUP][rows]`.
+    /// `[n / rows][k / group][rows]`.
     scales: Store<f32>,
 }
+
+/// Values per block of ggml's Q8_0.
+pub const Q8_0_BLOCK: usize = 32;
 
 impl Int8 {
     /// Whether a `n x k` layer fits the kernels: whole groups and whole tiles.
     pub fn fits(n: usize, k: usize) -> bool {
-        k.is_multiple_of(GROUP) && n.is_multiple_of(32)
+        Self::fits_group(n, k, GROUP)
+    }
+
+    /// `fits` for groups of `group` inputs.
+    pub fn fits_group(n: usize, k: usize, group: usize) -> bool {
+        k.is_multiple_of(group) && n.is_multiple_of(32)
+    }
+
+    /// ggml Q8_0 weights as stored: row-major `n x k` codes and one scale
+    /// per block of `Q8_0_BLOCK` (the f16 scale widened to f32). The codes
+    /// are packed for this CPU's kernel, not changed.
+    pub fn from_q8_0(n: usize, k: usize, codes: &[i8], block_scales: &[f32]) -> Self {
+        let isa = Isa::detect();
+        let path = Path::detect(isa);
+        let rows = path.rows();
+        let groups = k / Q8_0_BLOCK;
+        let mut weights = vec![0i8; n * k];
+        let mut scales = vec![0.0f32; n * groups];
+        for row in 0..n {
+            let (block, r) = (row / rows, row % rows);
+            for g in 0..groups {
+                scales[(block * groups + g) * rows + r] = block_scales[row * groups + g];
+            }
+            for kk in 0..k {
+                let code = codes[row * k + kk];
+                let code = if path.flipped() { code ^ i8::MIN } else { code };
+                let at = if path == Path::Scalar {
+                    row * k + kk
+                } else {
+                    ((block * (k / 4) + kk / 4) * rows + r) * 4 + kk % 4
+                };
+                weights[at] = code;
+            }
+        }
+        Self {
+            isa,
+            path,
+            n,
+            k,
+            group: Q8_0_BLOCK,
+            half_scales: true,
+            weights: Store::weights(weights),
+            scales: Store::weights(scales),
+        }
     }
 
     /// Quantizes row-major `n x k` weights; `row(r, out)` writes row `r` as f32.
@@ -193,6 +247,8 @@ impl Int8 {
             path,
             n,
             k,
+            group: GROUP,
+            half_scales: false,
             weights: Store::weights(weights),
             scales: Store::weights(scales),
         }
@@ -201,7 +257,8 @@ impl Int8 {
     /// The weights as f32, one scale per group. The VNNI byte flip is undone.
     #[cfg(feature = "gpu")]
     pub(crate) fn dequant_f32(&self) -> Vec<f32> {
-        let (n, k, groups) = (self.n, self.k, self.k / GROUP);
+        let (n, k, group) = (self.n, self.k, self.group);
+        let groups = k / group;
         let rows = self.path.rows();
         let flipped = self.path.flipped();
         let mut out = vec![0.0f32; n * k];
@@ -210,8 +267,8 @@ impl Int8 {
                 let row = block * rows + r;
                 for g in 0..groups {
                     let scale = self.scales[(block * groups + g) * rows + r];
-                    for i in 0..GROUP {
-                        let kk = g * GROUP + i;
+                    for i in 0..group {
+                        let kk = g * group + i;
                         let at = if self.path == Path::Scalar {
                             row * k + kk
                         } else {
@@ -232,7 +289,7 @@ impl Int8 {
     /// `x` is `m x k` f32; returns `m x n`.
     pub fn forward(&self, x: &[f32], m: usize) -> Buf {
         let mut out = Buf::scratch(m * self.n);
-        let q = Quantized::new(self.isa, x, m, self.k);
+        let q = Quantized::grouped(self.isa, x, m, self.k, self.group, self.half_scales);
         let ptr = OutPtr(out.as_mut_ptr());
         let rows = self.path.rows();
         match self.path {
@@ -262,12 +319,13 @@ impl Int8 {
     }
 
     fn scalar_row(&self, q: &Quantized, row: usize, out: OutPtr) {
-        let (k, groups) = (self.k, self.k / GROUP);
+        let (k, group) = (self.k, self.group);
+        let groups = k / group;
         for frame in 0..q.m {
             let mut total = 0.0f32;
             for g in 0..groups {
                 let mut dot = 0i32;
-                for kk in g * GROUP..(g + 1) * GROUP {
+                for kk in g * group..(g + 1) * group {
                     dot +=
                         i32::from(self.weights[row * k + kk]) * i32::from(q.values[frame * k + kk]);
                 }
@@ -308,12 +366,13 @@ impl Int8 {
         out: OutPtr,
     ) {
         use std::arch::x86_64::*;
-        let (k, k4s, groups) = (self.k, self.k / 4, self.k / GROUP);
+        let (k, k4s, groups) = (self.k, self.k / 4, self.k / self.group);
+        let quads = self.group / 4;
         let blocks = [2 * task, 2 * task + 1];
         let mut acc = [[_mm512_setzero_ps(); F]; 2];
         for g in 0..groups {
             let mut dots = [[_mm512_setzero_si512(); F]; 2];
-            for k4 in g * (GROUP / 4)..(g + 1) * (GROUP / 4) {
+            for k4 in g * quads..(g + 1) * quads {
                 let w0 = _mm512_loadu_si512(
                     self.weights
                         .as_ptr()
@@ -394,12 +453,13 @@ impl Int8 {
         out: OutPtr,
     ) {
         use std::arch::x86_64::*;
-        let (k, k4s, groups) = (self.k, self.k / 4, self.k / GROUP);
+        let (k, k4s, groups) = (self.k, self.k / 4, self.k / self.group);
+        let quads = self.group / 4;
         let ones = _mm256_set1_epi16(1);
         let mut acc = [_mm256_setzero_ps(); F];
         for g in 0..groups {
             let mut dots = [_mm256_setzero_si256(); F];
-            for k4 in g * (GROUP / 4)..(g + 1) * (GROUP / 4) {
+            for k4 in g * quads..(g + 1) * quads {
                 let w =
                     _mm256_loadu_si256(self.weights.as_ptr().add((block * k4s + k4) * 32).cast());
                 let magnitude = _mm256_abs_epi8(w);

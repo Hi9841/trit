@@ -4,7 +4,7 @@
 
 use super::buf::Buf;
 use super::fgemm;
-use super::int8::Int8;
+use super::int8::{Int8, Q8_0_BLOCK};
 use super::store::Store;
 use super::team;
 
@@ -41,7 +41,66 @@ pub struct Q8 {
     groups: usize,
 }
 
-const Q8_GROUP: usize = 32;
+const Q8_GROUP: usize = Q8_0_BLOCK;
+
+/// ggml Q8_0 blocks of a row-major matrix: `Q8_0_BLOCK` codes per block and
+/// the block's scale (stored as f16 in a GGUF file, widened to f32 here).
+pub struct Blocks {
+    pub codes: Vec<i8>,
+    pub scales: Vec<f32>,
+}
+
+impl Blocks {
+    /// Quantizes as ggml's `quantize_row_q8_0_ref`: per block `d = max|x| / 127`,
+    /// codes `round(x * (1 / d))` (half away from zero) from the f32 `d`, and
+    /// `d` stored as f16. A GGUF converter writes the same bytes from the
+    /// same f32 weights. `values.len()` is a multiple of `Q8_0_BLOCK`.
+    pub fn quantize(values: &[f32]) -> Self {
+        let mut codes = vec![0i8; values.len()];
+        let mut scales = Vec::with_capacity(values.len() / Q8_0_BLOCK);
+        for (block, out) in values
+            .as_chunks::<Q8_0_BLOCK>()
+            .0
+            .iter()
+            .zip(codes.as_chunks_mut::<Q8_0_BLOCK>().0)
+        {
+            let max = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let d = max / 127.0;
+            let inverse = if d != 0.0 { 1.0 / d } else { 0.0 };
+            for (o, v) in out.iter_mut().zip(block) {
+                *o = (v * inverse).round() as i8;
+            }
+            scales.push(super::tensors::f16_to_f32(super::tensors::f32_to_f16(d)));
+        }
+        Self { codes, scales }
+    }
+
+    /// `a` (`rows x ka`) and `b` (`rows x kb`) joined row by row; both widths
+    /// are whole blocks, so every block stays as it is.
+    pub fn side_by_side(a: &Self, b: &Self, rows: usize, ka: usize, kb: usize) -> Self {
+        let (ga, gb) = (ka / Q8_0_BLOCK, kb / Q8_0_BLOCK);
+        let mut codes = Vec::with_capacity(rows * (ka + kb));
+        let mut scales = Vec::with_capacity(rows * (ga + gb));
+        for row in 0..rows {
+            codes.extend_from_slice(&a.codes[row * ka..(row + 1) * ka]);
+            codes.extend_from_slice(&b.codes[row * kb..(row + 1) * kb]);
+            scales.extend_from_slice(&a.scales[row * ga..(row + 1) * ga]);
+            scales.extend_from_slice(&b.scales[row * gb..(row + 1) * gb]);
+        }
+        Self { codes, scales }
+    }
+
+    /// The values as f32: `code * scale`.
+    pub fn to_f32(&self) -> Vec<f32> {
+        self.codes
+            .as_chunks::<Q8_0_BLOCK>()
+            .0
+            .iter()
+            .zip(&self.scales)
+            .flat_map(|(block, scale)| block.iter().map(move |c| f32::from(*c) * scale))
+            .collect()
+    }
+}
 
 impl Q8 {
     fn quantize(weight: &[f32], n: usize, k: usize) -> Self {
@@ -151,6 +210,32 @@ impl Dense {
         )
     }
 
+    /// A layer with ggml Q8_0 weights, as stored: int8 activations in groups
+    /// of 32 where the int8 kernels take the shape, f32 math elsewhere.
+    pub fn q8_0(
+        blocks: Blocks,
+        bias: Option<Vec<f32>>,
+        out_features: usize,
+        in_features: usize,
+    ) -> Result<Self, String> {
+        let len = blocks.codes.len();
+        let weight = if Int8::fits_group(out_features, in_features, Q8_0_BLOCK) {
+            Weights::Int8(Int8::from_q8_0(
+                out_features,
+                in_features,
+                &blocks.codes,
+                &blocks.scales,
+            ))
+        } else {
+            Weights::Q8(Q8 {
+                values: Store::weights(blocks.codes),
+                scales: Store::weights(blocks.scales),
+                groups: in_features / Q8_GROUP,
+            })
+        };
+        Self::checked(weight, len, bias, out_features, in_features)
+    }
+
     /// A layer from the model file: `parts` are tensor names (without
     /// `.weight`) with their output rows, stacked in order; a missing bias is
     /// zero, and no bias at all gives a layer without one. Weights are read
@@ -191,8 +276,25 @@ impl Dense {
             }
         }
         let bias = any_bias.then_some(bias);
-        let precision = t.precision();
+        let precision = t.precision_of(&format!("{}.weight", parts[0].0));
         let len = out_features * in_features;
+        if precision == Precision::Q8_0 && in_features.is_multiple_of(Q8_0_BLOCK) {
+            let mut blocks = Blocks {
+                codes: Vec::with_capacity(len),
+                scales: Vec::with_capacity(len / Q8_0_BLOCK),
+            };
+            for (name, rows) in parts {
+                let part = t.q8_0(&format!("{name}.weight"), rows * in_features)?;
+                blocks.codes.extend(part.codes);
+                blocks.scales.extend(part.scales);
+            }
+            let layer = Self::q8_0(blocks, bias, out_features, in_features)?;
+            return if gpu {
+                layer.on_gpu(t.device())
+            } else {
+                Ok(layer)
+            };
+        }
         if !Self::int8(out_features, in_features, precision)
             && matches!(precision, Precision::Auto | Precision::F16)
         {
@@ -226,7 +328,7 @@ impl Dense {
             && match precision {
                 Precision::Int8 => true,
                 Precision::Auto => out_features.min(in_features) >= INT8_MIN_WIDTH,
-                Precision::F16 | Precision::F32 => false,
+                Precision::F16 | Precision::F32 | Precision::Q8_0 => false,
             }
     }
 
@@ -240,6 +342,9 @@ impl Dense {
         precision: Precision,
     ) -> Result<Self, String> {
         let len = weight.len();
+        if precision == Precision::Q8_0 && in_features.is_multiple_of(Q8_0_BLOCK) {
+            return Self::q8_0(Blocks::quantize(&weight), bias, out_features, in_features);
+        }
         let int8 = Self::int8(out_features, in_features, precision);
         if !int8 && matches!(precision, Precision::Auto | Precision::F16) {
             let half = weight
@@ -263,8 +368,8 @@ impl Dense {
 
     /// A token table `[rows][cols]` (embedding, output projection) without
     /// bias: f32 under `Precision::F32`, int8 storage with f32 math under
-    /// `Precision::Int8`, else f16. Never int8 activations: the logits
-    /// decide every token.
+    /// `Precision::Int8`, Q8_0 blocks with f32 math under `Precision::Q8_0`,
+    /// else f16. Never int8 activations: the logits decide every token.
     pub fn table(
         t: &super::tensors::Tensors,
         name: &str,
@@ -272,13 +377,21 @@ impl Dense {
         cols: usize,
     ) -> Result<Self, String> {
         let len = rows * cols;
-        let weight = match t.precision() {
+        let weight = match t.precision_of(name) {
+            Precision::Q8_0 if cols.is_multiple_of(Q8_0_BLOCK) => {
+                let blocks = t.q8_0(name, len)?;
+                Weights::Q8(Q8 {
+                    values: Store::weights(blocks.codes),
+                    scales: Store::weights(blocks.scales),
+                    groups: cols / Q8_GROUP,
+                })
+            }
             Precision::F32 => Weights::F32(Store::weights(t.f32_len(name, len)?)),
             Precision::Int8 => Weights::Q8(Q8::quantize(&t.f32_len(name, len)?, rows, cols)),
             Precision::Auto if cols >= INT8_TABLE_WIDTH => {
                 Weights::Q8(Q8::quantize(&t.f32_len(name, len)?, rows, cols))
             }
-            Precision::Auto | Precision::F16 => {
+            Precision::Auto | Precision::F16 | Precision::Q8_0 => {
                 Weights::F16(Store::weights(t.f16_bits(name, len)?))
             }
         };
@@ -453,10 +566,15 @@ pub enum Precision {
     F16,
     /// The weights as the reference runtimes hold them; the slowest.
     F32,
+    /// ggml's Q8_0, as llama.cpp and transcribe.cpp run it: weights in
+    /// blocks of 32 int8 values with an f16 scale, activations quantized the
+    /// same way, i8 x i8 products. A GGUF file's Q8_0 tensors are used as
+    /// stored; other weights are quantized at load as ggml quantizes them.
+    Q8_0,
 }
 
 impl Precision {
-    pub const NAMES: [&str; 4] = ["auto", "int8", "f16", "f32"];
+    pub const NAMES: [&str; 5] = ["auto", "int8", "f16", "f32", "q8_0"];
 
     pub fn parse(name: &str) -> Result<Self, String> {
         match name {
@@ -464,6 +582,7 @@ impl Precision {
             "int8" => Ok(Self::Int8),
             "f16" => Ok(Self::F16),
             "f32" => Ok(Self::F32),
+            "q8_0" => Ok(Self::Q8_0),
             other => Err(format!(
                 "precision `{other}`: use one of {}",
                 Self::NAMES.join(", ")

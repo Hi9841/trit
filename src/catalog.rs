@@ -15,8 +15,12 @@ pub struct Known {
     pub kind: &'static str,
     /// Languages it writes.
     pub languages: &'static str,
-    /// Size of `model.safetensors` in MB.
+    /// Size of the weights (`model.safetensors`, or the one `file`) in MB.
     pub mb: u32,
+    /// The one file that holds the whole model, when Trit reads that file
+    /// instead of Hugging Face files: an NVIDIA NeMo archive (`.nemo`) or a
+    /// GGUF file (`.gguf`) of a repository that publishes several.
+    pub file: Option<&'static str>,
 }
 
 pub const CATALOG: &[Known] = &[
@@ -26,6 +30,7 @@ pub const CATALOG: &[Known] = &[
         kind: "parakeet_tdt",
         languages: "25 European",
         mb: 178,
+        file: None,
     },
     Known {
         name: "parakeet-tdt-0.6b-v3",
@@ -33,6 +38,7 @@ pub const CATALOG: &[Known] = &[
         kind: "parakeet_tdt",
         languages: "25 European",
         mb: 2508,
+        file: None,
     },
     Known {
         name: "parakeet-ultra",
@@ -40,6 +46,7 @@ pub const CATALOG: &[Known] = &[
         kind: "parakeet_tdt",
         languages: "25 European",
         mb: 1255,
+        file: None,
     },
     Known {
         name: "parakeet-rnnt-0.6b",
@@ -47,6 +54,48 @@ pub const CATALOG: &[Known] = &[
         kind: "parakeet_rnnt",
         languages: "en",
         mb: 2467,
+        file: None,
+    },
+    Known {
+        name: "parakeet-unified-en-0.6b",
+        repo: "nvidia/parakeet-unified-en-0.6b",
+        kind: "parakeet_rnnt",
+        languages: "en",
+        mb: 2474,
+        file: Some("parakeet-unified-en-0.6b.nemo"),
+    },
+    // ggml Q8_0 files, as transcribe.cpp (the engine of Hex) runs them.
+    Known {
+        name: "parakeet-unified-en-0.6b-q8_0",
+        repo: "handy-computer/parakeet-unified-en-0.6b-gguf",
+        kind: "parakeet_rnnt",
+        languages: "en",
+        mb: 731,
+        file: Some("parakeet-unified-en-0.6b-Q8_0.gguf"),
+    },
+    Known {
+        name: "parakeet-tdt-0.6b-v3-q8_0",
+        repo: "handy-computer/parakeet-tdt-0.6b-v3-gguf",
+        kind: "parakeet_tdt",
+        languages: "25 European",
+        mb: 740,
+        file: Some("parakeet-tdt-0.6b-v3-Q8_0.gguf"),
+    },
+    Known {
+        name: "parakeet-tdt-0.6b-v2-q8_0",
+        repo: "handy-computer/parakeet-tdt-0.6b-v2-gguf",
+        kind: "parakeet_tdt",
+        languages: "en",
+        mb: 730,
+        file: Some("parakeet-tdt-0.6b-v2-Q8_0.gguf"),
+    },
+    Known {
+        name: "parakeet-ultra-q8_0",
+        repo: "handy-computer/parakeet-ultra-gguf",
+        kind: "parakeet_tdt",
+        languages: "25 European",
+        mb: 740,
+        file: Some("parakeet-ultra-Q8_0.gguf"),
     },
     Known {
         name: "parakeet-ctc-0.6b",
@@ -54,6 +103,7 @@ pub const CATALOG: &[Known] = &[
         kind: "parakeet_ctc",
         languages: "en",
         mb: 2436,
+        file: None,
     },
     Known {
         name: "canary-1b-v2",
@@ -61,6 +111,7 @@ pub const CATALOG: &[Known] = &[
         kind: "canary",
         languages: "25 European",
         mb: 3916,
+        file: None,
     },
     Known {
         name: "whisper-tiny",
@@ -68,6 +119,7 @@ pub const CATALOG: &[Known] = &[
         kind: "whisper",
         languages: "99",
         mb: 151,
+        file: None,
     },
     Known {
         name: "whisper-base.en",
@@ -75,6 +127,7 @@ pub const CATALOG: &[Known] = &[
         kind: "whisper",
         languages: "en",
         mb: 290,
+        file: None,
     },
     Known {
         name: "whisper-small.en",
@@ -82,6 +135,7 @@ pub const CATALOG: &[Known] = &[
         kind: "whisper",
         languages: "en",
         mb: 967,
+        file: None,
     },
     Known {
         name: "whisper-large-v3-turbo",
@@ -89,6 +143,7 @@ pub const CATALOG: &[Known] = &[
         kind: "whisper",
         languages: "99",
         mb: 1618,
+        file: None,
     },
     Known {
         name: "whisper-large-v3",
@@ -96,6 +151,7 @@ pub const CATALOG: &[Known] = &[
         kind: "whisper",
         languages: "99",
         mb: 3087,
+        file: None,
     },
     Known {
         name: "distil-large-v3.5",
@@ -103,6 +159,7 @@ pub const CATALOG: &[Known] = &[
         kind: "whisper",
         languages: "en",
         mb: 3026,
+        file: None,
     },
     Known {
         name: "moonshine-tiny",
@@ -110,6 +167,7 @@ pub const CATALOG: &[Known] = &[
         kind: "moonshine",
         languages: "en",
         mb: 108,
+        file: None,
     },
     Known {
         name: "moonshine-base",
@@ -117,6 +175,7 @@ pub const CATALOG: &[Known] = &[
         kind: "moonshine",
         languages: "en",
         mb: 246,
+        file: None,
     },
     Known {
         name: "qwen3-asr-0.6b",
@@ -124,6 +183,7 @@ pub const CATALOG: &[Known] = &[
         kind: "qwen3_asr",
         languages: "30",
         mb: 1876,
+        file: None,
     },
     Known {
         name: "wav2vec2-base-960h",
@@ -131,6 +191,7 @@ pub const CATALOG: &[Known] = &[
         kind: "wav2vec2",
         languages: "en",
         mb: 378,
+        file: None,
     },
     Known {
         name: "s1-mini",
@@ -138,6 +199,7 @@ pub const CATALOG: &[Known] = &[
         kind: "cleanup",
         languages: "en",
         mb: 1503,
+        file: None,
     },
     Known {
         name: "kokoro-82m",
@@ -145,6 +207,7 @@ pub const CATALOG: &[Known] = &[
         kind: "kokoro",
         languages: "en (US, GB)",
         mb: 327,
+        file: None,
     },
     Known {
         name: "graphemes_to_phonemes_en_us",
@@ -152,6 +215,7 @@ pub const CATALOG: &[Known] = &[
         kind: "g2p",
         languages: "en (US)",
         mb: 3,
+        file: None,
     },
     Known {
         name: "graphemes_to_phonemes_en_gb",
@@ -159,6 +223,7 @@ pub const CATALOG: &[Known] = &[
         kind: "g2p",
         languages: "en (GB)",
         mb: 3,
+        file: None,
     },
     Known {
         name: "mms-tts-eng",
@@ -166,13 +231,17 @@ pub const CATALOG: &[Known] = &[
         kind: "vits",
         languages: "en",
         mb: 145,
+        file: None,
     },
 ];
 
 impl Known {
     /// The files Trit reads from a folder of this kind.
-    pub fn files(&self) -> &'static [&'static str] {
-        match self.kind {
+    pub fn files(&self) -> Vec<&'static str> {
+        if let Some(file) = self.file {
+            return vec![file];
+        }
+        let files: &[&str] = match self.kind {
             "whisper" => &[
                 "config.json",
                 "generation_config.json",
@@ -233,7 +302,8 @@ impl Known {
                 "model.safetensors",
             ],
             _ => &["config.json", "tokenizer.json", "model.safetensors"],
-        }
+        };
+        files.to_vec()
     }
 
     /// The command that downloads only the files Trit reads. The files are

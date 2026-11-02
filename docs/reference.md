@@ -114,7 +114,7 @@ Flags of `transcribe`:
 | `--dictionary <file>` | none | Terms to favor, one per line (not CTC models: they skip every term) |
 | `--task transcribe\|translate` | `transcribe` | `translate` writes English (multilingual Whisper, Canary) |
 | `--timestamps` | off | Timed segments too: sentences for Parakeet, windows for the others |
-| `--precision auto\|int8\|f16\|f32` | `auto` | How the weights are held; see [Precision](#precision) |
+| `--precision auto\|int8\|f16\|f32\|q8_0` | `auto` | How the weights are held; see [Precision](#precision) |
 | `--device cpu\|gpu\|auto` | `cpu` | Where the products run; see [GPU](#gpu). `TRIT_DEVICE` overrides this |
 | `--beam <n>` | 5 for Whisper and Moonshine, 1 for Canary | Beams; 1 is greedy, at most 16 |
 | `--cleanup` | off | Clean each transcript with S1-mini; `--cleanup-model`, `--styling`, `--structure`, `--context` as for `clean` |
@@ -344,6 +344,19 @@ Trit reads `config.json` and `model.safetensors` of a Hugging Face folder and
 selects the network from `model_type`. These checkpoints have been run; other
 checkpoints of the same families load the same way.
 
+Trit also reads two single-file formats as they are published, in a folder
+that holds the one file and no `config.json`:
+
+- An NVIDIA NeMo archive (`.nemo`), for Parakeet RNNT models with full
+  attention. Trit reads the archive in place and does not unpack it. The
+  text is the same as from the folder that Transformers'
+  `convert_nemo_to_hf.py` writes from the same archive.
+- A GGUF file (`.gguf`) of a Parakeet TDT or RNNT model with full attention,
+  as transcribe.cpp writes them (for example
+  `handy-computer/parakeet-tdt-0.6b-v3-gguf`), in F32, F16, or Q8_0. The
+  text of an F32 file is the same as from the model's own files; see
+  [Precision](#precision) for Q8_0.
+
 | Name | Repository | Family | Languages | MB |
 |---|---|---|---|---:|
 | parakeet-redux | moondream/parakeet-redux | Parakeet TDT, 1.58-bit | 25 European | 178 |
@@ -351,6 +364,11 @@ checkpoints of the same families load the same way.
 | parakeet-ultra | moondream/parakeet-ultra | Parakeet TDT (v3 trained further, f16) | 25 European | 1255 |
 | parakeet-ctc-0.6b | nvidia/parakeet-ctc-0.6b | Parakeet CTC | English | 2436 |
 | parakeet-rnnt-0.6b | nvidia/parakeet-rnnt-0.6b | Parakeet RNNT | English | 2467 |
+| parakeet-unified-en-0.6b | nvidia/parakeet-unified-en-0.6b | Parakeet RNNT (`.nemo` archive) | English | 2474 |
+| parakeet-unified-en-0.6b-q8_0 | handy-computer/parakeet-unified-en-0.6b-gguf | Parakeet RNNT (GGUF, Q8_0) | English | 731 |
+| parakeet-tdt-0.6b-v3-q8_0 | handy-computer/parakeet-tdt-0.6b-v3-gguf | Parakeet TDT (GGUF, Q8_0) | 25 European | 740 |
+| parakeet-tdt-0.6b-v2-q8_0 | handy-computer/parakeet-tdt-0.6b-v2-gguf | Parakeet TDT (GGUF, Q8_0) | English | 730 |
+| parakeet-ultra-q8_0 | handy-computer/parakeet-ultra-gguf | Parakeet TDT (GGUF, Q8_0) | 25 European | 740 |
 | canary-1b-v2 | nvidia/canary-1b-v2 | Canary (FastConformer + transformer decoder) | 25 European | 3916 |
 | whisper-tiny | openai/whisper-tiny | Whisper | 99 | 151 |
 | whisper-base.en | openai/whisper-base.en | Whisper | English | 290 |
@@ -556,6 +574,13 @@ weights in every mode.
 | `int8` | int8 everywhere (int8 storage with f32 math where the int8 kernels cannot take the shape) | int8 storage, f32 math | The least memory; narrow models lose some accuracy |
 | `f16` | f16 weights, f32 math | f16 | Half the memory of f32 |
 | `f32` | f32, as the reference runtimes hold them | f32 | Checks against the reference |
+| `q8_0` | ggml's Q8_0: blocks of 32 int8 values with an f16 scale, int8 activations in the same blocks (f32 math where the int8 kernels cannot take the shape) | Q8_0 storage, f32 math | The quantization of llama.cpp and transcribe.cpp, for a comparison on the same terms |
+
+A GGUF file keeps the types it stores under `auto`: its Q8_0 tensors run as
+`q8_0`, its F16 and F32 tensors as `f16` and `f32`. Another precision
+converts them at load. Trit quantizes to Q8_0 as ggml does
+(`quantize_row_q8_0`), so `q8_0` on f32 weights gives the same blocks as a
+Q8_0 GGUF file of the same weights.
 
 ## GPU
 

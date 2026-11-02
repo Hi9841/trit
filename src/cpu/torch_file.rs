@@ -21,7 +21,13 @@ pub struct Found {
 /// the `module.` of a model saved from `DataParallel` is dropped. A file
 /// that holds one tensor gives it the name "".
 pub fn tensors(file: &File, total: usize) -> Result<Vec<Found>, String> {
-    let zip = Zip::read(file, total)?;
+    tensors_in(file, 0, total)
+}
+
+/// `tensors` of a checkpoint stored at `base..base + len` of `file`, as a
+/// `.nemo` archive holds `model_weights.ckpt`. The ranges are of `file`.
+pub fn tensors_in(file: &File, base: usize, len: usize) -> Result<Vec<Found>, String> {
+    let zip = Zip::read(file, base, len)?;
     let pickle = zip
         .names
         .keys()
@@ -115,11 +121,13 @@ struct Zip {
 }
 
 impl Zip {
-    fn read(file: &File, total: usize) -> Result<Self, String> {
+    /// The directory of the zip at `base..base + total` of `file`. Offsets in
+    /// the zip count from `base`; the members' `data` counts from the file start.
+    fn read(file: &File, base: usize, total: usize) -> Result<Self, String> {
         let not_zip = || "the file is not a zip archive (a PyTorch checkpoint is one)".to_string();
         // The end record is in the last 64 KB (its comment is at most 65535 bytes).
         let tail_len = total.min(65_557);
-        let tail = read(file, total - tail_len, tail_len)?;
+        let tail = read(file, base + total - tail_len, tail_len)?;
         let end = (0..tail.len().saturating_sub(21))
             .rev()
             .find(|i| tail[*i..*i + 4] == [0x50, 0x4b, 0x05, 0x06])
@@ -134,12 +142,12 @@ impl Zip {
                 return Err(not_zip());
             }
             let at = u64le(&tail, locator + 8) as usize;
-            let record64 = read(file, at, 56)?;
+            let record64 = read(file, base + at, 56)?;
             count = u64le(&record64, 32);
             directory = u64le(&record64, 48);
         }
         let mut names = HashMap::new();
-        let mut at = directory as usize;
+        let mut at = base + directory as usize;
         for _ in 0..count {
             let header = read(file, at, 46)?;
             if header[..4] != [0x50, 0x4b, 0x01, 0x02] {
@@ -178,12 +186,13 @@ impl Zip {
                 }
                 extra = &extra[(4 + len).min(extra.len())..];
             }
-            let local_header = read(file, local as usize, 30)?;
-            let data = local as usize
+            let local_header = read(file, base + local as usize, 30)?;
+            let data = base
+                + local as usize
                 + 30
                 + usize::from(u16le(&local_header, 26))
                 + usize::from(u16le(&local_header, 28));
-            if data + size as usize > total {
+            if data + size as usize > base + total {
                 return Err(format!("zip member {name} runs past the end of the file"));
             }
             names.insert(

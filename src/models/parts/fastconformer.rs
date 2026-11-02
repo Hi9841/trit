@@ -195,7 +195,7 @@ pub(crate) fn dense_host(t: &Tensors, name: &str, out: usize, inp: usize) -> Res
 }
 
 fn dense_in(t: &Tensors, name: &str, out: usize, inp: usize, gpu: bool) -> Result<Dense, String> {
-    if t.precision() != Precision::Auto {
+    if t.precision_of(&format!("{name}.weight")) != Precision::Auto {
         return if gpu {
             Dense::load(t, &[(name, out)], inp)
         } else {
