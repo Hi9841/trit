@@ -344,18 +344,32 @@ Trit reads `config.json` and `model.safetensors` of a Hugging Face folder and
 selects the network from `model_type`. These checkpoints have been run; other
 checkpoints of the same families load the same way.
 
-Trit also reads two single-file formats as they are published, in a folder
-that holds the one file and no `config.json`:
+Trit also reads single-file formats as they are published:
 
+- A GGUF file (`.gguf`) as transcribe.cpp writes them, in a folder that
+  holds the one file and no `config.json`. Trit runs every speech model of
+  the transcribe.cpp catalog (the `handy-computer/*-gguf` repositories):
+  Parakeet (TDT, RNNT, CTC, hybrid TDT-CTC, Nemotron streaming,
+  multitalker), Canary, Canary-Qwen, Cohere Transcribe, Whisper, Breeze
+  ASR, Moonshine and Moonshine Streaming, Qwen3-ASR, Fun-ASR, SenseVoice,
+  GigaAM, MedASR, Granite Speech (4.0, 4.1, 4.1 plus, 4.1 NAR, 5.0
+  TurboCTC), Voxtral (Mini, Small, Mini Realtime), and MOSS Transcribe
+  Diarize. Trit reads the tensor types of every quant they publish (F32,
+  F16, BF16, Q8_0, Q6_K, Q5_K_M, Q4_K_M); the checks ran on the Q8_0
+  files, and on Q6_K and Q4_K_M for some. Streaming models run offline, on
+  the whole clip. On the same file, Trit's text is close to
+  transcribe.cpp's (most clips give the same text). Trit writes text only:
+  no speaker labels and no timestamps from the model.
 - An NVIDIA NeMo archive (`.nemo`), for Parakeet RNNT models with full
-  attention. Trit reads the archive in place and does not unpack it. The
-  text is the same as from the folder that Transformers'
-  `convert_nemo_to_hf.py` writes from the same archive.
-- A GGUF file (`.gguf`) of a Parakeet TDT or RNNT model with full attention,
-  as transcribe.cpp writes them (for example
-  `handy-computer/parakeet-tdt-0.6b-v3-gguf`), in F32, F16, or Q8_0. The
-  text of an F32 file is the same as from the model's own files; see
-  [Precision](#precision) for Q8_0.
+  attention, in a folder with no `config.json`. Trit reads the archive in
+  place and does not unpack it. The text is the same as from the folder
+  that Transformers' `convert_nemo_to_hf.py` writes from the same archive.
+- A Fermion container (`model.fermion`, with the NeMo config as
+  `config.json` beside it), as Fermion Research publishes Phonon-2 (see
+  below).
+
+The text of an F32 GGUF file is the same as from the model's own files; see
+[Precision](#precision) for Q8_0.
 
 | Name | Repository | Family | Languages | MB |
 |---|---|---|---|---:|
@@ -380,6 +394,75 @@ that holds the one file and no `config.json`:
 | moonshine-base | UsefulSensors/moonshine-base | Moonshine | English | 246 |
 | wav2vec2-base-960h | facebook/wav2vec2-base-960h | wav2vec 2.0 (CTC) | English | 378 |
 | qwen3-asr-0.6b | Qwen/Qwen3-ASR-0.6B | Qwen3-ASR | 30 | 1876 |
+| breeze-asr-25-q8_0 | handy-computer/Breeze-ASR-25-gguf | Whisper (GGUF, Q8_0) | zh, en | 1668 |
+| canary-180m-flash-q8_0 | handy-computer/canary-180m-flash-gguf | Canary (GGUF, Q8_0) | en, de, es, fr | 218 |
+| canary-1b-flash-q8_0 | handy-computer/canary-1b-flash-gguf | Canary (GGUF, Q8_0) | en, de, es, fr | 1048 |
+| canary-1b-v2-q8_0 | handy-computer/canary-1b-v2-gguf | Canary (GGUF, Q8_0) | 25 European | 1144 |
+| canary-1b-q8_0 | handy-computer/canary-1b-gguf | Canary (GGUF, Q8_0) | en, de, es, fr | 1163 |
+| canary-qwen-2.5b-q8_0 | handy-computer/canary-qwen-2.5b-gguf | Canary-Qwen (GGUF, Q8_0) | English | 2798 |
+| cohere-transcribe-03-2026-q8_0 | handy-computer/cohere-transcribe-03-2026-gguf | Cohere Transcribe (Canary family) (GGUF, Q8_0) | 14 | 2411 |
+| cohere-transcribe-arabic-07-2026-q8_0 | handy-computer/cohere-transcribe-arabic-07-2026-gguf | Cohere Transcribe (Canary family) (GGUF, Q8_0) | en, ar | 2411 |
+| fun-asr-mlt-nano-2512-q8_0 | handy-computer/Fun-ASR-MLT-Nano-2512-gguf | Fun-ASR (GGUF, Q8_0) | 31 | 891 |
+| fun-asr-nano-2512-q8_0 | handy-computer/Fun-ASR-Nano-2512-gguf | Fun-ASR (GGUF, Q8_0) | zh, en, ja | 891 |
+| gigaam-v3-ctc-q8_0 | handy-computer/gigaam-v3-ctc-gguf | GigaAM CTC (GGUF, Q8_0) | ru | 272 |
+| gigaam-v3-e2e-ctc-q8_0 | handy-computer/gigaam-v3-e2e-ctc-gguf | GigaAM CTC (GGUF, Q8_0) | ru | 272 |
+| gigaam-v3-e2e-rnnt-q8_0 | handy-computer/gigaam-v3-e2e-rnnt-gguf | GigaAM RNNT (GGUF, Q8_0) | ru | 274 |
+| gigaam-v3-rnnt-q8_0 | handy-computer/gigaam-v3-rnnt-gguf | GigaAM RNNT (GGUF, Q8_0) | ru | 273 |
+| granite-4.0-1b-speech-q8_0 | handy-computer/granite-4.0-1b-speech-gguf | Granite Speech (GGUF, Q8_0) | 6 | 2560 |
+| granite-speech-4.1-2b-nar-q8_0 | handy-computer/granite-speech-4.1-2b-nar-gguf | Granite Speech NAR (GGUF, Q8_0) | 5 | 2498 |
+| granite-speech-4.1-2b-plus-q8_0 | handy-computer/granite-speech-4.1-2b-plus-gguf | Granite Speech (GGUF, Q8_0) | 5 | 2346 |
+| granite-speech-4.1-2b-q8_0 | handy-computer/granite-speech-4.1-2b-gguf | Granite Speech (GGUF, Q8_0) | 6 | 2560 |
+| granite-speech-5.0-470m-turboctc-nc-q8_0 | handy-computer/granite-speech-5.0-470m-turboctc-nc-gguf | Granite Speech (CTC) (GGUF, Q8_0) | English | 506 |
+| granite-speech-5.0-470m-turboctc-q8_0 | handy-computer/granite-speech-5.0-470m-turboctc-gguf | Granite Speech (CTC) (GGUF, Q8_0) | English | 506 |
+| medasr-q8_0 | handy-computer/medasr-gguf | MedASR (CTC) (GGUF, Q8_0) | English | 128 |
+| moonshine-base-ar-q8_0 | handy-computer/moonshine-base-ar-gguf | Moonshine (GGUF, Q8_0) | ar | 77 |
+| moonshine-base-ja-q8_0 | handy-computer/moonshine-base-ja-gguf | Moonshine (GGUF, Q8_0) | ja | 77 |
+| moonshine-base-ko-q8_0 | handy-computer/moonshine-base-ko-gguf | Moonshine (GGUF, Q8_0) | ko | 77 |
+| moonshine-base-uk-q8_0 | handy-computer/moonshine-base-uk-gguf | Moonshine (GGUF, Q8_0) | uk | 77 |
+| moonshine-base-vi-q8_0 | handy-computer/moonshine-base-vi-gguf | Moonshine (GGUF, Q8_0) | vi | 77 |
+| moonshine-base-zh-q8_0 | handy-computer/moonshine-base-zh-gguf | Moonshine (GGUF, Q8_0) | zh | 77 |
+| moonshine-base-q8_0 | handy-computer/moonshine-base-gguf | Moonshine (GGUF, Q8_0) | English | 77 |
+| moonshine-streaming-medium-q8_0 | handy-computer/moonshine-streaming-medium-gguf | Moonshine Streaming (GGUF, Q8_0) | English | 296 |
+| moonshine-streaming-small-q8_0 | handy-computer/moonshine-streaming-small-gguf | Moonshine Streaming (GGUF, Q8_0) | English | 199 |
+| moonshine-streaming-tiny-q8_0 | handy-computer/moonshine-streaming-tiny-gguf | Moonshine Streaming (GGUF, Q8_0) | English | 50 |
+| moonshine-tiny-ar-q8_0 | handy-computer/moonshine-tiny-ar-gguf | Moonshine (GGUF, Q8_0) | ar | 35 |
+| moonshine-tiny-ja-q8_0 | handy-computer/moonshine-tiny-ja-gguf | Moonshine (GGUF, Q8_0) | ja | 35 |
+| moonshine-tiny-ko-q8_0 | handy-computer/moonshine-tiny-ko-gguf | Moonshine (GGUF, Q8_0) | ko | 35 |
+| moonshine-tiny-uk-q8_0 | handy-computer/moonshine-tiny-uk-gguf | Moonshine (GGUF, Q8_0) | uk | 35 |
+| moonshine-tiny-vi-q8_0 | handy-computer/moonshine-tiny-vi-gguf | Moonshine (GGUF, Q8_0) | vi | 35 |
+| moonshine-tiny-zh-q8_0 | handy-computer/moonshine-tiny-zh-gguf | Moonshine (GGUF, Q8_0) | zh | 35 |
+| moonshine-tiny-q8_0 | handy-computer/moonshine-tiny-gguf | Moonshine (GGUF, Q8_0) | English | 35 |
+| moss-transcribe-diarize-q8_0 | handy-computer/MOSS-Transcribe-Diarize-gguf | MOSS (text only) (GGUF, Q8_0) | en, zh | 987 |
+| multitalker-parakeet-streaming-0.6b-v1-q8_0 | handy-computer/multitalker-parakeet-streaming-0.6b-v1-gguf | Parakeet RNNT (GGUF, Q8_0) | English | 873 |
+| nemotron-3.5-asr-streaming-0.6b-q8_0 | handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf | Parakeet RNNT (GGUF, Q8_0) | 32 | 751 |
+| nemotron-speech-streaming-en-0.6b-q8_0 | handy-computer/nemotron-speech-streaming-en-0.6b-gguf | Parakeet RNNT (GGUF, Q8_0) | English | 730 |
+| orukeet-q8_0 | handy-computer/orukeet-gguf | Parakeet TDT (GGUF, Q8_0) | 25 European | 740 |
+| parakeet-ctc-0.6b-q8_0 | handy-computer/parakeet-ctc-0.6b-gguf | Parakeet CTC (GGUF, Q8_0) | English | 722 |
+| parakeet-ctc-1.1b-q8_0 | handy-computer/parakeet-ctc-1.1b-gguf | Parakeet CTC (GGUF, Q8_0) | English | 1260 |
+| parakeet-primeline-q8_0 | handy-computer/parakeet-primeline-gguf | Parakeet TDT (GGUF, Q8_0) | 25 European | 740 |
+| parakeet-rnnt-0.6b-q8_0 | handy-computer/parakeet-rnnt-0.6b-gguf | Parakeet RNNT (GGUF, Q8_0) | English | 730 |
+| parakeet-rnnt-1.1b-q8_0 | handy-computer/parakeet-rnnt-1.1b-gguf | Parakeet RNNT (GGUF, Q8_0) | English | 1267 |
+| parakeet-tdt-1.1b-q8_0 | handy-computer/parakeet-tdt-1.1b-gguf | Parakeet TDT (GGUF, Q8_0) | English | 1267 |
+| parakeet-tdt_ctc-1.1b-q8_0 | handy-computer/parakeet-tdt_ctc-1.1b-gguf | Parakeet TDT (GGUF, Q8_0) | English | 1267 |
+| parakeet-tdt_ctc-110m-q8_0 | handy-computer/parakeet-tdt_ctc-110m-gguf | Parakeet TDT (GGUF, Q8_0) | English | 135 |
+| qwen3-asr-0.6b-q8_0 | handy-computer/Qwen3-ASR-0.6B-gguf | Qwen3-ASR (GGUF, Q8_0) | 30 | 850 |
+| qwen3-asr-1.7b-q8_0 | handy-computer/Qwen3-ASR-1.7B-gguf | Qwen3-ASR (GGUF, Q8_0) | 30 | 2185 |
+| sensevoice-small-q8_0 | handy-computer/SenseVoiceSmall-gguf | SenseVoice (GGUF, Q8_0) | 5 | 253 |
+| voxtral-mini-3b-2507-q8_0 | handy-computer/Voxtral-Mini-3B-2507-gguf | Voxtral (GGUF, Q8_0) | 8 | 5000 |
+| voxtral-mini-4b-realtime-2602-q8_0 | handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf | Voxtral Realtime (offline) (GGUF, Q8_0) | 13 | 4732 |
+| voxtral-small-24b-2507-q8_0 | handy-computer/Voxtral-Small-24B-2507-gguf | Voxtral (GGUF, Q8_0) | 8 | 25810 |
+| whisper-base.en-q8_0 | handy-computer/whisper-base.en-gguf | Whisper (GGUF, Q8_0) | English | 85 |
+| whisper-base-q8_0 | handy-computer/whisper-base-gguf | Whisper (GGUF, Q8_0) | 99 | 85 |
+| whisper-large-v2-q8_0 | handy-computer/whisper-large-v2-gguf | Whisper (GGUF, Q8_0) | 99 | 1668 |
+| whisper-large-v3-turbo-q8_0 | handy-computer/whisper-large-v3-turbo-gguf | Whisper (GGUF, Q8_0) | 100 | 886 |
+| whisper-large-v3-q8_0 | handy-computer/whisper-large-v3-gguf | Whisper (GGUF, Q8_0) | 100 | 1669 |
+| whisper-large-q8_0 | handy-computer/whisper-large-gguf | Whisper (GGUF, Q8_0) | 99 | 1668 |
+| whisper-medium.en-q8_0 | handy-computer/whisper-medium.en-gguf | Whisper (GGUF, Q8_0) | English | 831 |
+| whisper-medium-q8_0 | handy-computer/whisper-medium-gguf | Whisper (GGUF, Q8_0) | 99 | 832 |
+| whisper-small.en-q8_0 | handy-computer/whisper-small.en-gguf | Whisper (GGUF, Q8_0) | English | 270 |
+| whisper-small-q8_0 | handy-computer/whisper-small-gguf | Whisper (GGUF, Q8_0) | 99 | 270 |
+| whisper-tiny.en-q8_0 | handy-computer/whisper-tiny.en-gguf | Whisper (GGUF, Q8_0) | English | 46 |
+| whisper-tiny-q8_0 | handy-computer/whisper-tiny-gguf | Whisper (GGUF, Q8_0) | 99 | 46 |
 | s1-mini | superwhisper/s1-mini | Qwen3 text model (cleanup) | English | 1503 |
 | kokoro-82m | hexgrad/Kokoro-82M | Kokoro voice (text to speech), 28 English voices | English (US, GB) | 327 |
 | graphemes_to_phonemes_en_us, _en_gb | PeterReid/graphemes_to_phonemes_en_us, _gb | The phonemizer's fallback for unknown words | English | 3 |
@@ -389,6 +472,16 @@ Download only the files Trit reads:
 
 ```powershell
 hf download openai/whisper-large-v3-turbo config.json generation_config.json tokenizer.json model.safetensors --local-dir models/whisper-large-v3-turbo
+```
+
+Phonon-2 (FermionResearch/Phonon-2, Parakeet TDT 0.6B v3 with a
+five-value encoder) comes as one archive, `phonon-2.bps.tar.zst`. Unpack it
+into a folder of its own; Trit reads the `model.fermion` and `config.json`
+in it:
+
+```powershell
+hf download FermionResearch/Phonon-2 phonon-2.bps.tar.zst --local-dir models/phonon-2
+tar --zstd -xf models/phonon-2/phonon-2.bps.tar.zst -C models/phonon-2
 ```
 
 Trit looks for a model in this order:
@@ -413,7 +506,14 @@ Trit looks for a model in this order:
 | wav2vec 2.0 | English | Ignored |
 | Qwen3-ASR | 30 | Forces that language; without it, the model names the language it hears |
 | Canary 1B v2 | 25 European | The spoken language; English when none is given (Canary does not detect it) |
-| Moonshine | English | Ignored |
+| Moonshine | English, or the one language of a language release (`-ar`, `-ja`, `-ko`, `-uk`, `-vi`, `-zh`) | Ignored |
+| Canary (GGUF), Cohere Transcribe | The languages of the model | As Canary 1B v2 |
+| Nemotron 3.5 streaming | 32 | Goes to the model's language prompt; none or an unknown code: the model finds it |
+| SenseVoice | 5 | Goes to the model's language prompt; none or an unknown code: `auto` |
+| Voxtral | 8 (Realtime 13) | Voxtral Mini and Small: goes into the request (`lang:fr`); none lets the model find it. Realtime: ignored |
+| Fun-ASR, Granite Speech, MOSS, Canary-Qwen | The languages of the model | Ignored; the model finds the language |
+| GigaAM | Russian | Ignored |
+| MedASR | English | Ignored |
 
 ## Transcript cleanup
 
@@ -687,15 +787,16 @@ Parakeet Redux. Other models run on the GPU and gain little; a decoder step
 | `src/catalog.rs` | The model catalog |
 | `src/cleanup.rs` | `Cleaner`: S1-mini prompt and styles |
 | `src/tts/` | Text to speech: `Voice` and `Voicing` (`mod.rs`), Kokoro (`kokoro/`), VITS (`vits.rs`), the English phonemizer (`english/`: tokenizer, tagger, lexicon, numbers, BART fallback, data) |
-| `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`), PyTorch checkpoint reader (`torch_file.rs`) |
+| `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`), PyTorch checkpoint reader (`torch_file.rs`), ggml block types (`ggml_quants.rs`), Fermion records (`fermion.rs`) |
 | `src/gpu/` | GPU matrix products and the Parakeet encoder through wgpu (DX12, Vulkan, Metal), behind the `gpu` feature |
-| `src/audio/` | WAV reader and writer, STFT and its inverse (`stft.rs`), NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), windows for long audio |
-| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), byte-level BPE (Whisper, Qwen) |
+| `src/audio/` | WAV reader and writer, STFT and its inverse (`stft.rs`), power spectrum (`dft.rs`), NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), log-mel from a file's filterbank (`table_mel.rs`), Kaldi filterbank (`kaldi_fbank.rs`), windows for long audio |
+| `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), BPE: byte-level (Whisper, Qwen, Granite) and SentencePiece BPE |
 | `src/models/mod.rs` | `FAMILIES`: one row per `model_type` (its loader and thread spread), and the `Family` trait |
 | `src/models/config.rs` | The `config.json` reader that every family uses |
+| `src/models/files.rs`, `gguf/`, `nemo.rs`, `fermion.rs` | The files of a model: a Hugging Face folder, or one published file (GGUF, `.nemo`, Fermion) that gives the same `config.json`, tokenizer, and tensor names. `gguf/` has one file per GGUF architecture |
 | `src/models/layers.rs` | Shared layers: norms, GELU, rotary positions, attention, conv columns |
-| `src/models/parts/` | Building blocks that the config picks: the FastConformer encoder (`fastconformer.rs`), the TDT and RNNT head (`transducer.rs`), CTC (`ctc.rs`), beam search (`beam.rs`), the Qwen3 language model (`qwen3.rs`), the sound-checked dictionary (`dictionary.rs`), the logit dictionary (`logit_bias.rs`), and 1-D convolutions: dilated, depthwise, transposed (`conv.rs`) |
-| `src/models/families/` | One file per checkpoint family. It reads the family's files and wires the parts: Parakeet, Canary, Whisper, Moonshine, wav2vec 2.0, Qwen3-ASR, and the VITS voice (`vits.rs`) |
+| `src/models/parts/` | Building blocks that the config picks: the FastConformer encoder (`fastconformer.rs`), the TDT and RNNT head (`transducer.rs`), CTC (`ctc.rs`), beam search (`beam.rs`), the decoder-only language model of Qwen3, Llama, Mistral, and Granite (`causal_lm.rs`), the Granite Conformer (`granite_conformer.rs`), the SAN-M encoder (`sanm.rs`), the Moonshine Streaming encoder (`moonshine_streaming.rs`), the LSTM (`lstm.rs`), the sound-checked dictionary (`dictionary.rs`), the logit dictionary (`logit_bias.rs`), and 1-D convolutions: dilated, depthwise, transposed (`conv.rs`) |
+| `src/models/families/` | One file per checkpoint family. It reads the family's files and wires the parts: Parakeet (also GigaAM and MedASR), Canary (also Cohere Transcribe), Canary-Qwen, Whisper, Moonshine, wav2vec 2.0, Qwen3-ASR, Fun-ASR, SenseVoice, Granite Speech (autoregressive, NAR, CTC), Voxtral, Voxtral Realtime, MOSS, and the VITS voice (`vits.rs`) |
 | `ffi/` | `trit-ffi`: the C ABI |
 | `bindings/` | Python, C#, Node |
 
@@ -708,5 +809,10 @@ or use it to make money.
 Each model has its own license: Parakeet and Canary CC-BY-4.0, Whisper and
 Moonshine MIT, S1-mini Apache-2.0 with a naming clause, MMS-TTS
 CC-BY-NC-4.0 (noncommercial), Kokoro-82M and the G2P fallback Apache-2.0.
+The models of the transcribe.cpp catalog keep their upstream licenses. Some
+are noncommercial (canary-1b CC-BY-NC-4.0, Granite Speech 5.0 TurboCTC NC
+CC-BY-NC-SA-4.0), and some have their own terms (the NVIDIA Open Model
+License, the Moonshine AI Community License of the Moonshine language
+releases, the FunASR licenses, Health AI Developer Foundations for MedASR).
 Follow it when you ship the model. The phonemizer's lexicons (misaki, Apache-2.0) and
 tagger (MIT) ship in Trit: see [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).

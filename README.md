@@ -2,8 +2,10 @@
 
 Trit is a speech-to-text and text-to-speech engine for the CPU, written in
 Rust. It runs Parakeet, Canary, Whisper, Moonshine, Qwen3-ASR, and wav2vec 2.0
-checkpoints as published on Hugging Face, and Parakeet GGUF (F32, F16, Q8_0)
-and NeMo files, with its own kernels: no Python, no PyTorch, no ONNX Runtime.
+checkpoints as published on Hugging Face, NeMo files, and every speech model of
+the transcribe.cpp GGUF catalog (Granite Speech, Voxtral, Fun-ASR, SenseVoice,
+GigaAM, Cohere Transcribe, and more), with its own kernels: no Python, no
+PyTorch, no ONNX Runtime.
 It can also clean a transcript with Superwhisper S1-mini, and speak text with
 Kokoro-82M (28 English voices) or a VITS voice.
 
@@ -79,5 +81,8 @@ Each model has its own license: Parakeet and Canary CC-BY-4.0 (Parakeet
 Unified English: the NVIDIA Open Model License), Whisper and
 Moonshine MIT, S1-mini Apache-2.0 with a naming clause, MMS-TTS
 CC-BY-NC-4.0 (noncommercial), Kokoro-82M and the G2P fallback Apache-2.0.
+The models of the transcribe.cpp catalog keep their upstream licenses, and
+some are noncommercial: see [Models](docs/reference.md#models) and the
+[License](docs/reference.md#license) section of the reference.
 Follow it when you ship the model. The phonemizer's lexicons (misaki, Apache-2.0) and
 tagger (MIT) ship in Trit: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

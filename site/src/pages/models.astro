@@ -34,16 +34,17 @@ const search = await render(readme.slice(tableEnd + 1).join("\n"), "docs/referen
 
 <Base
   title="Models · Trit"
-  description="The Hugging Face checkpoints Trit runs: Parakeet, Canary, Whisper, Moonshine, and S1-mini for cleanup. Sizes, languages, speed, and the download command."
+  description="The speech models Trit runs, from Hugging Face folders and GGUF files: Parakeet, Canary, Whisper, Moonshine, Qwen3-ASR, Granite Speech, Voxtral, and more; S1-mini for cleanup. Sizes, languages, speed, and the download command."
   updated={updated}
 >
   <Header />
   <main id="content">
     <PageHead title="Models, as published." art={shelf} scene="shelf">
       <p>
-        Trit reads <code>config.json</code> and <code>model.safetensors</code> of a Hugging Face folder and picks the
-        network from <code>model_type</code>. These {catalog.length} checkpoints have been run. Others of the same
-        families load the same way. This command lists them, with what is on your computer:
+        Trit reads <code>config.json</code> and <code>model.safetensors</code> of a Hugging Face folder, or one
+        published file (GGUF, <code>.nemo</code>), and picks the network from <code>model_type</code>. These
+        {catalog.length} models have been run. Others of the same families load the same way. This command lists them,
+        with what is on your computer:
       </p>
       <Cmd command="trit models" />
     </PageHead>
