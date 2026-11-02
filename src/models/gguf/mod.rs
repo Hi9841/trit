@@ -24,6 +24,7 @@ mod parakeet;
 mod qwen3_asr;
 mod sensevoice;
 mod voxtral;
+mod voxtral_realtime;
 mod whisper;
 
 /// The architectures Trit reads, by `general.architecture`.
@@ -44,6 +45,7 @@ enum Arch {
     GraniteSpeech,
     Voxtral,
     Cohere,
+    VoxtralRealtime,
 }
 
 /// What a tensor of the file becomes.
@@ -177,8 +179,9 @@ impl Gguf {
             Some("granite_speech") => Ok(Arch::GraniteSpeech),
             Some("voxtral") => Ok(Arch::Voxtral),
             Some("cohere_asr") => Ok(Arch::Cohere),
+            Some("voxtral_realtime") => Ok(Arch::VoxtralRealtime),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, moonshine_streaming, granite_speech, voxtral, and cohere_asr",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, moonshine_streaming, granite_speech, voxtral, cohere_asr, and voxtral_realtime",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -226,6 +229,7 @@ impl Gguf {
                 Arch::GraniteSpeech => granite_speech::hf_name(name),
                 Arch::Voxtral => voxtral::hf_name(name),
                 Arch::Cohere => cohere::hf_name(name),
+                Arch::VoxtralRealtime => voxtral_realtime::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -265,6 +269,9 @@ impl Gguf {
             (Arch::Canary, "config.json") => {
                 canary::config(self).map(|v| v.to_string()).map_err(fail)
             }
+            (Arch::VoxtralRealtime, "config.json") => voxtral_realtime::config(self)
+                .map(|v| v.to_string())
+                .map_err(fail),
             (Arch::Cohere, "config.json") => {
                 cohere::config(self).map(|v| v.to_string()).map_err(fail)
             }

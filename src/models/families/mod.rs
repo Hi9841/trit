@@ -12,5 +12,6 @@ pub mod parakeet;
 pub mod qwen3_asr;
 pub mod sensevoice;
 pub mod voxtral;
+pub mod voxtral_realtime;
 pub mod wav2vec2;
 pub mod whisper;

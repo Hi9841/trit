@@ -13,7 +13,7 @@ pub mod parts;
 
 use families::{
     canary, canary_qwen, fun_asr, granite_ctc, granite_speech, moonshine, parakeet, qwen3_asr,
-    sensevoice, voxtral, wav2vec2, whisper,
+    sensevoice, voxtral, voxtral_realtime, wav2vec2, whisper,
 };
 
 use crate::{BiasWeights, Device, Options, Precision, Segment, Spread};
@@ -96,7 +96,7 @@ pub struct Row {
 }
 
 /// Every family, by `model_type`. Tall products (Whisper) use every core.
-pub const FAMILIES: [Row; 18] = [
+pub const FAMILIES: [Row; 19] = [
     Row {
         model_type: "parakeet_tdt",
         spread: Spread::OneCache,
@@ -180,6 +180,15 @@ pub const FAMILIES: [Row; 18] = [
         model_type: "voxtral",
         spread: Spread::OneCache,
         load: |files, c, p, d| Ok(Box::new(voxtral::Voxtral::load(files, c, p, d)?)),
+    },
+    Row {
+        model_type: "voxtral_realtime",
+        spread: Spread::OneCache,
+        load: |files, c, p, d| {
+            Ok(Box::new(voxtral_realtime::VoxtralRealtime::load(
+                files, c, p, d,
+            )?))
+        },
     },
     Row {
         model_type: "granite_ctc",
@@ -411,6 +420,22 @@ impl Family for granite_speech::GraniteSpeech {
 impl Family for voxtral::Voxtral {
     fn kind(&self) -> &'static str {
         "voxtral"
+    }
+    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
+        joined(self.pieces(samples, options))
+    }
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        windowed(self.pieces(samples, options))
+    }
+    /// The language model has no term bias yet: every term is skipped.
+    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
+        terms.to_vec()
+    }
+}
+
+impl Family for voxtral_realtime::VoxtralRealtime {
+    fn kind(&self) -> &'static str {
+        "voxtral_realtime"
     }
     fn transcribe(&self, samples: &[f32], options: &Options) -> String {
         joined(self.pieces(samples, options))

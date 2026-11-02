@@ -97,6 +97,9 @@ pub struct CausalLm {
     /// The output projection when it is not tied to `embed`.
     head: Option<Dense>,
     rotary: Rotary,
+    /// Per layer, a scale on the normed input of the MLP (Voxtral Realtime's
+    /// delay-conditioned `1 + ada(t)`); none elsewhere.
+    ffn_scales: Option<Vec<Vec<f32>>>,
 }
 
 /// The caches of a prompt start; see `CausalLm::prefix`.
@@ -165,6 +168,7 @@ impl CausalLm {
             embed: Dense::table(t, &format!("{prefix}model.embed_tokens.weight"), c.vocab, d)?,
             head,
             rotary: Rotary::halves(hd, c.rope_base),
+            ffn_scales: None,
             config: c,
         })
     }
@@ -258,6 +262,50 @@ impl CausalLm {
         out
     }
 
+    /// Sets a scale on the normed MLP input of each layer, `layers x width`.
+    pub fn set_ffn_scales(&mut self, scales: Vec<Vec<f32>>) {
+        self.ffn_scales = Some(scales);
+    }
+
+    /// The number of layers.
+    pub fn layers(&self) -> usize {
+        self.config.layers
+    }
+
+    /// Greedy tokens with audio added to every input (Voxtral Realtime): the
+    /// prompt's embeddings plus `audio` rows `0..prompt.len()`, then each new
+    /// token's embedding plus the next row, until a `stop` token or the rows
+    /// end. `audio` is `rows x width`.
+    pub fn generate_additive(&self, prompt: &[usize], audio: &[f32], stop: &[usize]) -> Vec<usize> {
+        let c = &self.config;
+        let d = c.d;
+        let rows = audio.len() / d;
+        let n = prompt.len();
+        if n == 0 || rows < n {
+            return Vec::new();
+        }
+        let capacity = (rows + 1) * c.kv_heads * c.head_dim;
+        let mut keys = vec![Vec::with_capacity(capacity); c.layers];
+        let mut values = vec![Vec::with_capacity(capacity); c.layers];
+        let mut x = self.embed(prompt);
+        add_into(&mut x, &audio[..n * d]);
+        let mut token = argmax(&self.forward_rows(x, 0, &mut keys, &mut values));
+        let mut out = Vec::new();
+        for position in n..rows {
+            if stop.contains(&token) {
+                return out;
+            }
+            out.push(token);
+            let mut x = self.embed(&[token]);
+            add_into(&mut x, &audio[position * d..(position + 1) * d]);
+            token = argmax(&self.forward_rows(x, position, &mut keys, &mut values));
+        }
+        if !stop.contains(&token) {
+            out.push(token);
+        }
+        out
+    }
+
     /// The width of a token embedding.
     pub fn width(&self) -> usize {
         self.config.d
@@ -333,7 +381,13 @@ impl CausalLm {
                 true,
             );
             add_residual(&mut x, &layer.out.forward(&att, m), c.residual_multiplier);
-            let normed = layer.norm_mlp.apply(&x);
+            let mut normed = layer.norm_mlp.apply(&x);
+            if let Some(scales) = &self.ffn_scales {
+                let scale = &scales[l];
+                team::chunks_mut(&mut normed, d, |_, row| {
+                    row.iter_mut().zip(scale).for_each(|(v, s)| *v *= s)
+                });
+            }
             let wide = layer.gate_up.forward(&normed, m);
             let mut hidden = Buf::scratch(m * c.ffn);
             team::chunks_mut(&mut hidden, c.ffn, |r, h| {
