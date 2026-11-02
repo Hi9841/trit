@@ -12,9 +12,12 @@ use crate::cpu::tensors::Tensors;
 use crate::{Device, Precision};
 
 mod canary;
+mod gigaam;
+mod medasr;
 mod moonshine;
 mod parakeet;
 mod qwen3_asr;
+mod sensevoice;
 mod whisper;
 
 /// The architectures Trit reads, by `general.architecture`.
@@ -25,6 +28,9 @@ enum Arch {
     Moonshine,
     Canary,
     Qwen3Asr,
+    Gigaam,
+    Sensevoice,
+    Medasr,
 }
 
 /// What a tensor of the file becomes.
@@ -148,8 +154,11 @@ impl Gguf {
             Some("moonshine") => Ok(Arch::Moonshine),
             Some("canary") => Ok(Arch::Canary),
             Some("qwen3_asr") => Ok(Arch::Qwen3Asr),
+            Some("gigaam") => Ok(Arch::Gigaam),
+            Some("sensevoice") => Ok(Arch::Sensevoice),
+            Some("medasr") => Ok(Arch::Medasr),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, and qwen3_asr",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, and medasr",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -187,6 +196,9 @@ impl Gguf {
                 Arch::Moonshine => moonshine::hf_name(name),
                 Arch::Canary => canary::hf_name(name),
                 Arch::Qwen3Asr => qwen3_asr::hf_name(name),
+                Arch::Gigaam => gigaam::hf_name(name),
+                Arch::Sensevoice => sensevoice::hf_name(name),
+                Arch::Medasr => medasr::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -225,6 +237,15 @@ impl Gguf {
             }
             (Arch::Canary, "config.json") => {
                 canary::config(self).map(|v| v.to_string()).map_err(fail)
+            }
+            (Arch::Medasr, "config.json") => {
+                medasr::config(self).map(|v| v.to_string()).map_err(fail)
+            }
+            (Arch::Sensevoice, "config.json") => sensevoice::config(self)
+                .map(|v| v.to_string())
+                .map_err(fail),
+            (Arch::Gigaam, "config.json") => {
+                gigaam::config(self).map(|v| v.to_string()).map_err(fail)
             }
             (Arch::Qwen3Asr, "config.json") => {
                 qwen3_asr::config(self).map(|v| v.to_string()).map_err(fail)

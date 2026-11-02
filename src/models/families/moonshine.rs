@@ -17,8 +17,16 @@ use crate::text::sentencepiece::Tokenizer;
 use crate::{Device, Options, Precision};
 use parking_lot::RwLock;
 
-/// Moonshine reads at most about 6.5 tokens per second of speech.
-const TOKENS_PER_SECOND: f32 = 6.5;
+/// Most tokens per second of speech that decoding may write, against
+/// loops: what each model card's `token_limit_factor` gives for the
+/// model's language (UsefulSensors/moonshine-tiny, -tiny-uk, -tiny-ar ...).
+fn tokens_per_second(language: &str) -> f32 {
+    match language {
+        "en" => 6.5,
+        "uk" => 8.0,
+        _ => 13.0,
+    }
+}
 /// Beams unless the caller sets `Options::beam`: on the 456 English test
 /// clips 5 beams gave 557 and 415 errors (tiny, base), greedy 653 and 477.
 const BEAMS: usize = 5;
@@ -43,6 +51,7 @@ struct Config {
     rope_base: f32,
     /// The encoder MLP activation (`encoder_hidden_act`).
     gelu: Gelu,
+    tokens_per_second: f32,
 }
 
 impl Config {
@@ -72,6 +81,13 @@ impl Config {
             rotary_dims: ((d / heads) as f64 * factor) as usize / 2 * 2,
             rope_base: json.float("rope_theta").unwrap_or(10_000.0) as f32,
             gelu: Gelu::parse(json.str("encoder_hidden_act").unwrap_or("gelu"))?,
+            // A GGUF file names the language; a Hugging Face folder is English.
+            tokens_per_second: tokens_per_second(
+                json.get("languages")
+                    .get(0)
+                    .and_then(|code| code.as_str())
+                    .unwrap_or("en"),
+            ),
         })
     }
 }
@@ -222,8 +238,9 @@ impl Moonshine {
                 continue;
             }
             let encoded = self.encode(window);
-            let limit = ((window.len() as f32 / 16_000.0 * TOKENS_PER_SECOND) as usize + 4)
-                .min(self.config.max_tokens);
+            let limit = ((window.len() as f32 / 16_000.0 * self.config.tokens_per_second) as usize
+                + 4)
+            .min(self.config.max_tokens);
             let ids = self.generate(&encoded, limit, options.beams(BEAMS), dictionary.as_ref());
             let piece = self.tokenizer.decode(&ids);
             let piece = piece.trim();

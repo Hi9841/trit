@@ -169,7 +169,9 @@ impl Transducer {
     fn decoder_step(&self, c: &Config, token: usize, state: &mut DecoderState) -> Buf {
         let dh = c.decoder_hidden;
         let mut input = vec![0.0f32; dh];
-        self.embedding.row(token, &mut input);
+        if !(c.start_zero && token == c.blank) {
+            self.embedding.row(token, &mut input);
+        }
         let mut joined = vec![0.0f32; 2 * dh];
         for (layer, lstm) in self.lstm.iter().enumerate() {
             joined[..dh].copy_from_slice(&input);
@@ -187,7 +189,10 @@ impl Transducer {
         let (dh, n) = (c.decoder_hidden, tokens.len());
         let mut input = vec![0.0f32; n * dh];
         for (&token, row) in tokens.iter().zip(input.chunks_exact_mut(dh)) {
-            self.embedding.row(token, row);
+            // The blank is only ever the first input: zeros where the model says so.
+            if !(c.start_zero && token == c.blank) {
+                self.embedding.row(token, row);
+            }
         }
         let mut joined = vec![0.0f32; n * 2 * dh];
         for (layer, lstm) in self.lstm.iter().enumerate() {

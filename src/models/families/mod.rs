@@ -6,5 +6,6 @@ pub mod canary;
 pub mod moonshine;
 pub mod parakeet;
 pub mod qwen3_asr;
+pub mod sensevoice;
 pub mod wav2vec2;
 pub mod whisper;

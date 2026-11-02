@@ -13,7 +13,7 @@ use crate::cpu::store::Store;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
 use crate::models::config::Json;
-use crate::models::layers::Norm;
+use crate::models::layers::{conv_columns, Norm, Rotary};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -32,6 +32,8 @@ const ATTENTION_ROWS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// The `model_type` read: `parakeet_tdt`, `gigaam_ctc`, ...
+    pub kind: &'static str,
     pub hidden: usize,
     pub ff: usize,
     pub heads: usize,
@@ -69,6 +71,53 @@ pub struct Config {
     /// Per-bin normalization of the log-mel features over the take
     /// (`per_feature`), or none (the raw log-mel of a streaming model).
     pub normalize_features: bool,
+    /// How attention sees positions.
+    pub position: Position,
+    /// The convs before the blocks.
+    pub subsampler: SubsamplerKind,
+    /// The predictor's first input is zeros (GigaAM), not the embedding of
+    /// the blank (NeMo, where that row is zero anyway).
+    pub start_zero: bool,
+    /// Every layer norm's epsilon: 1e-5 (PyTorch), 1e-6 (LASR).
+    pub norm_eps: f32,
+    /// `(w0, w1)`: a feed-forward module gives `w0 * x + w1 * ff(x)`
+    /// (`(1, 0.5)` in a Conformer; LASR `(1.5, 0.5)`).
+    pub ff_residual: (f32, f32),
+    /// `(w0, w1)` for the conv module: `(1, 1)`; LASR `(2, 1)`.
+    pub conv_residual: (f32, f32),
+    /// A layer norm after the last block (LASR's `out_norm`).
+    pub out_norm: bool,
+}
+
+/// How attention sees positions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Position {
+    /// Transformer-XL relative positions (NeMo): `relative_k_proj`, `bias_u`, `bias_v`.
+    Relative,
+    /// Rotary positions on the block input before the query and key
+    /// projections (GigaAM): halves of each head, this base.
+    RotaryInput { base: f32 },
+    /// Rotary positions on the projected queries and keys (LASR): halves
+    /// of each head, this base.
+    Rotary { base: f32 },
+}
+
+/// The convs before the blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubsamplerKind {
+    /// NeMo's `dw_striding`: a 2-D conv and two depthwise-separable 2-D
+    /// convs, each stride 2: 80 ms frames.
+    Conv2d,
+    /// Two 1-D convs over time, stride 2, with ReLU (GigaAM): 40 ms frames.
+    Conv1d { kernel: usize },
+    /// LASR's: a dense layer, two unpadded 1-D convs over time with this
+    /// kernel and stride (the second to `channels`), then a dense layer
+    /// back to the model width; ReLU after the first three.
+    Lasr {
+        kernel: usize,
+        stride: usize,
+        channels: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,32 +253,68 @@ pub enum HeadKind {
 
 impl Config {
     pub fn parse(json: &Json) -> Result<Self, String> {
-        let head = match json.str("model_type") {
-            Some("parakeet_ctc") => HeadKind::Ctc,
-            Some("parakeet_rnnt") => HeadKind::Rnnt,
-            Some("canary") => HeadKind::Encoder,
-            _ => HeadKind::Transducer,
+        let (kind, head) = match json.str("model_type") {
+            Some("parakeet_ctc") => ("parakeet_ctc", HeadKind::Ctc),
+            Some("gigaam_ctc") => ("gigaam_ctc", HeadKind::Ctc),
+            Some("medasr") => ("medasr", HeadKind::Ctc),
+            Some("parakeet_rnnt") => ("parakeet_rnnt", HeadKind::Rnnt),
+            Some("gigaam_rnnt") => ("gigaam_rnnt", HeadKind::Rnnt),
+            Some("canary") => ("canary", HeadKind::Encoder),
+            _ => ("parakeet_tdt", HeadKind::Transducer),
         };
         let enc = |key: &str| json.num(&format!("encoder_config.{key}"));
-        // Only the shape this engine implements is accepted.
-        if enc("subsampling_factor")? != 8
-            || enc("subsampling_conv_kernel_size")? != 3
-            || enc("subsampling_conv_stride")? != 2
-        {
-            return Err("config.json describes a model shape this engine does not run".into());
-        }
+        // Only the shapes this engine implements are accepted.
+        let (factor, kernel, stride) = (
+            enc("subsampling_factor")?,
+            enc("subsampling_conv_kernel_size")?,
+            enc("subsampling_conv_stride")?,
+        );
+        let subsampler = match json.str("encoder_config.subsampling") {
+            None | Some("dw_striding") if (factor, kernel, stride) == (8, 3, 2) => {
+                SubsamplerKind::Conv2d
+            }
+            Some("conv1d") if factor == 4 && stride == 2 && !kernel.is_multiple_of(2) => {
+                SubsamplerKind::Conv1d { kernel }
+            }
+            Some("lasr") if factor == stride * stride && stride > 1 => SubsamplerKind::Lasr {
+                kernel,
+                stride,
+                channels: enc("subsampling_conv_channels")?,
+            },
+            _ => return Err("config.json describes a model shape this engine does not run".into()),
+        };
         let hidden = enc("hidden_size")?;
         let transducer = matches!(head, HeadKind::Transducer | HeadKind::Rnnt);
         // Only the transducers have the decoder fields; a CTC blank is the pad token.
         let decoder = |key: &str| if transducer { json.num(key) } else { Ok(0) };
         let config = Self {
+            kind,
             hidden,
             ff: enc("intermediate_size")?,
             heads: enc("num_attention_heads")?,
             layers: enc("num_hidden_layers")?,
             mels: enc("num_mel_bins")?,
             conv_kernel: enc("conv_kernel_size")?,
-            sub_channels: enc("subsampling_conv_channels")?,
+            sub_channels: match subsampler {
+                SubsamplerKind::Conv2d => enc("subsampling_conv_channels")?,
+                SubsamplerKind::Conv1d { .. } | SubsamplerKind::Lasr { .. } => hidden,
+            },
+            subsampler,
+            position: match json.str("encoder_config.position_embedding") {
+                None | Some("relative") => Position::Relative,
+                Some("rotary_input") => Position::RotaryInput {
+                    base: json.float("encoder_config.rotary_base").unwrap_or(10_000.0) as f32,
+                },
+                Some("rotary") => Position::Rotary {
+                    base: json.float("encoder_config.rotary_base").unwrap_or(10_000.0) as f32,
+                },
+                Some(other) => return Err(format!("config.json: positions `{other}` are not run")),
+            },
+            start_zero: json.str("decoder_start") == Some("zeros"),
+            norm_eps: json.float("encoder_config.layer_norm_eps").unwrap_or(1e-5) as f32,
+            ff_residual: weights(json, "encoder_config.ff_residual", (1.0, 0.5))?,
+            conv_residual: weights(json, "encoder_config.conv_residual", (1.0, 1.0))?,
+            out_norm: json.flag("encoder_config.output_norm") == Some(true),
             decoder_hidden: decoder("decoder_hidden_size")?,
             decoder_layers: decoder("num_decoder_layers")?,
             vocab: json.num("vocab_size")?,
@@ -296,7 +381,8 @@ impl Config {
             },
         };
         if !config.hidden.is_multiple_of(config.heads)
-            || !config.mels.is_multiple_of(8)
+            || (config.subsampler == SubsamplerKind::Conv2d && !config.mels.is_multiple_of(8))
+            || (config.position != Position::Relative && config.attention != Attention::Full)
             || (head == HeadKind::Transducer && config.durations.is_empty())
             || (transducer && config.max_symbols == 0)
             || config.blank >= config.vocab
@@ -307,14 +393,40 @@ impl Config {
         Ok(config)
     }
 
+    /// Seconds per encoder frame: 10 ms mel frames, subsampled 8 or 4 times.
+    pub fn frame_seconds(&self) -> f32 {
+        match self.subsampler {
+            SubsamplerKind::Conv2d => 0.08,
+            SubsamplerKind::Conv1d { .. } => 0.04,
+            SubsamplerKind::Lasr { stride, .. } => 0.01 * (stride * stride) as f32,
+        }
+    }
+
     /// Whether the GPU encoder runs this shape: full attention, a centered
     /// conv with batch norm, and no speaker kernel.
     #[cfg(feature = "gpu")]
     fn gpu_shape(&self) -> bool {
         self.attention == Attention::Full
+            && self.position == Position::Relative
+            && self.norm_eps == 1e-5
+            && self.ff_residual == (1.0, 0.5)
+            && self.conv_residual == (1.0, 1.0)
+            && !self.out_norm
             && self.conv_context.0 == self.conv_context.1
             && self.conv_norm == ConvNormKind::Batch
             && !self.speaker_kernel
+    }
+}
+
+/// `(w0, w1)` residual weights at `path`, else `default`.
+fn weights(json: &Json, path: &str, default: (f32, f32)) -> Result<(f32, f32), String> {
+    match json.get(path).as_array().map(|pair| pair.as_slice()) {
+        None => Ok(default),
+        Some([w0, w1]) => match (w0.as_f64(), w1.as_f64()) {
+            (Some(w0), Some(w1)) => Ok((w0 as f32, w1 as f32)),
+            _ => Err(format!("config.json: {path} is not two numbers")),
+        },
+        Some(_) => Err(format!("config.json: {path} is not two numbers")),
     }
 }
 
@@ -388,6 +500,123 @@ fn dense_in(t: &Tensors, name: &str, out: usize, inp: usize, gpu: bool) -> Resul
         layer.on_gpu(t.device())
     } else {
         Ok(layer)
+    }
+}
+
+/// The convs before the blocks, of either kind.
+enum Subsampler {
+    Conv2d(Subsampling),
+    Conv1d(Conv1dSubsampling),
+    Lasr(LasrSubsampling),
+}
+
+impl Subsampler {
+    fn load(t: &Tensors, c: &Config) -> Result<Self, String> {
+        Ok(match c.subsampler {
+            SubsamplerKind::Conv2d => Self::Conv2d(Subsampling::load(t, c)?),
+            SubsamplerKind::Lasr {
+                kernel,
+                stride,
+                channels,
+            } => Self::Lasr(LasrSubsampling::load(t, c, (kernel, stride, channels))?),
+            SubsamplerKind::Conv1d { kernel } => {
+                Self::Conv1d(Conv1dSubsampling::load(t, c, kernel)?)
+            }
+        })
+    }
+
+    /// `features` is `frames x mels`; returns `(out_frames x hidden, out_frames)`.
+    fn forward(&self, features: &[f32], frames: usize, mels: usize) -> (Buf, usize) {
+        match self {
+            Self::Conv2d(sub) => sub.forward(features, frames, mels),
+            Self::Conv1d(sub) => sub.forward(features, frames, mels),
+            Self::Lasr(sub) => sub.forward(features, frames, mels),
+        }
+    }
+}
+
+/// LASR's subsampler (MedASR): `dense_0` from the mels to the model width,
+/// two unpadded 1-D convs over time (`conv_0`, `conv_1`), and `dense_1`
+/// back to the model width; ReLU after all but the last.
+struct LasrSubsampling {
+    kernel: usize,
+    stride: usize,
+    hidden: usize,
+    dense0: Dense,
+    convs: [Dense; 2],
+    dense1: Dense,
+}
+
+impl LasrSubsampling {
+    fn load(
+        t: &Tensors,
+        c: &Config,
+        (kernel, stride, channels): (usize, usize, usize),
+    ) -> Result<Self, String> {
+        let p = format!("{}encoder.subsampling", c.prefix);
+        let d = c.hidden;
+        let load = |name: &str, out: usize, inp: usize| {
+            Dense::load_cpu(t, &[(&format!("{p}.{name}"), out)], inp)
+        };
+        Ok(Self {
+            kernel,
+            stride,
+            hidden: d,
+            dense0: load("dense_0", d, c.mels)?,
+            convs: [
+                load("conv_0", d, d * kernel)?,
+                load("conv_1", channels, d * kernel)?,
+            ],
+            dense1: load("dense_1", d, channels)?,
+        })
+    }
+
+    fn forward(&self, features: &[f32], frames: usize, _mels: usize) -> (Buf, usize) {
+        let (k, s) = (self.kernel, self.stride);
+        let out = |n: usize| if n < k { 0 } else { (n - k) / s + 1 };
+        let (t1, t2) = (out(frames), out(out(frames)));
+        if t2 == 0 {
+            return (Buf::scratch(0), 0);
+        }
+        let x = self.dense0.forward_relu(features, frames);
+        let cols = conv_columns(&x, (frames, self.hidden), (k, s, 0), t1);
+        let x = self.convs[0].forward_relu(&cols, t1);
+        let cols = conv_columns(&x, (t1, self.hidden), (k, s, 0), t2);
+        let x = self.convs[1].forward_relu(&cols, t2);
+        (self.dense1.forward(&x, t2), t2)
+    }
+}
+
+/// Two 1-D convs over time, stride 2, centered padding, each with ReLU:
+/// 10 ms mel frames into 40 ms frames (GigaAM's `Conv1dSubsampling`).
+struct Conv1dSubsampling {
+    kernel: usize,
+    hidden: usize,
+    convs: [Dense; 2],
+}
+
+impl Conv1dSubsampling {
+    fn load(t: &Tensors, c: &Config, kernel: usize) -> Result<Self, String> {
+        let p = format!("{}encoder.subsampling.layers", c.prefix);
+        let d = c.hidden;
+        Ok(Self {
+            kernel,
+            hidden: d,
+            convs: [
+                Dense::load_cpu(t, &[(&format!("{p}.0"), d)], c.mels * kernel)?,
+                Dense::load_cpu(t, &[(&format!("{p}.2"), d)], d * kernel)?,
+            ],
+        })
+    }
+
+    fn forward(&self, features: &[f32], frames: usize, mels: usize) -> (Buf, usize) {
+        let (k, pad) = (self.kernel, self.kernel / 2);
+        let out = |n: usize| (n + 2 * pad - k) / 2 + 1;
+        let (t1, t2) = (out(frames), out(out(frames)));
+        let cols = conv_columns(features, (frames, mels), (k, 2, pad), t1);
+        let x = self.convs[0].forward_relu(&cols, t1);
+        let cols = conv_columns(&x, (t1, self.hidden), (k, 2, pad), t2);
+        (self.convs[1].forward_relu(&cols, t2), t2)
     }
 }
 
@@ -657,14 +886,11 @@ struct Block {
     norm_ff1: Norm,
     ff1: (Linear, Linear),
     norm_att: Norm,
-    /// q, k, and v stacked into one `3d x d` layer: one quantization, one product.
+    /// q, k, and v stacked into one `3d x d` layer: one quantization, one
+    /// product. With rotary positions, only q and k (`2d x d`).
     qkv: Linear,
     o: Linear,
-    rel_k: Linear,
-    /// `rel_k` applied to the position table, kept between takes.
-    rel_cache: RelCache,
-    bias_u: Vec<f32>,
-    bias_v: Vec<f32>,
+    positions: Positions,
     norm_conv: Norm,
     pw1: Linear,
     /// Depthwise conv weights as `[tap][channel]`, so a tap is one contiguous row.
@@ -708,24 +934,43 @@ impl Block {
             },
         };
         Ok(Self {
-            norm_ff1: Norm::load(t, &format!("{p}.norm_feed_forward1"), d)?,
+            norm_ff1: Norm::load(t, &format!("{p}.norm_feed_forward1"), d)?.with_eps(c.norm_eps),
             ff1: (
                 layer("feed_forward1.linear1", c.ff, d)?,
                 layer("feed_forward1.linear2", d, c.ff)?,
             ),
-            norm_att: Norm::load(t, &format!("{p}.norm_self_att"), d)?,
-            qkv: stacked(
-                t,
-                &["q_proj", "k_proj", "v_proj"].map(|n| format!("{p}.self_attn.{n}")),
-                (d, d),
-                g,
-            )?,
+            norm_att: Norm::load(t, &format!("{p}.norm_self_att"), d)?.with_eps(c.norm_eps),
+            qkv: match c.position {
+                Position::Relative | Position::Rotary { .. } => stacked(
+                    t,
+                    &["q_proj", "k_proj", "v_proj"].map(|n| format!("{p}.self_attn.{n}")),
+                    (d, d),
+                    g,
+                )?,
+                Position::RotaryInput { .. } => stacked(
+                    t,
+                    &["q_proj", "k_proj"].map(|n| format!("{p}.self_attn.{n}")),
+                    (d, d),
+                    g,
+                )?,
+            },
             o: layer("self_attn.o_proj", d, d)?,
-            rel_k: layer("self_attn.relative_k_proj", d, d)?,
-            rel_cache: RelCache::default(),
-            bias_u: t.f32_len(&format!("{p}.self_attn.bias_u"), d)?,
-            bias_v: t.f32_len(&format!("{p}.self_attn.bias_v"), d)?,
-            norm_conv: Norm::load(t, &format!("{p}.norm_conv"), d)?,
+            positions: match c.position {
+                Position::Relative => Positions::Relative {
+                    rel_k: layer("self_attn.relative_k_proj", d, d)?,
+                    rel_cache: RelCache::default(),
+                    bias_u: t.f32_len(&format!("{p}.self_attn.bias_u"), d)?,
+                    bias_v: t.f32_len(&format!("{p}.self_attn.bias_v"), d)?,
+                },
+                Position::RotaryInput { base } => Positions::RotaryInput {
+                    rotary: Rotary::halves(d / c.heads, base),
+                    v: layer("self_attn.v_proj", d, d)?,
+                },
+                Position::Rotary { base } => Positions::Rotary {
+                    rotary: Rotary::halves(d / c.heads, base),
+                },
+            },
+            norm_conv: Norm::load(t, &format!("{p}.norm_conv"), d)?.with_eps(c.norm_eps),
             pw1: layer("conv.pointwise_conv1", 2 * d, d)?,
             dw_by_tap: {
                 let kernel = c.conv_kernel;
@@ -736,12 +981,12 @@ impl Block {
             },
             conv_norm,
             pw2: layer("conv.pointwise_conv2", d, d)?,
-            norm_ff2: Norm::load(t, &format!("{p}.norm_feed_forward2"), d)?,
+            norm_ff2: Norm::load(t, &format!("{p}.norm_feed_forward2"), d)?.with_eps(c.norm_eps),
             ff2: (
                 layer("feed_forward2.linear1", c.ff, d)?,
                 layer("feed_forward2.linear2", d, c.ff)?,
             ),
-            norm_out: Norm::load(t, &format!("{p}.norm_out"), d)?,
+            norm_out: Norm::load(t, &format!("{p}.norm_out"), d)?.with_eps(c.norm_eps),
         })
     }
 
@@ -752,14 +997,19 @@ impl Block {
     }
 
     fn forward(&self, x: &mut Buf, frames: usize, c: &Config) {
+        let (ff_w0, ff_w1) = c.ff_residual;
+        let (conv_w0, conv_w1) = c.conv_residual;
         let ff = Self::feed_forward(&self.ff1, &self.norm_ff1.apply(x, c.hidden), frames);
-        let normed = self.norm_att.residual(x, &ff, 0.5);
+        scale(x, ff_w0);
+        let normed = self.norm_att.residual(x, &ff, ff_w1);
         let att = self.attention(&normed, frames, c);
         let normed = self.norm_conv.residual(x, &att, 1.0);
         let conv = self.convolution(&normed, frames, c);
-        let normed = self.norm_ff2.residual(x, &conv, 1.0);
+        scale(x, conv_w0);
+        let normed = self.norm_ff2.residual(x, &conv, conv_w1);
         let ff = Self::feed_forward(&self.ff2, &normed, frames);
-        *x = self.norm_out.residual(x, &ff, 0.5);
+        scale(x, ff_w0);
+        *x = self.norm_out.residual(x, &ff, ff_w1);
     }
 
     /// Multi-head attention with Transformer-XL relative positions: one task
@@ -767,6 +1017,18 @@ impl Block {
     /// `fgemm::matmul_into`, so every value is the one a whole-head product
     /// gives; a change in a sum's order changes the text of some clips.
     fn attention(&self, x: &[f32], t: usize, c: &Config) -> Buf {
+        let (rel_k, rel_cache, all_bias_u, all_bias_v) = match &self.positions {
+            Positions::Relative {
+                rel_k,
+                rel_cache,
+                bias_u,
+                bias_v,
+            } => (rel_k, rel_cache, bias_u, bias_v),
+            Positions::RotaryInput { rotary, v } => {
+                return self.rotary_input_attention(x, t, c, rotary, v)
+            }
+            Positions::Rotary { rotary } => return self.rotary_attention(x, t, c, rotary),
+        };
         let (d, heads) = (c.hidden, c.heads);
         let hd = d / heads;
         let qkv = self.qkv.forward(x, t);
@@ -783,11 +1045,9 @@ impl Block {
                 }
             }
         });
-        let positions = self
-            .rel_cache
-            .rows(t, (d, heads), Store::owned, |table, rows| {
-                self.rel_k.forward(table, rows)
-            });
+        let positions = rel_cache.rows(t, (d, heads), Store::owned, |table, rows| {
+            rel_k.forward(table, rows)
+        });
         let scale = 1.0 / (hd as f32).sqrt();
         let chunk = ATTENTION_ROWS.min(t);
         let chunks = t.div_ceil(chunk);
@@ -804,7 +1064,7 @@ impl Block {
             let width = t + m - 1;
             let first = positions.first(t) + t - rows.end;
             let band = &positions.head(h, hd)[first * hd..][..width * hd];
-            let (bias_u, bias_v) = (&self.bias_u[h * hd..][..hd], &self.bias_v[h * hd..][..hd]);
+            let (bias_u, bias_v) = (&all_bias_u[h * hd..][..hd], &all_bias_v[h * hd..][..hd]);
             SCRATCH.with(|scratch| {
                 let mut scratch = scratch.borrow_mut();
                 let need = m * (3 * hd + t + width);
@@ -860,6 +1120,54 @@ impl Block {
             });
         });
         self.o.forward(&context, t)
+    }
+
+    /// Softmax attention with rotary positions (GigaAM): the input, rotated
+    /// per head, gives the queries and keys; the input as it is, the values.
+    fn rotary_input_attention(
+        &self,
+        x: &[f32],
+        t: usize,
+        c: &Config,
+        rotary: &Rotary,
+        v: &Linear,
+    ) -> Buf {
+        let (d, heads) = (c.hidden, c.heads);
+        let mut rotated = Buf::scratch(t * d);
+        rotated.copy_from_slice(x);
+        team::chunks_mut(&mut rotated, d, |i, row| {
+            rotary.apply(row, (1, d), (heads, d / heads), i)
+        });
+        let qk = self.qkv.forward(&rotated, t);
+        let values = v.forward(x, t);
+        let out = crate::models::layers::attention(
+            (&qk, 2 * d),
+            (&qk[d..], 2 * d),
+            (&values, d),
+            (t, t),
+            (d, heads, heads),
+            false,
+        );
+        self.o.forward(&out, t)
+    }
+
+    /// Softmax attention with rotary positions on the projected queries and
+    /// keys (LASR).
+    fn rotary_attention(&self, x: &[f32], t: usize, c: &Config, rotary: &Rotary) -> Buf {
+        let (d, heads) = (c.hidden, c.heads);
+        let mut qkv = self.qkv.forward(x, t);
+        team::chunks_mut(&mut qkv, 3 * d, |i, row| {
+            rotary.apply(&mut row[..2 * d], (1, 2 * d), (2 * heads, d / heads), i)
+        });
+        let out = crate::models::layers::attention(
+            (&qkv, 3 * d),
+            (&qkv[d..], 3 * d),
+            (&qkv[2 * d..], 3 * d),
+            (t, t),
+            (d, heads, heads),
+            false,
+        );
+        self.o.forward(&out, t)
     }
 
     /// Pointwise conv with GLU, depthwise conv over time, batch norm, SiLU, pointwise conv.
@@ -919,6 +1227,28 @@ multiversion! {
                 }
             }
         }
+    }
+}
+
+/// What attention adds for positions.
+enum Positions {
+    Relative {
+        rel_k: Linear,
+        /// `rel_k` applied to the position table, kept between takes.
+        rel_cache: RelCache,
+        bias_u: Vec<f32>,
+        bias_v: Vec<f32>,
+    },
+    /// The values' projection is apart: it reads the input unrotated.
+    RotaryInput { rotary: Rotary, v: Linear },
+    /// q, k, and v stacked; q and k rotated after the projection.
+    Rotary { rotary: Rotary },
+}
+
+/// `x *= w`; nothing for 1, so a Conformer's sums keep their order.
+fn scale(x: &mut [f32], w: f32) {
+    if w != 1.0 {
+        team::chunks_mut(x, 4096, |_, values| values.iter_mut().for_each(|v| *v *= w));
     }
 }
 
@@ -1111,13 +1441,15 @@ fn relative_positions(t: usize, d: usize) -> Vec<f32> {
 
 pub struct Parakeet {
     pub config: Config,
-    subsampling: Subsampling,
+    subsampling: Subsampler,
     blocks: Vec<Block>,
     head: Head,
     /// The speech head some checkpoints carry (Redux: `vad_head.*`).
     vad: Option<VadHead>,
     speaker_kernel: Option<SpeakerKernel>,
     prompt: Option<Prompt>,
+    /// LASR's norm after the last block.
+    out_norm: Option<Norm>,
     /// The conformer, when this model was loaded on the GPU.
     #[cfg(feature = "gpu")]
     gpu_encoder: Option<crate::gpu::encoder::Encoder>,
@@ -1238,12 +1570,19 @@ impl Parakeet {
             None
         };
         Ok(Self {
-            subsampling: Subsampling::load(t, c)?,
+            subsampling: Subsampler::load(t, c)?,
             blocks,
             head,
             vad: VadHead::load(t, c)?,
             speaker_kernel: SpeakerKernel::load(t, c)?,
             prompt: Prompt::load(t, c)?,
+            out_norm: match c.out_norm {
+                true => Some(
+                    Norm::load(t, &format!("{}encoder.out_norm", c.prefix), c.hidden)?
+                        .with_eps(c.norm_eps),
+                ),
+                false => None,
+            },
             config,
             #[cfg(feature = "gpu")]
             gpu_encoder,
@@ -1328,9 +1667,24 @@ fn gpu_encoder(
                 gpu_mat(&block.ff2.0)?,
                 gpu_mat(&block.ff2.1)?,
             ],
-            rel_k: gpu_mat(&block.rel_k)?,
-            bias_u: block.bias_u.clone(),
-            bias_v: block.bias_v.clone(),
+            rel_k: match &block.positions {
+                Positions::Relative { rel_k, .. } => gpu_mat(rel_k)?,
+                Positions::RotaryInput { .. } | Positions::Rotary { .. } => {
+                    return Err("rotary attention runs on the CPU".into())
+                }
+            },
+            bias_u: match &block.positions {
+                Positions::Relative { bias_u, .. } => bias_u.clone(),
+                Positions::RotaryInput { .. } | Positions::Rotary { .. } => {
+                    return Err("rotary attention runs on the CPU".into())
+                }
+            },
+            bias_v: match &block.positions {
+                Positions::Relative { bias_v, .. } => bias_v.clone(),
+                Positions::RotaryInput { .. } | Positions::Rotary { .. } => {
+                    return Err("rotary attention runs on the CPU".into())
+                }
+            },
             dw: block.dw_by_tap.clone(),
             bn_scale: match &block.conv_norm {
                 ConvNorm::Batch { scale, .. } => scale.clone(),
@@ -1403,6 +1757,9 @@ impl Parakeet {
         for block in &self.blocks {
             block.forward(&mut x, t, c);
         }
+        if let Some(norm) = &self.out_norm {
+            x = norm.apply(&x, c.hidden);
+        }
         (x, t)
     }
 
@@ -1423,11 +1780,14 @@ impl Parakeet {
         let _host = HostProducts::new();
         let shape = (self.config.hidden, self.config.heads);
         for block in &self.blocks {
-            block
-                .rel_cache
-                .rows(POSITION_REACH + 1, shape, Store::weights, |table, rows| {
-                    block.rel_k.forward(table, rows)
+            if let Positions::Relative {
+                rel_k, rel_cache, ..
+            } = &block.positions
+            {
+                rel_cache.rows(POSITION_REACH + 1, shape, Store::weights, |table, rows| {
+                    rel_k.forward(table, rows)
                 });
+            }
         }
     }
 

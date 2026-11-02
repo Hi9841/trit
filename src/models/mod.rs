@@ -11,7 +11,7 @@ pub mod layers;
 pub mod nemo;
 pub mod parts;
 
-use families::{canary, moonshine, parakeet, qwen3_asr, wav2vec2, whisper};
+use families::{canary, moonshine, parakeet, qwen3_asr, sensevoice, wav2vec2, whisper};
 
 use crate::{BiasWeights, Device, Options, Precision, Segment, Spread};
 use std::path::Path;
@@ -93,7 +93,7 @@ pub struct Row {
 }
 
 /// Every family, by `model_type`. Tall products (Whisper) use every core.
-pub const FAMILIES: [Row; 8] = [
+pub const FAMILIES: [Row; 12] = [
     Row {
         model_type: "parakeet_tdt",
         spread: Spread::OneCache,
@@ -106,6 +106,21 @@ pub const FAMILIES: [Row; 8] = [
     },
     Row {
         model_type: "parakeet_ctc",
+        spread: Spread::OneCache,
+        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
+    },
+    Row {
+        model_type: "gigaam_rnnt",
+        spread: Spread::OneCache,
+        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
+    },
+    Row {
+        model_type: "gigaam_ctc",
+        spread: Spread::OneCache,
+        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
+    },
+    Row {
+        model_type: "medasr",
         spread: Spread::OneCache,
         load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
     },
@@ -133,6 +148,11 @@ pub const FAMILIES: [Row; 8] = [
         model_type: "qwen3_asr",
         spread: Spread::OneCache,
         load: |files, c, p, d| Ok(Box::new(qwen3_asr::Qwen3Asr::load(files, c, p, d)?)),
+    },
+    Row {
+        model_type: "sensevoice",
+        spread: Spread::OneCache,
+        load: |files, c, p, d| Ok(Box::new(sensevoice::SenseVoice::load(files, c, p, d)?)),
     },
 ];
 
@@ -298,6 +318,22 @@ impl Family for wav2vec2::Wav2Vec2 {
         windowed(self.pieces(samples))
     }
     /// Characters with no decoder to steer: no term can be favored.
+    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
+        terms.to_vec()
+    }
+}
+
+impl Family for sensevoice::SenseVoice {
+    fn kind(&self) -> &'static str {
+        "sensevoice"
+    }
+    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
+        joined(self.pieces(samples, options))
+    }
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        windowed(self.pieces(samples, options))
+    }
+    /// A CTC head with no decoder to steer: no term can be favored.
     fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
         terms.to_vec()
     }

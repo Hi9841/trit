@@ -1,10 +1,13 @@
 //! Parakeet: FastConformer encoder with a TDT, RNNT, or CTC decoder (NVIDIA
-//! Parakeet, Moondream Parakeet Redux). The network follows the Apache-2.0 Hugging
-//! Face Parakeet implementation; the files are read as published.
+//! Parakeet, Moondream Parakeet Redux, and GigaAM v3, a Conformer of the
+//! same plan). The network follows the Apache-2.0 Hugging Face Parakeet
+//! implementation; the files are read as published.
 
 use crate::models::parts::{dictionary, fastconformer as model, logit_bias as bias};
 
 use crate::audio::mel::MelFrontend;
+use crate::audio::table_mel::{TableMel, TableShape};
+use crate::cpu::tensors::Tensors;
 use crate::models::config::Json;
 use crate::models::files::Files;
 use crate::text::sentencepiece::Tokenizer;
@@ -18,7 +21,7 @@ pub struct Parakeet {
     /// One lock for both, so a call never pairs one dictionary with the
     /// ban of another.
     terms: RwLock<Terms>,
-    frontend: MelFrontend,
+    frontend: Frontend,
     tokenizer: Tokenizer,
     /// Tokens of other languages; blocked when the caller asks for English.
     non_english: Vec<usize>,
@@ -32,10 +35,59 @@ struct Terms {
     blocked: Vec<usize>,
 }
 
+/// The log-mel features the encoder reads.
+enum Frontend {
+    /// NeMo's: Slaney filters, pre-emphasis, centered frames.
+    Nemo(MelFrontend),
+    /// The model file's own filterbank and window (GigaAM).
+    Table(TableMel),
+}
+
+impl Frontend {
+    fn load(json: &Json, t: &Tensors, config: &model::Config) -> Result<Self, String> {
+        match json.str("feature_extractor.type") {
+            None => Ok(Self::Nemo(
+                MelFrontend::new(config.mels).normalized(config.normalize_features),
+            )),
+            Some("table") => {
+                let num = |key: &str| json.num(&format!("feature_extractor.{key}"));
+                let float = |key: &str, default: f64| {
+                    json.float(&format!("feature_extractor.{key}"))
+                        .unwrap_or(default) as f32
+                };
+                let shape = TableShape {
+                    n_fft: num("n_fft")?,
+                    hop: num("hop_length")?,
+                    win: num("win_length")?,
+                    floor: float("log_floor", 1e-9),
+                    ceiling: float("log_ceiling", f32::MAX as f64),
+                };
+                let bins = shape.n_fft / 2 + 1;
+                let mut filters = t.f32_len("frontend.mel_filterbank", config.mels * bins)?;
+                // Stored `bins x mels` (MedASR): as `mels x bins`.
+                if json.str("feature_extractor.filterbank_layout") == Some("bins_mels") {
+                    filters = (0..config.mels * bins)
+                        .map(|i| filters[(i % bins) * config.mels + i / bins])
+                        .collect();
+                }
+                let window = t.f32_len("frontend.window", shape.win)?;
+                TableMel::new(shape, filters, &window).map(Self::Table)
+            }
+            Some(other) => Err(format!("config.json: front end `{other}` is not run")),
+        }
+    }
+
+    /// `frames x mels`.
+    fn compute(&self, samples: &[f32]) -> (Vec<f32>, usize) {
+        match self {
+            Self::Nemo(mel) => mel.compute(samples),
+            Self::Table(mel) => mel.compute(samples),
+        }
+    }
+}
+
 /// One minute: 750 encoder frames, a few MB of attention per head.
 const WINDOW_SAMPLES: usize = 60 * 16_000;
-/// Seconds per encoder frame: 10 ms mel frames, subsampled 8 times.
-const FRAME_SECONDS: f32 = 0.08;
 /// A pause this long ends a segment.
 const PAUSE_SECONDS: f32 = 1.0;
 
@@ -46,9 +98,10 @@ impl Parakeet {
         precision: Precision,
         device: Device,
     ) -> Result<Self, String> {
+        let json = config;
         let tensors = files.tensors(precision, device)?;
-        let config = model::Config::parse(config)?;
-        let frontend = MelFrontend::new(config.mels).normalized(config.normalize_features);
+        let config = model::Config::parse(json)?;
+        let frontend = Frontend::load(json, &tensors, &config)?;
         let model = model::Parakeet::load(&tensors, config)?;
         // The weight file is no longer needed; free it before the position
         // tables grow, so load does not hold both at its peak.
@@ -83,11 +136,7 @@ impl Parakeet {
 
     /// `parakeet_tdt`, `parakeet_rnnt`, or `parakeet_ctc`.
     pub fn kind(&self) -> &'static str {
-        match self.model.config.head {
-            model::HeadKind::Ctc => "parakeet_ctc",
-            model::HeadKind::Rnnt => "parakeet_rnnt",
-            _ => "parakeet_tdt",
-        }
+        self.model.config.kind
     }
 
     pub fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
@@ -139,14 +188,15 @@ impl Parakeet {
         for window in crate::audio::windows(samples, WINDOW_SAMPLES) {
             let offset = crate::audio::offset(samples, window) as f32 / crate::SAMPLE_RATE as f32;
             let (tokens, frames) = self.decode_window(window, options);
-            let time = |frame: usize| offset + frame as f32 * FRAME_SECONDS;
+            let frame_seconds = self.model.config.frame_seconds();
+            let time = |frame: usize| offset + frame as f32 * frame_seconds;
             let mut start = 0;
             for i in 0..tokens.len() {
                 let text = self.tokenizer.decode(&tokens[i..=i]);
                 let sentence_end = text.trim_end().ends_with(['.', '?', '!']);
                 let pause = frames
                     .get(i + 1)
-                    .is_some_and(|next| (next - frames[i]) as f32 * FRAME_SECONDS >= PAUSE_SECONDS);
+                    .is_some_and(|next| (next - frames[i]) as f32 * frame_seconds >= PAUSE_SECONDS);
                 if sentence_end || pause || i + 1 == tokens.len() {
                     let text = self.tokenizer.decode(&tokens[start..=i]).trim().to_string();
                     if !text.is_empty() {

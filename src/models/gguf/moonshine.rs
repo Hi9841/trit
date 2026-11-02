@@ -34,6 +34,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         "partial_rotary_factor": g.get("stt.moonshine.partial_rotary_factor").as_f64().unwrap_or(1.0),
         "rope_theta": g.get("stt.moonshine.rope_theta").as_f64().unwrap_or(10_000.0),
         "encoder_hidden_act": g.get("stt.moonshine.encoder.activation").as_str().unwrap_or("gelu"),
+        "languages": g.get("general.languages"),
     }))
 }
 
