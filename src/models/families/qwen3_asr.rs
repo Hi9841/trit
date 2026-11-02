@@ -31,7 +31,7 @@ const TEXT: &str = "thinker_config.text_config.";
 
 /// ISO 639-1 (and 639-2 for Cantonese and Filipino) codes of the languages
 /// Qwen3-ASR names in its prompt.
-const LANGUAGE_NAMES: [(&str, &str); 31] = [
+pub(crate) const LANGUAGE_NAMES: [(&str, &str); 31] = [
     ("zh", "Chinese"),
     ("en", "English"),
     ("yue", "Cantonese"),

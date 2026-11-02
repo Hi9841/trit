@@ -133,6 +133,11 @@ impl Tokenizer {
         let mut bytes = Vec::new();
         for &id in ids {
             if self.special.get(id).copied().unwrap_or(true) {
+                // A tag inside the text (Nemotron 3.5's `<en-US>`) comes
+                // after a lone `▁`; the next word brings its own space.
+                if bytes.last() == Some(&b' ') {
+                    bytes.pop();
+                }
                 continue;
             }
             let piece = &self.pieces[id];

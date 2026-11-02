@@ -6,7 +6,7 @@
 //! runs as Q8_0). The family loaders then run as for a Hugging Face folder.
 //!
 //! Read: `parakeet` (TDT, RNNT, CTC; full or local attention), `whisper`,
-//! `moonshine`, and `canary`.
+//! `moonshine`, `canary`, and `qwen3_asr`.
 
 use crate::cpu::tensors::Tensors;
 use crate::{Device, Precision};
@@ -14,6 +14,7 @@ use crate::{Device, Precision};
 mod canary;
 mod moonshine;
 mod parakeet;
+mod qwen3_asr;
 mod whisper;
 
 /// The architectures Trit reads, by `general.architecture`.
@@ -23,6 +24,7 @@ enum Arch {
     Whisper,
     Moonshine,
     Canary,
+    Qwen3Asr,
 }
 
 /// What a tensor of the file becomes.
@@ -145,8 +147,9 @@ impl Gguf {
             Some("whisper") => Ok(Arch::Whisper),
             Some("moonshine") => Ok(Arch::Moonshine),
             Some("canary") => Ok(Arch::Canary),
+            Some("qwen3_asr") => Ok(Arch::Qwen3Asr),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, and canary",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, and qwen3_asr",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -177,10 +180,13 @@ impl Gguf {
         let mut renamed = Vec::with_capacity(self.tensors.len());
         for (name, dtype, start, end) in &self.tensors {
             let to = match arch {
+                // A multitalker bundle's Sortformer diarizer: Trit runs one speaker.
+                Arch::Parakeet if name.starts_with("sortformer.") => Some(Name::Skip),
                 Arch::Parakeet => parakeet::hf_name(name).map(Name::To),
                 Arch::Whisper => whisper::hf_name(name),
                 Arch::Moonshine => moonshine::hf_name(name),
                 Arch::Canary => canary::hf_name(name),
+                Arch::Qwen3Asr => qwen3_asr::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -220,6 +226,9 @@ impl Gguf {
             (Arch::Canary, "config.json") => {
                 canary::config(self).map(|v| v.to_string()).map_err(fail)
             }
+            (Arch::Qwen3Asr, "config.json") => {
+                qwen3_asr::config(self).map(|v| v.to_string()).map_err(fail)
+            }
             (Arch::Whisper, "generation_config.json") => whisper::generation(self)
                 .map(|v| v.to_string())
                 .map_err(fail),
@@ -232,7 +241,10 @@ impl Gguf {
     /// `merges` gives them in rank order; one without (Parakeet's
     /// SentencePiece models) gives scores, and the merges come from them.
     /// Every token is in the vocabulary; unknown, control, and user-defined
-    /// tokens are also added tokens (special for the first two).
+    /// tokens are also added tokens (special for the first two), as is every
+    /// token after the first control token: the base vocabulary comes first,
+    /// and a file marks an added token that is not special (Qwen's
+    /// `<asr_text>`) as normal.
     fn tokenizer_json(&self) -> Result<String, String> {
         if self.get("tokenizer.ggml.merges").is_null() {
             return self.sentencepiece_json();
@@ -248,13 +260,16 @@ impl Gguf {
                 .and_then(Value::as_u64)
                 .unwrap_or(1)
         };
+        let first_control = (0..tokens.len()).find(|&id| kind(id) == 3);
         let mut vocab = Map::new();
         let mut added = Vec::new();
         for (id, token) in tokens.iter().enumerate() {
             let text = token.as_str().unwrap_or_default();
             vocab.insert(text.to_string(), json!(id));
-            if matches!(kind(id), 2..=4) {
-                added.push(json!({ "id": id, "content": text, "special": kind(id) != 4 }));
+            if matches!(kind(id), 2..=4) || first_control.is_some_and(|first| id >= first) {
+                added.push(
+                    json!({ "id": id, "content": text, "special": matches!(kind(id), 2 | 3) }),
+                );
             }
         }
         let mut json = json!({

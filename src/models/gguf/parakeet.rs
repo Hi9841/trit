@@ -29,12 +29,8 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     // the whole clip; its chunk menu is for streaming.
     let style = match style {
         "" | "regular" | "chunked_limited_with_rc" => "regular",
-        // Cache-aware streaming: also causal subsampling and conv; not read yet.
-        "chunked_limited" => {
-            return Err(unsupported(
-                "it is a cache-aware streaming model; Trit does not run those yet",
-            ))
-        }
+        // Cache-aware streaming (Nemotron): run offline with its chunk mask.
+        "chunked_limited" => "chunked_limited",
         other => {
             return Err(unsupported(&format!(
                 "attention style `{other}` is not run"
@@ -52,15 +48,19 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         conv("conv_context_left", (kernel - 1) / 2),
         conv("conv_context_right", (kernel - 1) / 2),
     ];
-    if !matches!(
-        text("stt.parakeet.encoder.conv_norm_type"),
-        "" | "batch_norm"
-    ) || g
-        .tensors
-        .iter()
-        .any(|(name, ..)| name.starts_with("prompt."))
+    let conv_norm = match text("stt.parakeet.encoder.conv_norm_type") {
+        "" | "batch_norm" => "batch_norm",
+        "layer_norm" => "layer_norm",
+        other => return Err(unsupported(&format!("conv norm `{other}` is not run"))),
+    };
+    let speaker_kernel = g.get("stt.parakeet.encoder.spk_kernel_layers").clone();
+    if !speaker_kernel.is_null()
+        && (text("stt.parakeet.encoder.spk_kernel_type") != "ff"
+            || g.get("stt.parakeet.encoder.add_bg_spk_kernel").as_bool() != Some(true))
     {
-        return Err(unsupported("its encoder layers differ from Parakeet's"));
+        return Err(unsupported(
+            "its speaker kernel differs from NeMo's FF kernel",
+        ));
     }
     let mels = g.num("stt.frontend.num_mels")?;
     if text("stt.frontend.type") != "mel"
@@ -69,7 +69,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         || g.num("stt.frontend.win_length")? != 400
         || g.num("stt.frontend.hop_length")? != 160
         || text("stt.frontend.window") != "hann"
-        || text("stt.frontend.normalize") != "per_feature"
+        || !matches!(text("stt.frontend.normalize"), "per_feature" | "none")
         || (float("stt.frontend.pre_emphasis") - 0.97).abs() > 1e-6
     {
         return Err(unsupported("its audio features differ from Parakeet's"));
@@ -92,8 +92,32 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "attention_context": [side("att_context_left"), side("att_context_right")],
             "attention_style": style,
             "conv_context": conv_context,
+            // transcribe.cpp's rule: a chunked_limited model subsamples causally.
+            "causal_downsampling": style == "chunked_limited",
+            "conv_norm_type": conv_norm,
+            "speaker_kernel_layers": speaker_kernel,
         },
+        "feature_normalize": text("stt.frontend.normalize"),
     });
+    if !g.get("stt.parakeet.prompt.num_prompts").is_null() {
+        if text("stt.parakeet.prompt.activation") != "relu" {
+            return Err(unsupported("its prompt MLP is not ReLU"));
+        }
+        let locales = g.get("stt.parakeet.prompt.dictionary.locales").as_array();
+        let indices = g.get("stt.parakeet.prompt.dictionary.indices").as_array();
+        let dictionary: serde_json::Map<String, Value> = locales
+            .into_iter()
+            .flatten()
+            .zip(indices.into_iter().flatten())
+            .filter_map(|(code, index)| Some((code.as_str()?.to_string(), index.clone())))
+            .collect();
+        config["prompt"] = json!({
+            "num_prompts": g.num("stt.parakeet.prompt.num_prompts")?,
+            "hidden": g.num("stt.parakeet.prompt.hidden")?,
+            "auto_id": g.num("stt.parakeet.prompt.auto_id")?,
+            "dictionary": dictionary,
+        });
+    }
     if model_type == "parakeet_ctc" {
         // The CTC head writes one logit per token and one for the blank,
         // the last id, which Trit calls the pad token.
@@ -171,6 +195,9 @@ pub fn hf_name(name: &str) -> Option<String> {
         ("joint.out.", "joint.head."),
         ("head.ctc.", "ctc_head."),
         ("vad.", "vad_head."),
+        ("enc.spk_kernel.", "encoder.spk_kernel."),
+        ("enc.bg_spk_kernel.", "encoder.bg_spk_kernel."),
+        ("prompt.mlp.", "prompt_kernel."),
     ] {
         if let Some(rest) = name.strip_prefix(from) {
             return Some(format!("{to}{rest}"));

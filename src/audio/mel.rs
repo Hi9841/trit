@@ -21,6 +21,8 @@ pub struct MelFrontend {
     /// Hann window of WIN_LENGTH, centered inside N_FFT.
     window: Vec<f64>,
     fft: Fft,
+    /// Per-bin normalization over the take; off for a model fed raw log-mel.
+    normalize: bool,
 }
 
 impl MelFrontend {
@@ -35,7 +37,13 @@ impl MelFrontend {
             filters: spans(&slaney_filters(mels, N_FFT)),
             window,
             fft: Fft::new(N_FFT),
+            normalize: true,
         }
+    }
+
+    /// With (the default) or without the per-bin normalization.
+    pub fn normalized(self, normalize: bool) -> Self {
+        Self { normalize, ..self }
     }
 
     /// `frames x mels`, frames = samples / 160. Empty for less than one hop.
@@ -78,7 +86,9 @@ impl MelFrontend {
                 }
             }
         });
-        normalize(&mut out, frames, mels);
+        if self.normalize {
+            normalize(&mut out, frames, mels);
+        }
         (out, frames)
     }
 }

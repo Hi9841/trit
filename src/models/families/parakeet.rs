@@ -48,7 +48,7 @@ impl Parakeet {
     ) -> Result<Self, String> {
         let tensors = files.tensors(precision, device)?;
         let config = model::Config::parse(config)?;
-        let frontend = MelFrontend::new(config.mels);
+        let frontend = MelFrontend::new(config.mels).normalized(config.normalize_features);
         let model = model::Parakeet::load(&tensors, config)?;
         // The weight file is no longer needed; free it before the position
         // tables grow, so load does not hold both at its peak.
@@ -174,6 +174,7 @@ impl Parakeet {
         let Some((encoded, t)) = self.model.encode_speech(&features, frames) else {
             return (Vec::new(), Vec::new());
         };
+        let encoded = self.model.prompted(encoded, t, options.language.as_deref());
         // Parakeet cannot be told a language; it can only be kept to English.
         let english = options
             .language

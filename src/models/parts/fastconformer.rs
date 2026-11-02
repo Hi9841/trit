@@ -56,6 +56,75 @@ pub struct Config {
     /// Frames before and after a frame that the depthwise conv reads:
     /// `(kernel - 1) / 2` each, or `(kernel - 1, 0)` for a causal conv.
     pub conv_context: (usize, usize),
+    /// NeMo's `causal_downsampling`: the subsampling convs pad two rows and
+    /// columns before and one after, so 128 mels become 17 bins, not 16.
+    pub causal_subsampling: bool,
+    /// The conv module's norm: NeMo's `conv_norm_type`.
+    pub conv_norm: ConvNormKind,
+    /// A speaker kernel before layer 0 (NeMo's multitalker models), run
+    /// for one speaker: the whole input is the target speaker's.
+    pub speaker_kernel: bool,
+    /// The language prompt of a prompt-conditioned model (Nemotron 3.5).
+    pub prompt: Option<PromptConfig>,
+    /// Per-bin normalization of the log-mel features over the take
+    /// (`per_feature`), or none (the raw log-mel of a streaming model).
+    pub normalize_features: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvNormKind {
+    Batch,
+    Layer,
+}
+
+/// NeMo's `EncDecRNNTBPEModelWithPrompt`: a one-hot of the language joins
+/// every encoder frame, and an MLP maps the pair back to the model width.
+#[derive(Debug, Clone)]
+pub struct PromptConfig {
+    pub count: usize,
+    pub hidden: usize,
+    /// Language codes (and aliases: `en`, `en-US`) and their prompt.
+    pub dictionary: Vec<(String, usize)>,
+    /// The prompt that lets the model find the language itself.
+    pub auto: usize,
+}
+
+impl PromptConfig {
+    fn parse(json: &Json) -> Result<Option<Self>, String> {
+        let Some(dictionary) = json.get("prompt.dictionary").as_object() else {
+            return Ok(None);
+        };
+        let dictionary = dictionary
+            .iter()
+            .map(|(code, index)| {
+                index
+                    .as_u64()
+                    .map(|index| (code.clone(), index as usize))
+                    .ok_or("config.json: a prompt index is not a number")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let config = Self {
+            count: json.num("prompt.num_prompts")?,
+            hidden: json.num("prompt.hidden")?,
+            auto: json.num("prompt.auto_id")?,
+            dictionary,
+        };
+        if config.auto >= config.count || config.dictionary.iter().any(|(_, i)| *i >= config.count)
+        {
+            return Err("config.json: a prompt index past num_prompts".into());
+        }
+        Ok(Some(config))
+    }
+
+    /// The prompt of language `code` (`en`, `en-US`), else the automatic one.
+    fn index(&self, code: Option<&str>) -> usize {
+        code.and_then(|code| {
+            self.dictionary
+                .iter()
+                .find(|(known, _)| known.eq_ignore_ascii_case(code.trim()))
+        })
+        .map_or(self.auto, |(_, index)| *index)
+    }
 }
 
 /// The keys of self-attention, as NeMo's `att_context_size` and
@@ -192,6 +261,29 @@ impl Config {
                 ""
             },
             attention: Attention::parse(json)?,
+            causal_subsampling: json.flag("encoder_config.causal_downsampling") == Some(true),
+            conv_norm: match json.str("encoder_config.conv_norm_type") {
+                None | Some("batch_norm") => ConvNormKind::Batch,
+                Some("layer_norm") => ConvNormKind::Layer,
+                Some(other) => return Err(format!("config.json: conv norm `{other}` is not run")),
+            },
+            speaker_kernel: match json.get("encoder_config.speaker_kernel_layers").as_array() {
+                None => false,
+                Some(layers) if layers.iter().map(|v| v.as_u64()).eq([Some(0)]) => true,
+                Some(_) => {
+                    return Err("config.json: a speaker kernel after layer 0 is not run".into())
+                }
+            },
+            prompt: PromptConfig::parse(json)?,
+            normalize_features: match json.str("feature_normalize") {
+                None | Some("per_feature") => true,
+                Some("none") => false,
+                Some(other) => {
+                    return Err(format!(
+                        "config.json: feature normalization `{other}` is not run"
+                    ))
+                }
+            },
             conv_context: match json.get("encoder_config.conv_context").as_array() {
                 Some(sides) => (
                     sides.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize,
@@ -213,6 +305,16 @@ impl Config {
             return Err("config.json has inconsistent sizes".into());
         }
         Ok(config)
+    }
+
+    /// Whether the GPU encoder runs this shape: full attention, a centered
+    /// conv with batch norm, and no speaker kernel.
+    #[cfg(feature = "gpu")]
+    fn gpu_shape(&self) -> bool {
+        self.attention == Attention::Full
+            && self.conv_context.0 == self.conv_context.1
+            && self.conv_norm == ConvNormKind::Batch
+            && !self.speaker_kernel
     }
 }
 
@@ -292,6 +394,9 @@ fn dense_in(t: &Tensors, name: &str, out: usize, inp: usize, gpu: bool) -> Resul
 /// Stride-2 convolution stack that turns 10 ms mel frames into 80 ms frames.
 struct Subsampling {
     channels: usize,
+    /// Rows and columns of zeros before the input of each conv: 1, or 2
+    /// for a causal model. One after, either way.
+    pad: usize,
     /// First conv as `[tap][channel]` weights and bias.
     conv0: (Vec<f32>, Vec<f32>),
     dw1: (Vec<f32>, Vec<f32>),
@@ -316,8 +421,11 @@ impl Subsampling {
                 )?,
             ))
         };
+        let pad = if c.causal_subsampling { 2 } else { 1 };
+        let bins = out_len(out_len(out_len(c.mels, pad), pad), pad);
         Ok(Self {
             channels: ch,
+            pad,
             conv0: {
                 let (weight, bias) = conv(0)?;
                 (
@@ -343,7 +451,7 @@ impl Subsampling {
                 t,
                 &format!("{}encoder.subsampling.linear", c.prefix),
                 c.hidden,
-                ch * (c.mels / 8),
+                ch * bins,
             )?,
         })
     }
@@ -353,7 +461,7 @@ impl Subsampling {
         let ch = self.channels;
         let (x, h2, w2) = self.first_two_convs(features, frames, mels);
         let x = self.pw1.forward_relu(&x, h2 * w2);
-        let (x, h3, w3) = depthwise(&x, h2, w2, ch, &self.dw2);
+        let (x, h3, w3) = depthwise(&x, (h2, w2, ch), self.pad, &self.dw2);
         let x = self.pw2.forward_relu(&x, h3 * w3);
         // Flatten per frame as channel-major: index = c * w3 + w.
         let mut flat = Buf::scratch(h3 * ch * w3);
@@ -373,9 +481,9 @@ impl Subsampling {
     /// output rows. The full conv0 output is 73 MB for a 22 s take; a strip
     /// only computes the conv0 rows it needs, so that buffer never exists.
     fn first_two_convs(&self, features: &[f32], frames: usize, mels: usize) -> (Buf, usize, usize) {
-        let ch = self.channels;
-        let (h1, w1) = (half(frames), half(mels));
-        let (h2, w2) = (half(h1), half(w1));
+        let (ch, pad) = (self.channels, self.pad);
+        let (h1, w1) = (out_len(frames, pad), out_len(mels, pad));
+        let (h2, w2) = (out_len(h1, pad), out_len(w1, pad));
         let mut out = Buf::scratch(h2 * w2 * ch);
         // At least four strips per thread, so a short take still spreads out.
         let strip_rows = h2.div_ceil(4 * team::threads()).clamp(1, MAX_STRIP_ROWS);
@@ -393,8 +501,12 @@ impl Subsampling {
         for (w, cell) in row.chunks_exact_mut(ch).enumerate() {
             cell.copy_from_slice(bias);
             for tap in 0..9 {
-                let Some(v) = sample(features, frames, mels, 2 * h + tap / 3, 2 * w + tap % 3)
-                else {
+                let Some(v) = sample(
+                    features,
+                    (frames, mels, self.pad),
+                    2 * h + tap / 3,
+                    2 * w + tap % 3,
+                ) else {
                     continue;
                 };
                 for (o, wt) in cell.iter_mut().zip(&weight[tap * ch..(tap + 1) * ch]) {
@@ -418,14 +530,14 @@ multiversion! {
         rows: &mut [f32],
     ) {
         let (frames, mels) = frames_mels;
-        let ch = sub.channels;
-        let (h1, w1) = (half(frames), half(mels));
-        let w2 = half(w1);
+        let (ch, pad) = (sub.channels, sub.pad);
+        let (h1, w1) = (out_len(frames, pad), out_len(mels, pad));
+        let w2 = out_len(w1, pad);
         let first_out = strip * strip_rows;
         let out_rows = rows.len() / (w2 * ch);
-        // Output row oh reads conv0 rows 2oh-1 ..= 2oh+1.
-        let first_in = (2 * first_out).saturating_sub(1);
-        let last_in = (2 * (first_out + out_rows - 1) + 1).min(h1 - 1);
+        // Output row oh reads conv0 rows 2oh-pad ..= 2oh+2-pad.
+        let first_in = (2 * first_out).saturating_sub(pad);
+        let last_in = (2 * (first_out + out_rows - 1) + 2 - pad).min(h1 - 1);
         let len = (last_in - first_in + 1) * w1 * ch;
         // This thread's buffer, so a task allocates nothing; `conv0_row`
         // writes every value it reads.
@@ -445,10 +557,10 @@ multiversion! {
                 for i in 0..3 {
                     for j in 0..3 {
                         let (ih, iw) = (2 * oh + i, 2 * ow + j);
-                        if ih == 0 || iw == 0 || ih > h1 || iw > w1 {
+                        if ih < pad || iw < pad || ih - pad >= h1 || iw - pad >= w1 {
                             continue;
                         }
-                        let input = &conv0[((ih - 1 - first_in) * w1 + (iw - 1)) * ch..][..ch];
+                        let input = &conv0[((ih - pad - first_in) * w1 + (iw - pad)) * ch..][..ch];
                         let taps = &weight[(i * 3 + j) * ch..][..ch];
                         for ((o, wt), v) in cell.iter_mut().zip(taps).zip(input) {
                             *o += wt * v;
@@ -478,30 +590,35 @@ fn tap_major((weight, bias): (Vec<f32>, Vec<f32>), ch: usize) -> (Vec<f32>, Vec<
     )
 }
 
-/// Output length of a kernel-3, stride-2, padding-1 convolution.
-fn half(n: usize) -> usize {
-    (n - 1) / 2 + 1
+/// Output length of a kernel-3, stride-2 convolution with `pad` zeros
+/// before the input and one after.
+fn out_len(n: usize, pad: usize) -> usize {
+    (n + pad - 2) / 2 + 1
 }
 
 /// Input value at padded position (row, col), or None in the zero padding.
 #[inline(always)]
-fn sample(x: &[f32], rows: usize, cols: usize, row: usize, col: usize) -> Option<f32> {
-    let (r, c) = (row.checked_sub(1)?, col.checked_sub(1)?);
+fn sample(
+    x: &[f32],
+    (rows, cols, pad): (usize, usize, usize),
+    row: usize,
+    col: usize,
+) -> Option<f32> {
+    let (r, c) = (row.checked_sub(pad)?, col.checked_sub(pad)?);
     (r < rows && c < cols).then(|| x[r * cols + c])
 }
 
 /// Depthwise 3x3 stride-2 convolution on channels-last data.
 fn depthwise(
     x: &[f32],
-    h: usize,
-    w: usize,
-    ch: usize,
+    (h, w, ch): (usize, usize, usize),
+    pad: usize,
     (weight, bias): &(Vec<f32>, Vec<f32>),
 ) -> (Buf, usize, usize) {
-    let (ho, wo) = (half(h), half(w));
+    let (ho, wo) = (out_len(h, pad), out_len(w, pad));
     let mut out = Buf::scratch(ho * wo * ch);
     team::chunks_mut(&mut out, wo * ch, |oh, row| {
-        depthwise_row(x, (h, w, ch), weight, bias, oh, row);
+        depthwise_row(x, (h, w, ch, pad), weight, bias, oh, row);
     });
     (out, ho, wo)
 }
@@ -510,22 +627,22 @@ multiversion! {
     /// Output row `oh` of `depthwise`.
     fn depthwise_row(
         x: &[f32],
-        shape: (usize, usize, usize),
+        shape: (usize, usize, usize, usize),
         weight: &[f32],
         bias: &[f32],
         oh: usize,
         row: &mut [f32],
     ) {
-        let (h, w, ch) = shape;
+        let (h, w, ch, pad) = shape;
         for (ow, cell) in row.chunks_exact_mut(ch).enumerate() {
             cell.copy_from_slice(bias);
             for i in 0..3 {
                 for j in 0..3 {
                     let (ih, iw) = (2 * oh + i, 2 * ow + j);
-                    if ih == 0 || iw == 0 || ih > h || iw > w {
+                    if ih < pad || iw < pad || ih - pad >= h || iw - pad >= w {
                         continue;
                     }
-                    let input = &x[((ih - 1) * w + (iw - 1)) * ch..][..ch];
+                    let input = &x[((ih - pad) * w + (iw - pad)) * ch..][..ch];
                     let taps = &weight[(i * 3 + j) * ch..][..ch];
                     for ((o, wt), v) in cell.iter_mut().zip(taps).zip(input) {
                         *o += wt * v;
@@ -552,8 +669,7 @@ struct Block {
     pw1: Linear,
     /// Depthwise conv weights as `[tap][channel]`, so a tap is one contiguous row.
     dw_by_tap: Vec<f32>,
-    bn_scale: Vec<f32>,
-    bn_shift: Vec<f32>,
+    conv_norm: ConvNorm,
     pw2: Linear,
     norm_ff2: Norm,
     ff2: (Linear, Linear),
@@ -566,21 +682,31 @@ impl Block {
         let (d, g) = (c.hidden, c.group);
         let layer =
             |name: &str, out: usize, inp: usize| linear(t, &format!("{p}.{name}"), out, inp, g);
-        let mean = t.f32_len(&format!("{p}.conv.norm.running_mean"), d)?;
-        let var = t.f32_len(&format!("{p}.conv.norm.running_var"), d)?;
         let weight = t.f32_len(&format!("{p}.conv.norm.weight"), d)?;
         let bias = t.f32_len(&format!("{p}.conv.norm.bias"), d)?;
-        let bn_scale: Vec<f32> = (0..d)
-            .map(|i| weight[i] / (var[i] + BATCH_NORM_EPS).sqrt())
-            .collect();
-        // A depthwise conv bias `b` adds `b * scale` after the batch norm.
         let dw_bias = match t.has(&format!("{p}.conv.depthwise_conv.bias")) {
             true => t.f32_len(&format!("{p}.conv.depthwise_conv.bias"), d)?,
             false => vec![0.0; d],
         };
-        let bn_shift = (0..d)
-            .map(|i| bias[i] + (dw_bias[i] - mean[i]) * bn_scale[i])
-            .collect();
+        let conv_norm = match c.conv_norm {
+            ConvNormKind::Batch => {
+                let mean = t.f32_len(&format!("{p}.conv.norm.running_mean"), d)?;
+                let var = t.f32_len(&format!("{p}.conv.norm.running_var"), d)?;
+                let scale: Vec<f32> = (0..d)
+                    .map(|i| weight[i] / (var[i] + BATCH_NORM_EPS).sqrt())
+                    .collect();
+                // A depthwise conv bias `b` adds `b * scale` after the batch norm.
+                let shift = (0..d)
+                    .map(|i| bias[i] + (dw_bias[i] - mean[i]) * scale[i])
+                    .collect();
+                ConvNorm::Batch { scale, shift }
+            }
+            ConvNormKind::Layer => ConvNorm::Layer {
+                dw_bias,
+                weight,
+                bias,
+            },
+        };
         Ok(Self {
             norm_ff1: Norm::load(t, &format!("{p}.norm_feed_forward1"), d)?,
             ff1: (
@@ -608,8 +734,7 @@ impl Block {
                     .map(|i| dw[(i % d) * kernel + i / d])
                     .collect()
             },
-            bn_scale,
-            bn_shift,
+            conv_norm,
             pw2: layer("conv.pointwise_conv2", d, d)?,
             norm_ff2: Norm::load(t, &format!("{p}.norm_feed_forward2"), d)?,
             ff2: (
@@ -762,7 +887,7 @@ impl Block {
 }
 
 multiversion! {
-    /// Frame `i` of the conv module's depthwise conv over time, then its batch
+    /// Frame `i` of the conv module's depthwise conv over time, then its
     /// norm. `out` starts at zero.
     fn time_conv_row(block: &Block, gated: &[f32], t_kernel: (usize, usize, usize), i: usize, out: &mut [f32]) {
         // `pad`: the frames before frame i that tap 0 reads (`conv_context.0`).
@@ -778,9 +903,122 @@ multiversion! {
                 *o += w * g;
             }
         }
-        for ((o, scale), shift) in out.iter_mut().zip(&block.bn_scale).zip(&block.bn_shift) {
-            *o = *o * scale + shift;
+        match &block.conv_norm {
+            ConvNorm::Batch { scale, shift } => {
+                for ((o, scale), shift) in out.iter_mut().zip(scale).zip(shift) {
+                    *o = *o * scale + shift;
+                }
+            }
+            ConvNorm::Layer { dw_bias, weight, bias } => {
+                out.iter_mut().zip(dw_bias).for_each(|(o, b)| *o += b);
+                let mean = out.iter().sum::<f32>() / d as f32;
+                let var = out.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / d as f32;
+                let inv = 1.0 / (var + LAYER_NORM_EPS).sqrt();
+                for ((o, w), b) in out.iter_mut().zip(weight).zip(bias) {
+                    *o = (*o - mean) * inv * w + b;
+                }
+            }
         }
+    }
+}
+
+/// The conv module's norm after the depthwise conv.
+enum ConvNorm {
+    /// Batch norm with its statistics (and the conv bias) folded in.
+    Batch { scale: Vec<f32>, shift: Vec<f32> },
+    /// Layer norm over the channels of a frame, after the conv bias.
+    Layer {
+        dw_bias: Vec<f32>,
+        weight: Vec<f32>,
+        bias: Vec<f32>,
+    },
+}
+
+const LAYER_NORM_EPS: f32 = 1e-5;
+
+/// NeMo's speaker kernel at the input of layer 0 (`SpeakerKernelMixin`),
+/// for one speaker: `x += W3 relu(W0 x + b0) + b3`, then the background
+/// kernel of a zero input, a constant row.
+struct SpeakerKernel {
+    up: Dense,
+    down: Dense,
+    background: Vec<f32>,
+}
+
+impl SpeakerKernel {
+    fn load(t: &Tensors, c: &Config) -> Result<Option<Self>, String> {
+        if !c.speaker_kernel {
+            return Ok(None);
+        }
+        let d = c.hidden;
+        let p = format!("{}encoder", c.prefix);
+        let up = Dense::load_cpu(t, &[(&format!("{p}.spk_kernel.0.0"), d)], d)?;
+        let down = Dense::load_cpu(t, &[(&format!("{p}.spk_kernel.0.3"), d)], d)?;
+        let mut hidden = t.f32_len(&format!("{p}.bg_spk_kernel.0.0.bias"), d)?;
+        hidden.iter_mut().for_each(|v| *v = v.max(0.0));
+        let background = Dense::load_cpu(t, &[(&format!("{p}.bg_spk_kernel.0.3"), d)], d)?
+            .forward(&hidden, 1)
+            .to_vec();
+        Ok(Some(Self {
+            up,
+            down,
+            background,
+        }))
+    }
+
+    fn apply(&self, x: &mut Buf, t: usize) {
+        let mut hidden = self.up.forward(x, t);
+        team::chunks_mut(&mut hidden, 4096, |_, values| {
+            values.iter_mut().for_each(|v| *v = v.max(0.0))
+        });
+        let kernel = self.down.forward(&hidden, t);
+        let d = self.background.len();
+        team::chunks_mut(x, d, |i, row| {
+            for ((o, k), b) in row
+                .iter_mut()
+                .zip(&kernel[i * d..][..d])
+                .zip(&self.background)
+            {
+                *o += k + b;
+            }
+        });
+    }
+}
+
+/// The language prompt's MLP: `W2 relu(W0 [x; one_hot] + b0) + b2`.
+struct Prompt {
+    config: PromptConfig,
+    first: Dense,
+    second: Dense,
+}
+
+impl Prompt {
+    fn load(t: &Tensors, c: &Config) -> Result<Option<Self>, String> {
+        let Some(config) = c.prompt.clone() else {
+            return Ok(None);
+        };
+        let (d, hidden) = (c.hidden, config.hidden);
+        Ok(Some(Self {
+            first: Dense::load_cpu(t, &[("prompt_kernel.0", hidden)], d + config.count)?,
+            second: Dense::load_cpu(t, &[("prompt_kernel.2", d)], hidden)?,
+            config,
+        }))
+    }
+
+    fn apply(&self, x: &[f32], t: usize, language: Option<&str>) -> Buf {
+        let d = x.len() / t.max(1);
+        let count = self.config.count;
+        let index = self.config.index(language);
+        let mut joined = Buf::zeroed(t * (d + count));
+        team::chunks_mut(&mut joined, d + count, |i, row| {
+            row[..d].copy_from_slice(&x[i * d..][..d]);
+            row[d + index] = 1.0;
+        });
+        let mut hidden = self.first.forward(&joined, t);
+        team::chunks_mut(&mut hidden, 4096, |_, values| {
+            values.iter_mut().for_each(|v| *v = v.max(0.0))
+        });
+        self.second.forward(&hidden, t)
     }
 }
 
@@ -878,6 +1116,8 @@ pub struct Parakeet {
     head: Head,
     /// The speech head some checkpoints carry (Redux: `vad_head.*`).
     vad: Option<VadHead>,
+    speaker_kernel: Option<SpeakerKernel>,
+    prompt: Option<Prompt>,
     /// The conformer, when this model was loaded on the GPU.
     #[cfg(feature = "gpu")]
     gpu_encoder: Option<crate::gpu::encoder::Encoder>,
@@ -981,7 +1221,12 @@ impl Parakeet {
             HeadKind::Encoder => Head::Encoder,
         };
         #[cfg(feature = "gpu")]
-        let gpu_encoder = if t.device() == crate::Device::Gpu {
+        let gpu_encoder = if t.device() == crate::Device::Gpu && !c.gpu_shape() {
+            crate::gpu::log_fallback(
+                "this encoder shape (masked attention, a causal conv, a layer-norm conv) runs on the CPU",
+            );
+            None
+        } else if t.device() == crate::Device::Gpu {
             match gpu_encoder(t, &blocks, c) {
                 Ok(encoder) => Some(encoder),
                 Err(error) => {
@@ -997,6 +1242,8 @@ impl Parakeet {
             blocks,
             head,
             vad: VadHead::load(t, c)?,
+            speaker_kernel: SpeakerKernel::load(t, c)?,
+            prompt: Prompt::load(t, c)?,
             config,
             #[cfg(feature = "gpu")]
             gpu_encoder,
@@ -1085,8 +1332,14 @@ fn gpu_encoder(
             bias_u: block.bias_u.clone(),
             bias_v: block.bias_v.clone(),
             dw: block.dw_by_tap.clone(),
-            bn_scale: block.bn_scale.clone(),
-            bn_shift: block.bn_shift.clone(),
+            bn_scale: match &block.conv_norm {
+                ConvNorm::Batch { scale, .. } => scale.clone(),
+                ConvNorm::Layer { .. } => return Err("a layer-norm conv runs on the CPU".into()),
+            },
+            bn_shift: match &block.conv_norm {
+                ConvNorm::Batch { shift, .. } => shift.clone(),
+                ConvNorm::Layer { .. } => return Err("a layer-norm conv runs on the CPU".into()),
+            },
         });
     }
     let sine = relative_positions(GPU_REACH + 1, c.hidden);
@@ -1144,10 +1397,23 @@ impl Parakeet {
                 row.iter_mut().for_each(|v| *v *= scale)
             });
         }
+        if let Some(kernel) = &self.speaker_kernel {
+            kernel.apply(&mut x, t);
+        }
         for block in &self.blocks {
             block.forward(&mut x, t, c);
         }
         (x, t)
+    }
+
+    /// The encoder output with language `code`'s prompt, for a
+    /// prompt-conditioned model (else unchanged): `None` or a code the
+    /// model does not list lets it find the language.
+    pub fn prompted(&self, encoded: Buf, t: usize, code: Option<&str>) -> Buf {
+        match &self.prompt {
+            Some(prompt) => prompt.apply(&encoded, t, code),
+            None => encoded,
+        }
     }
 
     /// Fills every layer's position table up front, so the first take does not wait.
