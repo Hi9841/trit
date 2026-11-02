@@ -5,11 +5,13 @@
 //! names and keep their stored types under `Precision::Auto` (a Q8_0 file
 //! runs as Q8_0). The family loaders then run as for a Hugging Face folder.
 //!
-//! Read: `parakeet` (TDT, RNNT, CTC; full or local attention) and `whisper`.
+//! Read: `parakeet` (TDT, RNNT, CTC; full or local attention), `whisper`,
+//! and `moonshine`.
 
 use crate::cpu::tensors::Tensors;
 use crate::{Device, Precision};
 
+mod moonshine;
 mod parakeet;
 mod whisper;
 
@@ -18,6 +20,7 @@ mod whisper;
 enum Arch {
     Parakeet,
     Whisper,
+    Moonshine,
 }
 
 /// What a tensor of the file becomes.
@@ -138,8 +141,9 @@ impl Gguf {
         match self.get("general.architecture").as_str() {
             Some("parakeet") => Ok(Arch::Parakeet),
             Some("whisper") => Ok(Arch::Whisper),
+            Some("moonshine") => Ok(Arch::Moonshine),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet and whisper",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, and moonshine",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -172,6 +176,7 @@ impl Gguf {
             let to = match arch {
                 Arch::Parakeet => parakeet::hf_name(name).map(Name::To),
                 Arch::Whisper => whisper::hf_name(name),
+                Arch::Moonshine => moonshine::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -189,11 +194,11 @@ impl Gguf {
 
     /// The files a Hugging Face folder of this model holds.
     pub fn provides(&self, name: &str) -> bool {
-        match (self.arch(), name) {
-            (Ok(_), "config.json" | "tokenizer.json") => true,
-            (Ok(Arch::Whisper), "generation_config.json") => true,
-            _ => false,
-        }
+        matches!(
+            (self.arch(), name),
+            (Ok(_), "config.json" | "tokenizer.json")
+                | (Ok(Arch::Whisper), "generation_config.json")
+        )
     }
 
     /// File `name` of a Hugging Face folder of this model, from the metadata.
@@ -203,6 +208,9 @@ impl Gguf {
         match (arch, name) {
             (Arch::Parakeet, "config.json") => parakeet::config(self).map(|v| v.to_string()),
             (Arch::Whisper, "config.json") => whisper::config(self).map(|v| v.to_string()).map_err(fail),
+            (Arch::Moonshine, "config.json") => {
+                moonshine::config(self).map(|v| v.to_string()).map_err(fail)
+            }
             (Arch::Whisper, "generation_config.json") => {
                 whisper::generation(self).map(|v| v.to_string()).map_err(fail)
             }
