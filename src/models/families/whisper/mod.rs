@@ -2,7 +2,7 @@
 //! other `WhisperForConditionalGeneration` checkpoints on Hugging Face.
 //! Greedy decoding without timestamps, as one dictation take needs.
 
-mod model;
+pub mod model;
 
 use crate::audio::{
     self,

@@ -81,13 +81,113 @@ struct DecoderLayer {
     fc2: Dense,
 }
 
-pub struct Whisper {
-    pub config: Config,
+/// The encoder: a conv stem (stride 1, then 2) with GELU, learned
+/// positions, pre-norm layers, and a final norm. Voxtral runs it too.
+pub struct Encoder {
+    d: usize,
+    heads: usize,
+    ffn: usize,
+    mels: usize,
+    positions: usize,
     conv1: Dense,
     conv2: Dense,
-    encoder_positions: Vec<f32>,
-    encoder: Vec<EncoderLayer>,
-    encoder_norm: Norm,
+    embed_positions: Vec<f32>,
+    layers: Vec<EncoderLayer>,
+    norm: Norm,
+}
+
+/// The sizes of an encoder: width, layers, heads, feed-forward width,
+/// mel bins, and positions.
+pub struct EncoderShape {
+    pub d: usize,
+    pub layers: usize,
+    pub heads: usize,
+    pub ffn: usize,
+    pub mels: usize,
+    pub positions: usize,
+}
+
+impl Encoder {
+    /// The encoder whose tensors are under `prefix` (`model.encoder`).
+    pub fn load(t: &Tensors, prefix: &str, shape: EncoderShape) -> Result<Self, String> {
+        let EncoderShape {
+            d,
+            layers,
+            heads,
+            ffn,
+            mels,
+            positions,
+        } = shape;
+        let layers = team::map(layers, |i| -> Result<EncoderLayer, String> {
+            let p = format!("{prefix}.layers.{i}");
+            let attn = |n: &str| format!("{p}.self_attn.{n}");
+            Ok(EncoderLayer {
+                norm_attn: Norm::load(t, &format!("{p}.self_attn_layer_norm"), d)?,
+                qkv: stacked(
+                    t,
+                    &[&attn("q_proj"), &attn("k_proj"), &attn("v_proj")],
+                    d,
+                    d,
+                )?,
+                out: linear(t, &attn("out_proj"), d, d)?,
+                norm_ffn: Norm::load(t, &format!("{p}.final_layer_norm"), d)?,
+                fc1: linear(t, &format!("{p}.fc1"), ffn, d)?,
+                fc2: linear(t, &format!("{p}.fc2"), d, ffn)?,
+            })
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            conv1: linear(t, &format!("{prefix}.conv1"), d, 3 * mels)?,
+            conv2: linear(t, &format!("{prefix}.conv2"), d, 3 * d)?,
+            embed_positions: t
+                .f32_len(&format!("{prefix}.embed_positions.weight"), positions * d)?,
+            layers,
+            norm: Norm::load(t, &format!("{prefix}.layer_norm"), d)?,
+            d,
+            heads,
+            ffn,
+            mels,
+            positions,
+        })
+    }
+
+    /// Encoder output `positions x d` for one window of `2 * positions x mels`
+    /// features. Always the full 30 s: encoding only the positions the audio
+    /// covers raised whisper-base.en from 3.42 % to 49 % WER on LibriSpeech.
+    pub fn encode(&self, mel: &[f32]) -> Buf {
+        let (d, frames, positions) = (self.d, 2 * self.positions, self.positions);
+        let cols = conv_columns(mel, (frames, self.mels), (3, 1, 1), frames);
+        let mut h = self.conv1.forward(&cols, frames);
+        GELU.apply(&mut h, d);
+        let cols = conv_columns(&h, (frames, d), (3, 2, 1), positions);
+        let mut x = self.conv2.forward(&cols, positions);
+        GELU.apply(&mut x, d);
+        add_into(&mut x, &self.embed_positions);
+        for layer in &self.layers {
+            let normed = layer.norm_attn.apply(&x, d);
+            let qkv = layer.qkv.forward(&normed, positions);
+            let att = attention(
+                (&qkv, 3 * d),
+                (&qkv[d..], 3 * d),
+                (&qkv[2 * d..], 3 * d),
+                (positions, positions),
+                (d, self.heads, self.heads),
+                false,
+            );
+            add_into(&mut x, &layer.out.forward(&att, positions));
+            let normed = layer.norm_ffn.apply(&x, d);
+            let mut hidden = layer.fc1.forward(&normed, positions);
+            GELU.apply(&mut hidden, self.ffn);
+            add_into(&mut x, &layer.fc2.forward(&hidden, positions));
+        }
+        self.norm.apply(&x, d)
+    }
+}
+
+pub struct Whisper {
+    pub config: Config,
+    encoder: Encoder,
     /// Token embeddings; also the output projection (tied).
     embed: Dense,
     decoder_positions: Vec<f32>,
@@ -122,25 +222,18 @@ impl Whisper {
     pub fn load(t: &Tensors, config: Config) -> Result<Self, String> {
         let c = &config;
         let d = c.d;
-        let encoder = team::map(c.encoder_layers, |i| -> Result<EncoderLayer, String> {
-            let p = format!("model.encoder.layers.{i}");
-            let attn = |n: &str| format!("{p}.self_attn.{n}");
-            Ok(EncoderLayer {
-                norm_attn: Norm::load(t, &format!("{p}.self_attn_layer_norm"), d)?,
-                qkv: stacked(
-                    t,
-                    &[&attn("q_proj"), &attn("k_proj"), &attn("v_proj")],
-                    d,
-                    d,
-                )?,
-                out: linear(t, &attn("out_proj"), d, d)?,
-                norm_ffn: Norm::load(t, &format!("{p}.final_layer_norm"), d)?,
-                fc1: linear(t, &format!("{p}.fc1"), c.encoder_ffn, d)?,
-                fc2: linear(t, &format!("{p}.fc2"), d, c.encoder_ffn)?,
-            })
-        })
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+        let encoder = Encoder::load(
+            t,
+            "model.encoder",
+            EncoderShape {
+                d,
+                layers: c.encoder_layers,
+                heads: c.encoder_heads,
+                ffn: c.encoder_ffn,
+                mels: c.mels,
+                positions: c.positions,
+            },
+        )?;
         let decoder = (0..c.decoder_layers)
             .map(|i| -> Result<DecoderLayer, String> {
                 let p = format!("model.decoder.layers.{i}");
@@ -161,12 +254,7 @@ impl Whisper {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            conv1: linear(t, "model.encoder.conv1", d, 3 * c.mels)?,
-            conv2: linear(t, "model.encoder.conv2", d, 3 * d)?,
-            encoder_positions: t
-                .f32_len("model.encoder.embed_positions.weight", c.positions * d)?,
             encoder,
-            encoder_norm: Norm::load(t, "model.encoder.layer_norm", d)?,
             embed: Dense::table(t, "model.decoder.embed_tokens.weight", c.vocab, d)?,
             decoder_positions: t
                 .f32_len("model.decoder.embed_positions.weight", c.max_tokens * d)?,
@@ -177,37 +265,8 @@ impl Whisper {
     }
 
     /// Encoder output `positions x d` for one window of `2 * positions x mels` features.
-    /// Encoder output `positions x d` for one window of `2 * positions x mels`
-    /// features. Always the full 30 s: encoding only the positions the audio
-    /// covers raised whisper-base.en from 3.42 % to 49 % WER on LibriSpeech.
     pub fn encode(&self, mel: &[f32]) -> Buf {
-        let c = &self.config;
-        let (d, frames, positions) = (c.d, 2 * c.positions, c.positions);
-        let cols = conv_columns(mel, (frames, c.mels), (3, 1, 1), frames);
-        let mut h = self.conv1.forward(&cols, frames);
-        GELU.apply(&mut h, d);
-        let cols = conv_columns(&h, (frames, d), (3, 2, 1), positions);
-        let mut x = self.conv2.forward(&cols, positions);
-        GELU.apply(&mut x, d);
-        add_into(&mut x, &self.encoder_positions);
-        for layer in &self.encoder {
-            let normed = layer.norm_attn.apply(&x, d);
-            let qkv = layer.qkv.forward(&normed, positions);
-            let att = attention(
-                (&qkv, 3 * d),
-                (&qkv[d..], 3 * d),
-                (&qkv[2 * d..], 3 * d),
-                (positions, positions),
-                (d, c.encoder_heads, c.encoder_heads),
-                false,
-            );
-            add_into(&mut x, &layer.out.forward(&att, positions));
-            let normed = layer.norm_ffn.apply(&x, d);
-            let mut hidden = layer.fc1.forward(&normed, positions);
-            GELU.apply(&mut hidden, c.encoder_ffn);
-            add_into(&mut x, &layer.fc2.forward(&hidden, positions));
-        }
-        self.encoder_norm.apply(&x, d)
+        self.encoder.encode(mel)
     }
 
     /// A decoder session over one encoded window.

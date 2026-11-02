@@ -38,6 +38,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "intermediate_size": e("intermediate")?,
             "num_hidden_layers": e("n_layers")?,
             "input_dim": e("input_dim")?,
+            "output_dim": e("output_dim")?,
             "conv_kernel_size": e("conv_kernel_size")?,
             "conv_expansion_factor": e("conv_expansion")?,
             "context_size": e("context_size")?,
@@ -52,6 +53,9 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "num_mel_bins": fe("num_mels")?,
             "stack_factor": fe("stack_factor")?,
             "floor_db": g.get("stt.frontend.logmel_floor_db").as_f64().unwrap_or(8.0),
+            "deltas": true,
+            // 5.0 pads the audio to whole stacks of frames.
+            "frames": "whole_stacks",
         },
     }))
 }

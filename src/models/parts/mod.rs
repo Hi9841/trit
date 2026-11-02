@@ -9,6 +9,7 @@ pub mod conv;
 pub mod ctc;
 pub mod dictionary;
 pub mod fastconformer;
+pub mod granite_conformer;
 pub mod logit_bias;
 pub mod lstm;
 pub mod moonshine_streaming;

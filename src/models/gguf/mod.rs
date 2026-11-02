@@ -16,11 +16,13 @@ mod canary_qwen;
 mod fun_asr;
 mod gigaam;
 mod granite_ctc;
+mod granite_speech;
 mod medasr;
 mod moonshine;
 mod parakeet;
 mod qwen3_asr;
 mod sensevoice;
+mod voxtral;
 mod whisper;
 
 /// The architectures Trit reads, by `general.architecture`.
@@ -38,6 +40,8 @@ enum Arch {
     CanaryQwen,
     FunAsr,
     MoonshineStreaming,
+    GraniteSpeech,
+    Voxtral,
 }
 
 /// What a tensor of the file becomes.
@@ -168,8 +172,10 @@ impl Gguf {
             Some("canary_qwen") => Ok(Arch::CanaryQwen),
             Some("funasr_nano") => Ok(Arch::FunAsr),
             Some("moonshine_streaming") => Ok(Arch::MoonshineStreaming),
+            Some("granite_speech") => Ok(Arch::GraniteSpeech),
+            Some("voxtral") => Ok(Arch::Voxtral),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, and moonshine_streaming",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, moonshine_streaming, granite_speech, and voxtral",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -214,6 +220,8 @@ impl Gguf {
                 Arch::CanaryQwen => canary_qwen::hf_name(name),
                 Arch::FunAsr => fun_asr::hf_name(name),
                 Arch::MoonshineStreaming => moonshine::hf_name(name),
+                Arch::GraniteSpeech => granite_speech::hf_name(name),
+                Arch::Voxtral => voxtral::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -253,6 +261,12 @@ impl Gguf {
             (Arch::Canary, "config.json") => {
                 canary::config(self).map(|v| v.to_string()).map_err(fail)
             }
+            (Arch::Voxtral, "config.json") => {
+                voxtral::config(self).map(|v| v.to_string()).map_err(fail)
+            }
+            (Arch::GraniteSpeech, "config.json") => granite_speech::config(self)
+                .map(|v| v.to_string())
+                .map_err(fail),
             (Arch::MoonshineStreaming, "config.json") => moonshine::streaming_config(self)
                 .map(|v| v.to_string())
                 .map_err(fail),
@@ -333,8 +347,12 @@ impl Gguf {
         if self.get("tokenizer.ggml.model").as_str() == Some("gpt2") {
             json["decoder"] = json!({ "type": "ByteLevel" });
         }
-        // Qwen's pre-tokenizer, which `Bpe::parse` knows by its pattern.
-        if self.get("tokenizer.ggml.pre").as_str() == Some("qwen2") {
+        // Qwen's pre-tokenizer, which `Bpe::parse` knows by its pattern. Mistral's
+        // Tekken splits text the same way where Trit encodes it (`lang:en`).
+        if matches!(
+            self.get("tokenizer.ggml.pre").as_str(),
+            Some("qwen2" | "tekken")
+        ) {
             json["pre_tokenizer"] = json!({ "type": "Split", "pattern": {
                 "Regex": r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
             }});
