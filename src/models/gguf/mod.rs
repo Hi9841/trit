@@ -37,6 +37,7 @@ enum Arch {
     GraniteCtc,
     CanaryQwen,
     FunAsr,
+    MoonshineStreaming,
 }
 
 /// What a tensor of the file becomes.
@@ -166,8 +167,9 @@ impl Gguf {
             Some("granite_speech5_ctc") => Ok(Arch::GraniteCtc),
             Some("canary_qwen") => Ok(Arch::CanaryQwen),
             Some("funasr_nano") => Ok(Arch::FunAsr),
+            Some("moonshine_streaming") => Ok(Arch::MoonshineStreaming),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, and funasr_nano",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, and moonshine_streaming",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -211,6 +213,7 @@ impl Gguf {
                 Arch::GraniteCtc => granite_ctc::hf_name(name),
                 Arch::CanaryQwen => canary_qwen::hf_name(name),
                 Arch::FunAsr => fun_asr::hf_name(name),
+                Arch::MoonshineStreaming => moonshine::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -250,6 +253,9 @@ impl Gguf {
             (Arch::Canary, "config.json") => {
                 canary::config(self).map(|v| v.to_string()).map_err(fail)
             }
+            (Arch::MoonshineStreaming, "config.json") => moonshine::streaming_config(self)
+                .map(|v| v.to_string())
+                .map_err(fail),
             (Arch::FunAsr, "config.json") => {
                 fun_asr::config(self).map(|v| v.to_string()).map_err(fail)
             }

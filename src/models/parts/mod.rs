@@ -10,6 +10,7 @@ pub mod dictionary;
 pub mod fastconformer;
 pub mod logit_bias;
 pub mod lstm;
+pub mod moonshine_streaming;
 pub mod qwen3;
 pub mod sanm;
 pub mod transducer;

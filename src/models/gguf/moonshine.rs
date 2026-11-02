@@ -38,9 +38,69 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     }))
 }
 
+/// Moonshine Streaming files (`general.architecture` `moonshine_streaming`):
+/// Moonshine's decoder keys, and the streaming encoder under
+/// `streaming_encoder`.
+pub fn streaming_config(g: &Gguf) -> Result<Value, String> {
+    let m = |key: &str| g.num(&format!("stt.moonshine_streaming.{key}"));
+    let text = |key: &str| g.get(key).as_str().unwrap_or_default();
+    let heads = m("decoder.n_heads")?;
+    if text("stt.moonshine_streaming.decoder.activation") != "silu"
+        || text("stt.moonshine_streaming.encoder.activation") != "gelu"
+        || g.get("stt.moonshine_streaming.attention_bias").as_bool() == Some(true)
+        || m("pad_head_dim_to_multiple_of").unwrap_or(0) != 0
+        || g.get("stt.moonshine_streaming.encoder_layernorm_unit_offset")
+            .as_bool()
+            != Some(true)
+    {
+        return Err(
+            "it differs from Moonshine Streaming's (SiLU decoder, GELU encoder, no bias)".into(),
+        );
+    }
+    let windows: Vec<Value> = g
+        .get("stt.moonshine_streaming.encoder.sliding_windows")
+        .as_array()
+        .map(|flat| flat.chunks(2).map(|pair| json!(pair)).collect())
+        .unwrap_or_default();
+    Ok(json!({
+        "model_type": "moonshine_streaming",
+        "hidden_size": m("decoder.d_model")?,
+        "intermediate_size": m("decoder.ffn_dim")?,
+        "encoder_num_attention_heads": heads,
+        "decoder_num_attention_heads": heads,
+        "encoder_num_key_value_heads": heads,
+        "decoder_num_key_value_heads": m("decoder.n_kv_heads")?,
+        "encoder_num_hidden_layers": m("encoder.n_layers")?,
+        "decoder_num_hidden_layers": m("decoder.n_layers")?,
+        "vocab_size": m("decoder.vocab_size")?,
+        "max_position_embeddings": m("decoder.max_position_embeddings")?,
+        "decoder_start_token_id": m("decoder_start_token_id")?,
+        "eos_token_id": m("eos_token_id")?,
+        "partial_rotary_factor": g.get("stt.moonshine_streaming.partial_rotary_factor").as_f64().unwrap_or(1.0),
+        "rope_theta": g.get("stt.moonshine_streaming.rope_theta").as_f64().unwrap_or(10_000.0),
+        "tie_word_embeddings": g.get("stt.moonshine_streaming.decoder.tie_word_embeddings").as_bool().unwrap_or(true),
+        "languages": g.get("general.languages"),
+        "streaming_encoder": {
+            "hidden_size": m("encoder.d_model")?,
+            "num_attention_heads": m("encoder.n_heads")?,
+            "head_dim": m("encoder.head_dim")?,
+            "intermediate_size": m("encoder.ffn_dim")?,
+            "num_hidden_layers": m("encoder.n_layers")?,
+            "frame_len": m("encoder.frame_len")?,
+            "sliding_windows": windows,
+            "cmvn_eps": g.get("stt.moonshine_streaming.cmvn_eps").as_f64(),
+            "adapter_projection": g.get("stt.moonshine_streaming.adapter_has_proj").as_bool().unwrap_or(false),
+            "max_position_embeddings": m("decoder.max_position_embeddings")?,
+        },
+    }))
+}
+
 /// A transcribe.cpp Moonshine tensor name as the Hugging Face checkpoint names it.
 pub fn hf_name(name: &str) -> Option<Name> {
-    const TOP: [(&str, &str); 7] = [
+    const TOP: [(&str, &str); 10] = [
+        ("enc.embedder.", "model.encoder.embedder."),
+        ("adapter.", "model.adapter."),
+        ("dec.lm_head.", "proj_out."),
         ("enc.conv.0.", "model.encoder.conv1."),
         ("enc.conv.1.", "model.encoder.conv2."),
         ("enc.conv.2.", "model.encoder.conv3."),

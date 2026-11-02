@@ -13,6 +13,7 @@ use crate::models::layers::{
 };
 use crate::models::parts::beam;
 use crate::models::parts::logit_bias::{self as bias, Bias, BiasWeights};
+use crate::models::parts::moonshine_streaming::{StreamConfig, StreamingEncoder};
 use crate::text::sentencepiece::Tokenizer;
 use crate::{Device, Options, Precision};
 use parking_lot::RwLock;
@@ -52,6 +53,10 @@ struct Config {
     /// The encoder MLP activation (`encoder_hidden_act`).
     gelu: Gelu,
     tokens_per_second: f32,
+    /// Moonshine Streaming's encoder, else the conv stem and full attention.
+    streaming: Option<StreamConfig>,
+    /// The output head is the token table (Moonshine), or `proj_out`.
+    tied: bool,
 }
 
 impl Config {
@@ -88,6 +93,8 @@ impl Config {
                     .and_then(|code| code.as_str())
                     .unwrap_or("en"),
             ),
+            streaming: StreamConfig::parse(json)?,
+            tied: json.flag("tie_word_embeddings") != Some(false),
         })
     }
 }
@@ -115,18 +122,28 @@ struct DecoderLayer {
     fc2: Dense,
 }
 
+/// Moonshine's conv stem and encoder layers, or Moonshine Streaming's encoder.
+enum Encoder {
+    Conv {
+        conv1: Dense,
+        group_norm: (Vec<f32>, Vec<f32>),
+        conv2: Dense,
+        conv3: Dense,
+        layers: Vec<EncoderLayer>,
+        norm: Norm,
+    },
+    Streaming(Box<StreamingEncoder>),
+}
+
 pub struct Moonshine {
     config: Config,
-    conv1: Dense,
-    group_norm: (Vec<f32>, Vec<f32>),
-    conv2: Dense,
-    conv3: Dense,
-    encoder: Vec<EncoderLayer>,
-    encoder_norm: Norm,
+    encoder: Encoder,
     decoder: Vec<DecoderLayer>,
     decoder_norm: Norm,
-    /// Token embeddings; also the output projection (tied).
+    /// Token embeddings; also the output projection when tied.
     embed: Dense,
+    /// The output projection of an untied model (Moonshine Streaming).
+    head: Option<Dense>,
     rotary: Rotary,
     tokenizer: Tokenizer,
     dictionary: RwLock<Option<Bias>>,
@@ -143,7 +160,12 @@ impl Moonshine {
         let t = files.tensors(precision, device)?;
         let d = c.d;
         let attn = |p: &str, n: &str| format!("{p}.{n}");
-        let encoder = (0..c.encoder_layers)
+        let encoder_layers = if c.streaming.is_some() {
+            0
+        } else {
+            c.encoder_layers
+        };
+        let layers = (0..encoder_layers)
             .map(|i| -> Result<EncoderLayer, String> {
                 let p = format!("model.encoder.layers.{i}");
                 let a = format!("{p}.self_attn");
@@ -199,16 +221,27 @@ impl Moonshine {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut c = c;
+        let encoder = match c.streaming.take() {
+            Some(stream) => Encoder::Streaming(Box::new(StreamingEncoder::load(&t, stream, d)?)),
+            None => Encoder::Conv {
+                conv1: linear(&t, "model.encoder.conv1", d, 127)?,
+                group_norm: (
+                    t.f32_len("model.encoder.groupnorm.weight", d)?,
+                    t.f32_len("model.encoder.groupnorm.bias", d)?,
+                ),
+                conv2: linear(&t, "model.encoder.conv2", 2 * d, 7 * d)?,
+                conv3: linear(&t, "model.encoder.conv3", d, 3 * 2 * d)?,
+                layers,
+                norm: Norm::load(&t, "model.encoder.layer_norm", d)?,
+            },
+        };
         Ok(Self {
-            conv1: linear(&t, "model.encoder.conv1", d, 127)?,
-            group_norm: (
-                t.f32_len("model.encoder.groupnorm.weight", d)?,
-                t.f32_len("model.encoder.groupnorm.bias", d)?,
-            ),
-            conv2: linear(&t, "model.encoder.conv2", 2 * d, 7 * d)?,
-            conv3: linear(&t, "model.encoder.conv3", d, 3 * 2 * d)?,
             encoder,
-            encoder_norm: Norm::load(&t, "model.encoder.layer_norm", d)?,
+            head: match c.tied {
+                true => None,
+                false => Some(linear(&t, "proj_out", c.vocab, d)?),
+            },
             decoder,
             decoder_norm: Norm::load(&t, "model.decoder.norm", d)?,
             embed: Dense::table(&t, "model.decoder.embed_tokens.weight", c.vocab, d)?,
@@ -233,8 +266,12 @@ impl Moonshine {
         let dictionary = self.dictionary.read();
         let mut pieces = Vec::new();
         for window in audio::windows(samples, WINDOW_SAMPLES) {
-            // The conv stem needs at least one output frame.
-            if window.len() < 127 + 64 * (6 + 2 * 3) || audio::is_silent(window) {
+            // The encoder needs at least one output frame.
+            let least = match &self.encoder {
+                Encoder::Conv { .. } => 127 + 64 * (6 + 2 * 3),
+                Encoder::Streaming(stream) => stream.min_samples(),
+            };
+            if window.len() < least || audio::is_silent(window) {
                 continue;
             }
             let encoded = self.encode(window);
@@ -257,35 +294,42 @@ impl Moonshine {
 
     /// Encoder output, `frames x d`.
     fn encode(&self, samples: &[f32]) -> (Buf, usize) {
+        let (conv1, group_norm, conv2, conv3, layers, norm) = match &self.encoder {
+            Encoder::Streaming(stream) => return stream.encode(samples),
+            Encoder::Conv {
+                conv1,
+                group_norm,
+                conv2,
+                conv3,
+                layers,
+                norm,
+            } => (conv1, group_norm, conv2, conv3, layers, norm),
+        };
         let c = &self.config;
         let d = c.d;
         let l1 = (samples.len() - 127) / 64 + 1;
         let cols = conv_columns(samples, (samples.len(), 1), (127, 64, 0), l1);
-        let mut h = self.conv1.forward(&cols, l1);
+        let mut h = conv1.forward(&cols, l1);
         activation::tanh(&mut h);
         // Group norm with one group: statistics over every channel and frame.
         let n = h.len() as f32;
         let mean = h.iter().sum::<f32>() / n;
         let var = h.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
         let inv = 1.0 / (var + 1e-5).sqrt();
-        let (weight, bias) = &self.group_norm;
+        let (weight, bias) = group_norm;
         team::chunks_mut(&mut h, d, |_, row| {
             for ((v, w), b) in row.iter_mut().zip(weight).zip(bias) {
                 *v = (*v - mean) * inv * w + b;
             }
         });
         let l2 = (l1 - 7) / 3 + 1;
-        let mut h = self
-            .conv2
-            .forward(&conv_columns(&h, (l1, d), (7, 3, 0), l2), l2);
+        let mut h = conv2.forward(&conv_columns(&h, (l1, d), (7, 3, 0), l2), l2);
         // The conv stem always uses the exact form (`F.gelu`).
         Gelu::Exact.apply(&mut h, 2 * d);
         let frames = (l2 - 3) / 2 + 1;
-        let mut x = self
-            .conv3
-            .forward(&conv_columns(&h, (l2, 2 * d), (3, 2, 0), frames), frames);
+        let mut x = conv3.forward(&conv_columns(&h, (l2, 2 * d), (3, 2, 0), frames), frames);
         Gelu::Exact.apply(&mut x, d);
-        for layer in &self.encoder {
+        for layer in layers {
             let normed = layer.norm_attn.apply(&x, d);
             let mut qkv = layer.qkv.forward(&normed, frames);
             self.rotary
@@ -306,7 +350,7 @@ impl Moonshine {
             c.gelu.apply(&mut hidden, c.ffn);
             add_into(&mut x, &layer.fc2.forward(&hidden, frames));
         }
-        (self.encoder_norm.apply(&x, d), frames)
+        (norm.apply(&x, d), frames)
     }
 
     /// Tokens from the start token until end of text or `limit`: greedy
@@ -432,7 +476,11 @@ impl Moonshine {
         }
         caches.iter_mut().for_each(|cache| cache.position += 1);
         let normed = self.decoder_norm.apply(&x, d);
-        let logits = self.embed.forward(&normed, m);
+        let logits = self
+            .head
+            .as_ref()
+            .unwrap_or(&self.embed)
+            .forward(&normed, m);
         logits
             .chunks_exact(c.vocab)
             .map(|row| {
@@ -484,7 +532,10 @@ impl Moonshine {
         }
         cache.position += 1;
         let normed = self.decoder_norm.apply(&x, d);
-        self.embed.forward(&normed, 1)
+        self.head
+            .as_ref()
+            .unwrap_or(&self.embed)
+            .forward(&normed, 1)
     }
 }
 

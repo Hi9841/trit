@@ -96,7 +96,7 @@ pub struct Row {
 }
 
 /// Every family, by `model_type`. Tall products (Whisper) use every core.
-pub const FAMILIES: [Row; 15] = [
+pub const FAMILIES: [Row; 16] = [
     Row {
         model_type: "parakeet_tdt",
         spread: Spread::OneCache,
@@ -134,6 +134,11 @@ pub const FAMILIES: [Row; 15] = [
     },
     Row {
         model_type: "moonshine",
+        spread: Spread::OneCache,
+        load: |files, c, p, d| Ok(Box::new(moonshine::Moonshine::load(files, c, p, d)?)),
+    },
+    Row {
+        model_type: "moonshine_streaming",
         spread: Spread::OneCache,
         load: |files, c, p, d| Ok(Box::new(moonshine::Moonshine::load(files, c, p, d)?)),
     },
