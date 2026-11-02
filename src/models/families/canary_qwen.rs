@@ -9,7 +9,7 @@ use crate::cpu::{buf::Buf, gemm::Dense};
 use crate::models::config::Json;
 use crate::models::files::Files;
 use crate::models::layers::linear;
-use crate::models::parts::{fastconformer as conformer, qwen3::Qwen3};
+use crate::models::parts::{causal_lm::CausalLm, fastconformer as conformer};
 use crate::text::bpe::Bpe;
 use crate::{Device, Options, Precision};
 
@@ -23,7 +23,7 @@ pub struct CanaryQwen {
     encoder: conformer::Parakeet,
     /// From the encoder width to the language model's.
     projection: Dense,
-    decoder: Qwen3,
+    decoder: CausalLm,
     bpe: Bpe,
     /// The prompt before and after the audio frames.
     head: Vec<usize>,
@@ -43,7 +43,7 @@ impl CanaryQwen {
         let frontend = MelFrontend::new(config.mels).normalized(config.normalize_features);
         let width = config.hidden;
         let encoder = conformer::Parakeet::load(&t, config)?;
-        let decoder = Qwen3::from_tensors(&t, json, ("llm_config.", "llm."))?;
+        let decoder = CausalLm::from_tensors(&t, json, ("llm_config.", "llm."))?;
         let projection = linear(&t, "model.encoder_decoder_proj", decoder.width(), width)?;
         drop(t);
         encoder.warm_positions();

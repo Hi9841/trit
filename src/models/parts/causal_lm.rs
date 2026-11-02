@@ -1,8 +1,10 @@
-//! Qwen3 decoder-only language model (Hugging Face `Qwen3ForCausalLM`):
-//! RMS norms, per-head q and k norms, grouped-query attention with rotary
-//! positions, and a SwiGLU MLP. Trit uses it for text models that work on
-//! a transcript, such as Superwhisper S1-mini, and as the text decoder of
-//! Qwen3-ASR.
+//! Decoder-only language models of the Llama plan (Hugging Face
+//! `Qwen3ForCausalLM`, `LlamaForCausalLM`, `MistralForCausalLM`,
+//! `GraniteForCausalLM`): RMS norms, grouped-query attention with rotary
+//! positions (halves), and a SwiGLU MLP. Qwen3 adds per-head q and k norms;
+//! Granite scales the embeddings, the attention scores, the residuals, and
+//! the logits. Trit uses it for text models that work on a transcript, such
+//! as Superwhisper S1-mini, and as the text decoder of the audio-LLM families.
 
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
 use crate::models::config::Json;
@@ -11,6 +13,15 @@ use crate::models::layers::{add_into, argmax, attention, linear, stacked, RmsNor
 use crate::{Device, Precision};
 
 struct Config {
+    /// Per-head RMS norms on q and k (Qwen3).
+    qk_norm: bool,
+    /// Granite's multipliers: on the input embeddings, the attention scores
+    /// (instead of `1 / sqrt(head_dim)`), each residual branch, and (as a
+    /// divisor) the logits. 1 (and `None`) elsewhere.
+    embedding_multiplier: f32,
+    attention_multiplier: Option<f32>,
+    residual_multiplier: f32,
+    logits_scaling: f32,
     d: usize,
     ffn: usize,
     layers: usize,
@@ -28,18 +39,34 @@ impl Config {
     fn parse(json: &Json, at: &str) -> Result<Self, String> {
         let key = |name: &str| format!("{at}{name}");
         let num = |name: &str| json.num(&key(name));
+        let float = |name: &str| json.float(&key(name)).map(|v| v as f32);
         let heads = num("num_attention_heads")?;
         let kv_heads = num("num_key_value_heads")?;
-        if json.str(&key("model_type")) != Some("qwen3") || !heads.is_multiple_of(kv_heads) {
-            return Err("config.json does not describe a Qwen3 model this engine runs".into());
+        let qk_norm = match json.str(&key("model_type")) {
+            Some("qwen3") => true,
+            Some("llama" | "mistral" | "granite") => false,
+            _ => {
+                return Err(
+                    "config.json does not describe a language model this engine runs".into(),
+                )
+            }
+        };
+        if !heads.is_multiple_of(kv_heads) {
+            return Err("config.json: the query heads do not share the key heads evenly".into());
         }
+        let d = num("hidden_size")?;
         Ok(Self {
-            d: num("hidden_size")?,
+            qk_norm,
+            embedding_multiplier: float("embedding_multiplier").unwrap_or(1.0),
+            attention_multiplier: float("attention_multiplier"),
+            residual_multiplier: float("residual_multiplier").unwrap_or(1.0),
+            logits_scaling: float("logits_scaling").unwrap_or(1.0),
+            d,
             ffn: num("intermediate_size")?,
             layers: num("num_hidden_layers")?,
             heads,
             kv_heads,
-            head_dim: num("head_dim")?,
+            head_dim: num("head_dim").unwrap_or(d / heads),
             vocab: num("vocab_size")?,
             eps: json.float(&key("rms_norm_eps")).unwrap_or(1e-6) as f32,
             rope_base: json.float(&key("rope_theta")).unwrap_or(1_000_000.0) as f32,
@@ -52,8 +79,8 @@ struct Layer {
     norm_attn: RmsNorm,
     /// q (heads), k and v (kv heads) stacked: one product.
     qkv: Dense,
-    q_norm: RmsNorm,
-    k_norm: RmsNorm,
+    /// Qwen3's per-head norms on q and k.
+    qk_norm: Option<(RmsNorm, RmsNorm)>,
     out: Dense,
     norm_mlp: RmsNorm,
     /// gate and up stacked: `2 * ffn` outputs.
@@ -61,7 +88,7 @@ struct Layer {
     down: Dense,
 }
 
-pub struct Qwen3 {
+pub struct CausalLm {
     config: Config,
     layers: Vec<Layer>,
     norm: RmsNorm,
@@ -72,14 +99,14 @@ pub struct Qwen3 {
     rotary: Rotary,
 }
 
-/// The caches of a prompt start; see `Qwen3::prefix`.
+/// The caches of a prompt start; see `CausalLm::prefix`.
 pub struct Prefix {
     tokens: Vec<usize>,
     keys: Vec<Vec<f32>>,
     values: Vec<Vec<f32>>,
 }
 
-impl Qwen3 {
+impl CausalLm {
     pub fn load(files: &Files, precision: Precision, device: Device) -> Result<Self, String> {
         let device = crate::active_device(device)?;
         let config = Json::parse(&files.read("config.json")?)?;
@@ -111,8 +138,13 @@ impl Qwen3 {
                     ],
                     d,
                 )?,
-                q_norm: RmsNorm::load(t, &a("q_norm"), hd, c.eps)?,
-                k_norm: RmsNorm::load(t, &a("k_norm"), hd, c.eps)?,
+                qk_norm: match c.qk_norm {
+                    true => Some((
+                        RmsNorm::load(t, &a("q_norm"), hd, c.eps)?,
+                        RmsNorm::load(t, &a("k_norm"), hd, c.eps)?,
+                    )),
+                    false => None,
+                },
                 out: linear(t, &a("o_proj"), d, c.heads * hd)?,
                 norm_mlp: RmsNorm::load(t, &format!("{p}.post_attention_layernorm"), d, c.eps)?,
                 gate_up: stacked(t, &[&m("gate_proj"), &m("up_proj")], c.ffn, d)?,
@@ -264,17 +296,29 @@ impl Qwen3 {
         let c = &self.config;
         let (d, hd, m) = (c.d, c.head_dim, x.len() / c.d);
         let (qd, kv) = (c.heads * hd, c.kv_heads * hd);
+        scale(&mut x, c.embedding_multiplier);
+        // `attention` divides by sqrt(head_dim); Granite's multiplier replaces that.
+        let q_scale = c
+            .attention_multiplier
+            .map_or(1.0, |multiplier| multiplier * (hd as f32).sqrt());
         for (l, layer) in self.layers.iter().enumerate() {
             let normed = layer.norm_attn.apply(&x);
             let mut qkv = layer.qkv.forward(&normed, m);
-            team::chunks_mut(&mut qkv, qd + 2 * kv, |_, row| {
-                layer.q_norm.apply_in_place(&mut row[..qd]);
-                layer.k_norm.apply_in_place(&mut row[qd..qd + kv]);
-            });
+            if let Some((q_norm, k_norm)) = &layer.qk_norm {
+                team::chunks_mut(&mut qkv, qd + 2 * kv, |_, row| {
+                    q_norm.apply_in_place(&mut row[..qd]);
+                    k_norm.apply_in_place(&mut row[qd..qd + kv]);
+                });
+            }
             self.rotary
                 .apply(&mut qkv, (m, qd + 2 * kv), (c.heads, hd), first);
             self.rotary
                 .apply(&mut qkv[qd..], (m, qd + 2 * kv), (c.kv_heads, hd), first);
+            if q_scale != 1.0 {
+                team::chunks_mut(&mut qkv, qd + 2 * kv, |_, row| {
+                    row[..qd].iter_mut().for_each(|v| *v *= q_scale)
+                });
+            }
             for row in qkv.chunks_exact(qd + 2 * kv) {
                 keys[l].extend_from_slice(&row[qd..qd + kv]);
                 values[l].extend_from_slice(&row[qd + kv..]);
@@ -288,7 +332,7 @@ impl Qwen3 {
                 (qd, c.heads, c.kv_heads),
                 true,
             );
-            add_into(&mut x, &layer.out.forward(&att, m));
+            add_residual(&mut x, &layer.out.forward(&att, m), c.residual_multiplier);
             let normed = layer.norm_mlp.apply(&x);
             let wide = layer.gate_up.forward(&normed, m);
             let mut hidden = Buf::scratch(m * c.ffn);
@@ -300,9 +344,35 @@ impl Qwen3 {
                     *h *= up;
                 }
             });
-            add_into(&mut x, &layer.down.forward(&hidden, m));
+            add_residual(
+                &mut x,
+                &layer.down.forward(&hidden, m),
+                c.residual_multiplier,
+            );
         }
         let last = self.norm.apply(&x[(m - 1) * d..]);
-        self.head.as_ref().unwrap_or(&self.embed).forward(&last, 1)
+        let mut logits = self.head.as_ref().unwrap_or(&self.embed).forward(&last, 1);
+        scale(&mut logits, 1.0 / c.logits_scaling);
+        logits
     }
+}
+
+/// `x *= w`; nothing for 1, so a model without multipliers keeps its sums.
+fn scale(x: &mut [f32], w: f32) {
+    if w != 1.0 {
+        team::chunks_mut(x, 4096, |_, values| values.iter_mut().for_each(|v| *v *= w));
+    }
+}
+
+/// `x += w * y`; `add_into` for 1.
+fn add_residual(x: &mut [f32], y: &[f32], w: f32) {
+    if w == 1.0 {
+        add_into(x, y);
+        return;
+    }
+    team::chunks_mut(x, 4096, |i, row| {
+        for (o, v) in row.iter_mut().zip(&y[i * 4096..]) {
+            *o += w * v;
+        }
+    });
 }

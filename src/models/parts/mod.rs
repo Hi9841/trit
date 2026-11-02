@@ -4,6 +4,7 @@
 //! convolutions of the voice.
 
 pub mod beam;
+pub mod causal_lm;
 pub mod conv;
 pub mod ctc;
 pub mod dictionary;
@@ -11,6 +12,5 @@ pub mod fastconformer;
 pub mod logit_bias;
 pub mod lstm;
 pub mod moonshine_streaming;
-pub mod qwen3;
 pub mod sanm;
 pub mod transducer;

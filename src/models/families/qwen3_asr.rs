@@ -12,7 +12,7 @@ use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
 use crate::models::config::Json;
 use crate::models::files::Files;
 use crate::models::layers::{add_into, attention, linear, stacked, Gelu, Norm};
-use crate::models::parts::qwen3::Qwen3;
+use crate::models::parts::causal_lm::CausalLm;
 use crate::text::bpe::Bpe;
 use crate::{Device, Options, Precision};
 use parking_lot::RwLock;
@@ -146,7 +146,7 @@ struct AudioEncoder {
 
 pub struct Qwen3Asr {
     encoder: AudioEncoder,
-    decoder: Qwen3,
+    decoder: CausalLm,
     mel: WhisperMel,
     bpe: Bpe,
     /// `<|audio_pad|>`, replaced by the audio frames.
@@ -168,7 +168,7 @@ impl Qwen3Asr {
     ) -> Result<Self, String> {
         let t = files.tensors(precision, device)?;
         let encoder = AudioEncoder::load(&t, AudioConfig::parse(json)?)?;
-        let decoder = Qwen3::from_tensors(&t, json, (TEXT, "thinker."))?;
+        let decoder = CausalLm::from_tensors(&t, json, (TEXT, "thinker."))?;
         drop(t);
         if decoder.width() != encoder.config.out {
             return Err(

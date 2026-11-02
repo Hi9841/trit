@@ -11,7 +11,7 @@ use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
 use crate::models::config::Json;
 use crate::models::files::Files;
 use crate::models::layers::{add_into, attention, linear, Norm};
-use crate::models::parts::{qwen3::Qwen3, sanm};
+use crate::models::parts::{causal_lm::CausalLm, sanm};
 use crate::text::bpe::Bpe;
 use crate::{Device, Options, Precision};
 
@@ -138,7 +138,7 @@ pub struct FunAsr {
     frontend: KaldiFbank,
     encoder: sanm::Encoder,
     adaptor: Adaptor,
-    decoder: Qwen3,
+    decoder: CausalLm,
     bpe: Bpe,
     head: Vec<usize>,
     tail: Vec<usize>,
@@ -157,7 +157,7 @@ impl FunAsr {
         let frontend = sanm::frontend(json, &t, &shape)?;
         let encoder = sanm::Encoder::load(&t, "audio_encoder", shape)?;
         let adaptor = Adaptor::load(&t, json)?;
-        let decoder = Qwen3::from_tensors(&t, json, ("llm_config.", "llm."))?;
+        let decoder = CausalLm::from_tensors(&t, json, ("llm_config.", "llm."))?;
         drop(t);
         if decoder.width() != adaptor.d {
             return Err("config.json: the adaptor and the language model differ in width".into());

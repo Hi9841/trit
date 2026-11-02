@@ -5,7 +5,7 @@
 //! (see its model card): a fixed system prompt, a control line, then the
 //! raw transcript.
 
-use crate::models::parts::qwen3::{Prefix, Qwen3};
+use crate::models::parts::causal_lm::{CausalLm, Prefix};
 use crate::text::bpe::Bpe;
 use std::path::Path;
 
@@ -118,7 +118,7 @@ fn system_prefix() -> String {
 
 /// A loaded cleanup model. Load once and keep it.
 pub struct Cleaner {
-    model: Qwen3,
+    model: CausalLm,
     /// The system prompt, run once at load: every call starts with it.
     system: Prefix,
     bpe: Bpe,
@@ -155,7 +155,7 @@ impl Cleaner {
                 dir.display()
             ));
         }
-        let model = Qwen3::load(
+        let model = CausalLm::load(
             &crate::models::files::Files::open(dir)?,
             options.precision,
             options.device,
