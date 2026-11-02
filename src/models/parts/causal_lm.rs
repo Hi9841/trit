@@ -336,10 +336,46 @@ impl CausalLm {
     /// `forward` from embeddings, `rows x width`.
     fn forward_rows(
         &self,
-        mut x: Buf,
+        x: Buf,
         first: usize,
         keys: &mut [Vec<f32>],
         values: &mut [Vec<f32>],
+    ) -> Buf {
+        let c = &self.config;
+        let d = c.d;
+        let m = x.len() / d;
+        let x = self.hidden(x, first, (keys, values), true);
+        let last = self.norm.apply(&x[(m - 1) * d..]);
+        let mut logits = self.head.as_ref().unwrap_or(&self.embed).forward(&last, 1);
+        scale(&mut logits, 1.0 / c.logits_scaling);
+        logits
+    }
+
+    /// The best token of each row from `from` on after one pass over all
+    /// `rows` with no causal mask (Granite Speech NAR's editor).
+    pub fn bidirectional_tokens(&self, rows: Buf, from: usize) -> Vec<usize> {
+        let c = &self.config;
+        let d = c.d;
+        let m = rows.len() / d;
+        let mut keys = vec![Vec::with_capacity(m * c.kv_heads * c.head_dim); c.layers];
+        let mut values = vec![Vec::with_capacity(m * c.kv_heads * c.head_dim); c.layers];
+        let x = self.hidden(rows, 0, (&mut keys, &mut values), false);
+        let normed = self.norm.apply(&x[from * d..]);
+        let logits = self
+            .head
+            .as_ref()
+            .unwrap_or(&self.embed)
+            .forward(&normed, m - from);
+        logits.chunks_exact(c.vocab).map(argmax).collect()
+    }
+
+    /// The hidden states after every layer, before the final norm.
+    fn hidden(
+        &self,
+        mut x: Buf,
+        first: usize,
+        (keys, values): (&mut [Vec<f32>], &mut [Vec<f32>]),
+        causal: bool,
     ) -> Buf {
         let c = &self.config;
         let (d, hd, m) = (c.d, c.head_dim, x.len() / c.d);
@@ -378,7 +414,7 @@ impl CausalLm {
                 (&values[l], kv),
                 (m, seen),
                 (qd, c.heads, c.kv_heads),
-                true,
+                causal,
             );
             add_residual(&mut x, &layer.out.forward(&att, m), c.residual_multiplier);
             let mut normed = layer.norm_mlp.apply(&x);
@@ -404,10 +440,7 @@ impl CausalLm {
                 c.residual_multiplier,
             );
         }
-        let last = self.norm.apply(&x[(m - 1) * d..]);
-        let mut logits = self.head.as_ref().unwrap_or(&self.embed).forward(&last, 1);
-        scale(&mut logits, 1.0 / c.logits_scaling);
-        logits
+        x
     }
 }
 

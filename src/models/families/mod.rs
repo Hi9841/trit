@@ -6,6 +6,7 @@ pub mod canary;
 pub mod canary_qwen;
 pub mod fun_asr;
 pub mod granite_ctc;
+pub mod granite_nar;
 pub mod granite_speech;
 pub mod moonshine;
 pub mod moss;

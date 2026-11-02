@@ -12,8 +12,8 @@ pub mod nemo;
 pub mod parts;
 
 use families::{
-    canary, canary_qwen, fun_asr, granite_ctc, granite_speech, moonshine, moss, parakeet,
-    qwen3_asr, sensevoice, voxtral, voxtral_realtime, wav2vec2, whisper,
+    canary, canary_qwen, fun_asr, granite_ctc, granite_nar, granite_speech, moonshine, moss,
+    parakeet, qwen3_asr, sensevoice, voxtral, voxtral_realtime, wav2vec2, whisper,
 };
 
 use crate::{BiasWeights, Device, Options, Precision, Segment, Spread};
@@ -96,7 +96,7 @@ pub struct Row {
 }
 
 /// Every family, by `model_type`. Tall products (Whisper) use every core.
-pub const FAMILIES: [Row; 20] = [
+pub const FAMILIES: [Row; 21] = [
     Row {
         model_type: "parakeet_tdt",
         spread: Spread::OneCache,
@@ -194,6 +194,11 @@ pub const FAMILIES: [Row; 20] = [
         model_type: "moss",
         spread: Spread::OneCache,
         load: |files, c, p, d| Ok(Box::new(moss::Moss::load(files, c, p, d)?)),
+    },
+    Row {
+        model_type: "granite_speech_nar",
+        spread: Spread::OneCache,
+        load: |files, c, p, d| Ok(Box::new(granite_nar::GraniteNar::load(files, c, p, d)?)),
     },
     Row {
         model_type: "granite_ctc",
@@ -465,6 +470,22 @@ impl Family for moss::Moss {
         windowed(self.pieces(samples, options))
     }
     /// The hotword prompt is not wired yet: every term is skipped.
+    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
+        terms.to_vec()
+    }
+}
+
+impl Family for granite_nar::GraniteNar {
+    fn kind(&self) -> &'static str {
+        "granite_speech_nar"
+    }
+    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
+        joined(self.pieces(samples, options))
+    }
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        windowed(self.pieces(samples, options))
+    }
+    /// A one-pass editor with no term bias: every term is skipped.
     fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
         terms.to_vec()
     }

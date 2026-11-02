@@ -17,6 +17,7 @@ mod cohere;
 mod fun_asr;
 mod gigaam;
 mod granite_ctc;
+mod granite_nar;
 mod granite_speech;
 mod medasr;
 mod moonshine;
@@ -48,6 +49,7 @@ enum Arch {
     Cohere,
     VoxtralRealtime,
     Moss,
+    GraniteNar,
 }
 
 /// What a tensor of the file becomes.
@@ -183,8 +185,9 @@ impl Gguf {
             Some("cohere_asr") => Ok(Arch::Cohere),
             Some("voxtral_realtime") => Ok(Arch::VoxtralRealtime),
             Some("moss") => Ok(Arch::Moss),
+            Some("granite_speech_nar") => Ok(Arch::GraniteNar),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, moonshine_streaming, granite_speech, voxtral, cohere_asr, voxtral_realtime, and moss",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, moonshine_streaming, granite_speech, voxtral, cohere_asr, voxtral_realtime, moss, and granite_speech_nar",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -234,6 +237,7 @@ impl Gguf {
                 Arch::Cohere => cohere::hf_name(name),
                 Arch::VoxtralRealtime => voxtral_realtime::hf_name(name),
                 Arch::Moss => moss::hf_name(name),
+                Arch::GraniteNar => granite_nar::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -273,6 +277,9 @@ impl Gguf {
             (Arch::Canary, "config.json") => {
                 canary::config(self).map(|v| v.to_string()).map_err(fail)
             }
+            (Arch::GraniteNar, "config.json") => granite_nar::config(self)
+                .map(|v| v.to_string())
+                .map_err(fail),
             (Arch::Moss, "config.json") => moss::config(self).map(|v| v.to_string()).map_err(fail),
             (Arch::VoxtralRealtime, "config.json") => voxtral_realtime::config(self)
                 .map(|v| v.to_string())

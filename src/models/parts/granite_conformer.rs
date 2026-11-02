@@ -37,9 +37,11 @@ pub struct Config {
     self_conditioning: usize,
     /// Blocks that halve the time.
     pub subsample: Vec<usize>,
-    /// Blocks whose output (before the self-conditioning) joins the last
-    /// block's output, channels side by side (4.1 plus).
+    /// Blocks whose output (after the self-conditioning) the encoder
+    /// returns, channels side by side: with the last block's after them
+    /// (4.1 plus), or alone (4.1 NAR, whose list ends with the last block).
     cat_layers: Vec<usize>,
+    cat_with_last: bool,
 }
 
 impl Config {
@@ -70,6 +72,7 @@ impl Config {
             self_conditioning: enc("self_conditioning_layer").unwrap_or(layers / 2),
             subsample: list("subsample_layers"),
             cat_layers: list("cat_hidden_layers"),
+            cat_with_last: json.flag("encoder_config.cat_with_last") != Some(false),
         };
         if config.heads * config.head_dim != d
             || config.kernel.is_multiple_of(2)
@@ -82,9 +85,15 @@ impl Config {
         Ok(config)
     }
 
-    /// Channels of the encoder output: the last block's, plus each `cat_layers` block's.
+    /// Channels of the encoder output: each `cat_layers` block's, and the
+    /// last block's unless only the listed ones.
     pub fn width(&self) -> usize {
-        self.d * (1 + self.cat_layers.len())
+        let last = if self.cat_layers.is_empty() || self.cat_with_last {
+            1
+        } else {
+            0
+        };
+        self.d * (self.cat_layers.len() + last)
     }
 }
 
@@ -408,6 +417,16 @@ fn add_scaled(x: &mut [f32], y: &[f32], scale: f32) {
     });
 }
 
+/// What `Encoder::encode_all` returns.
+pub struct Encoded {
+    pub joined: Buf,
+    /// The last block's output, `t x d`.
+    pub last: Buf,
+    pub t: usize,
+    /// The self-conditioning CTC's blank probability per frame (channel 0).
+    pub blank: Vec<f32>,
+}
+
 pub struct Encoder {
     pub config: Config,
     input: Dense,
@@ -435,33 +454,59 @@ impl Encoder {
 
     /// The encoder output, `t x width()`, from `frames` stacked features.
     pub fn encode(&self, features: &[f32], frames: usize) -> (Buf, usize) {
+        let encoded = self.encode_all(features, frames);
+        (encoded.joined, encoded.t)
+    }
+
+    /// The output (`joined`, `t x width()`), the last block's output, and
+    /// the blank's probability under the self-conditioning CTC per frame.
+    pub fn encode_all(&self, features: &[f32], frames: usize) -> Encoded {
         let c = &self.config;
         let (mut x, mut t) = (self.input.forward(features, frames), frames);
         let mut kept = Vec::new();
+        let mut blank = Vec::new();
         for (i, block) in self.blocks.iter().enumerate() {
             (x, t) = block.forward(x, t, c, c.subsample.contains(&i));
-            if c.cat_layers.contains(&i) {
-                kept.push(x.to_vec());
-            }
             if i + 1 == c.self_conditioning {
                 let mut soft = self.ctc.forward(&x, t);
                 team::chunks_mut(&mut soft, c.ctc_dim, |_, row| softmax(row));
+                blank = soft.chunks_exact(c.ctc_dim).map(|row| row[0]).collect();
                 add_into(&mut x, &self.bypass.forward(&soft, t));
+            }
+            if c.cat_layers.contains(&i) {
+                kept.push(x.to_vec());
             }
         }
         if kept.is_empty() {
-            return (x, t);
+            let mut last = Buf::scratch(x.len());
+            last.copy_from_slice(&x);
+            return Encoded {
+                joined: x,
+                last,
+                t,
+                blank,
+            };
         }
         // The kept outputs first, the last block's after, per frame.
         let width = c.width();
-        let parts: Vec<&[f32]> = kept.iter().map(Vec::as_slice).chain([&x[..]]).collect();
+        let tail: &[&[f32]] = if c.cat_with_last { &[&x[..]] } else { &[] };
+        let parts: Vec<&[f32]> = kept
+            .iter()
+            .map(Vec::as_slice)
+            .chain(tail.iter().copied())
+            .collect();
         let mut joined = Buf::scratch(t * width);
         team::chunks_mut(&mut joined, width, |f, row| {
             for (k, part) in parts.iter().enumerate() {
                 row[k * c.d..(k + 1) * c.d].copy_from_slice(&part[f * c.d..(f + 1) * c.d]);
             }
         });
-        (joined, t)
+        Encoded {
+            joined,
+            last: x,
+            t,
+            blank,
+        }
     }
 
     /// CTC logits of encoder output `x` (`t x d`).
