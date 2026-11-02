@@ -2,9 +2,10 @@
 
 Trit is a speech-to-text and text-to-speech engine for the CPU, written in
 Rust. It runs Parakeet, Canary, Whisper, Moonshine, Qwen3-ASR, and wav2vec 2.0
-checkpoints as published on Hugging Face, with its own kernels: no Python, no
-PyTorch, no ONNX Runtime. It can also clean a transcript with Superwhisper
-S1-mini, and speak text with Kokoro-82M (28 English voices) or a VITS voice.
+checkpoints as published on Hugging Face, and Parakeet GGUF (F32, F16, Q8_0)
+and NeMo files, with its own kernels: no Python, no PyTorch, no ONNX Runtime.
+It can also clean a transcript with Superwhisper S1-mini, and speak text with
+Kokoro-82M (28 English voices) or a VITS voice.
 
 [TDT](https://github.com/Hi9841/tdt), an offline dictation app for Windows,
 uses Trit for all of its speech. Trit is free for noncommercial use only
@@ -63,7 +64,8 @@ The other models, the GPU, text to speech, and the full results are in the
 | Model | Size | Word error rate | Time per clip | Use it for |
 |---|---:|---:|---:|---|
 | `parakeet-redux` | 178 MB | 3.37 % | 36 ms | The default: small, fast, accurate. TDT uses it. |
-| `parakeet-tdt-0.6b-v3` | 2.5 GB | **2.38 %** | 39 ms | The fewest errors. 25 European languages. |
+| `parakeet-unified-en-0.6b-q8_0` | 731 MB | **2.05 %** | 50 ms | The fewest errors, in English. A Q8_0 GGUF file. |
+| `parakeet-tdt-0.6b-v3` | 2.5 GB | 2.38 % | 39 ms | The fewest errors in 25 European languages. |
 | `moonshine-tiny` | 108 MB | 6.41 % | 37 ms | The smallest English model. |
 | `whisper-tiny` | 151 MB | 8.75 % | 67 ms | 99 languages in a small model. |
 
@@ -73,7 +75,8 @@ Trit is under the [PolyForm Noncommercial License 1.0.0](LICENSE). You can
 use, change, and share it for any noncommercial purpose. You cannot sell it
 or use it to make money.
 
-Each model has its own license: Parakeet and Canary CC-BY-4.0, Whisper and
+Each model has its own license: Parakeet and Canary CC-BY-4.0 (Parakeet
+Unified English: the NVIDIA Open Model License), Whisper and
 Moonshine MIT, S1-mini Apache-2.0 with a naming clause, MMS-TTS
 CC-BY-NC-4.0 (noncommercial), Kokoro-82M and the G2P fallback Apache-2.0.
 Follow it when you ship the model. The phonemizer's lexicons (misaki, Apache-2.0) and
