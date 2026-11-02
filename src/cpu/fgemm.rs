@@ -1,7 +1,12 @@
 //! f32 matrix product `out = x * w^T` for row-major `x` (m x k) and `w`
 //! (n x k). Both operands are read along k, so every output is a dot
-//! product. Register tiles keep 4 x 4 (AVX-512) or 3 x 4 (AVX2) dot
-//! products in flight and reduce each one once at the end. `w` holds f32
+//! product. Register tiles keep 4 x 3 dot products in flight (AVX-512 and
+//! AVX2) and reduce each one once at the end. Two limits pick the shape:
+//! a tile reads R + C rows at once, and rows of a power-of-two length
+//! (1024, 4096) fall into one set of the 8-way L1 cache, so 8 rows or more
+//! evict each other (4 x 4 and 6 x 4 were slower); and AVX2 has 16
+//! registers, which 4 x 3 fills exactly (12 sums, 3 weight rows, 1 input
+//! row) where 3 x 4 needed 17. A value's sum does not depend on the tile. `w` holds f32
 //! or f16 values (`Weight`); f16 rows widen to f32 as they load, so a model
 //! stored in f16 keeps half the memory and reads half the bytes.
 
@@ -298,24 +303,20 @@ mod avx512 {
             let r = (rows.end - i).min(4);
             let mut j = cols.start;
             while j < cols.end {
-                let c = (cols.end - j).min(4);
+                let c = (cols.end - j).min(3);
                 let xp = x.as_ptr().add(i * k);
                 let wp = w.as_ptr().add(j * k);
                 let op = out.add(i * n + j);
                 match (r, c) {
-                    (4, 4) => tile::<4, 4, W>(xp, wp, k, op, n),
                     (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n),
                     (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n),
                     (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n),
-                    (3, 4) => tile::<3, 4, W>(xp, wp, k, op, n),
                     (3, 3) => tile::<3, 3, W>(xp, wp, k, op, n),
                     (3, 2) => tile::<3, 2, W>(xp, wp, k, op, n),
                     (3, 1) => tile::<3, 1, W>(xp, wp, k, op, n),
-                    (2, 4) => tile::<2, 4, W>(xp, wp, k, op, n),
                     (2, 3) => tile::<2, 3, W>(xp, wp, k, op, n),
                     (2, 2) => tile::<2, 2, W>(xp, wp, k, op, n),
                     (2, 1) => tile::<2, 1, W>(xp, wp, k, op, n),
-                    (1, 4) => tile::<1, 4, W>(xp, wp, k, op, n),
                     (1, 3) => tile::<1, 3, W>(xp, wp, k, op, n),
                     (1, 2) => tile::<1, 2, W>(xp, wp, k, op, n),
                     _ => tile::<1, 1, W>(xp, wp, k, op, n),
@@ -395,23 +396,23 @@ mod avx2 {
     ) {
         let mut i = rows.start;
         while i < rows.end {
-            let r = (rows.end - i).min(3);
+            let r = (rows.end - i).min(4);
             let mut j = cols.start;
             while j < cols.end {
-                let c = (cols.end - j).min(4);
+                let c = (cols.end - j).min(3);
                 let xp = x.as_ptr().add(i * k);
                 let wp = w.as_ptr().add(j * k);
                 let op = out.add(i * n + j);
                 match (r, c) {
-                    (3, 4) => tile::<3, 4, W>(xp, wp, k, op, n),
+                    (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n),
+                    (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n),
+                    (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n),
                     (3, 3) => tile::<3, 3, W>(xp, wp, k, op, n),
                     (3, 2) => tile::<3, 2, W>(xp, wp, k, op, n),
                     (3, 1) => tile::<3, 1, W>(xp, wp, k, op, n),
-                    (2, 4) => tile::<2, 4, W>(xp, wp, k, op, n),
                     (2, 3) => tile::<2, 3, W>(xp, wp, k, op, n),
                     (2, 2) => tile::<2, 2, W>(xp, wp, k, op, n),
                     (2, 1) => tile::<2, 1, W>(xp, wp, k, op, n),
-                    (1, 4) => tile::<1, 4, W>(xp, wp, k, op, n),
                     (1, 3) => tile::<1, 3, W>(xp, wp, k, op, n),
                     (1, 2) => tile::<1, 2, W>(xp, wp, k, op, n),
                     _ => tile::<1, 1, W>(xp, wp, k, op, n),
