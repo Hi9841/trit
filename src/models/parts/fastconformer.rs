@@ -51,6 +51,62 @@ pub struct Config {
     pub head: HeadKind,
     /// Before every `encoder.` tensor name: `model.` in Canary files.
     pub prefix: &'static str,
+    /// Which keys a query attends to.
+    pub attention: Attention,
+    /// Frames before and after a frame that the depthwise conv reads:
+    /// `(kernel - 1) / 2` each, or `(kernel - 1, 0)` for a causal conv.
+    pub conv_context: (usize, usize),
+}
+
+/// The keys of self-attention, as NeMo's `att_context_size` and
+/// `att_context_style` set them. Hugging Face folders give `Full`; a GGUF
+/// file of a model trained with a limited context gives the others
+/// (`encoder_config.attention_context`, `attention_style`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attention {
+    Full,
+    /// `regular` local attention: keys `i - left ..= i + right`.
+    Band { left: usize, right: usize },
+    /// `chunked_limited` (cache-aware streaming): chunks of `right + 1`
+    /// frames; a query reads its own chunk and `left / (right + 1)` before it.
+    Chunked { chunk: usize, left_chunks: usize },
+}
+
+impl Attention {
+    fn parse(json: &Json) -> Result<Self, String> {
+        let Some(sides) = json.get("encoder_config.attention_context").as_array() else {
+            return Ok(Self::Full);
+        };
+        let side = |i: usize| sides.get(i).and_then(|v| v.as_i64()).unwrap_or(-1);
+        let (left, right) = (side(0), side(1));
+        if left < 0 && right < 0 {
+            return Ok(Self::Full);
+        }
+        if left < 0 || right < 0 {
+            return Err("config.json: an attention context with one open side".into());
+        }
+        let (left, right) = (left as usize, right as usize);
+        match json.str("encoder_config.attention_style").unwrap_or("regular") {
+            "regular" => Ok(Self::Band { left, right }),
+            "chunked_limited" => Ok(Self::Chunked {
+                chunk: right + 1,
+                left_chunks: left / (right + 1),
+            }),
+            other => Err(format!("config.json: attention style `{other}` is not run")),
+        }
+    }
+
+    /// The keys query `i` reads, as a range of `0..t`.
+    fn keys(self, i: usize, t: usize) -> std::ops::Range<usize> {
+        match self {
+            Self::Full => 0..t,
+            Self::Band { left, right } => i.saturating_sub(left)..(i + right + 1).min(t),
+            Self::Chunked { chunk, left_chunks } => {
+                let own = i / chunk;
+                own.saturating_sub(left_chunks) * chunk..((own + 1) * chunk).min(t)
+            }
+        }
+    }
 }
 
 /// What follows the encoder.
@@ -126,12 +182,24 @@ impl Config {
             } else {
                 ""
             },
+            attention: Attention::parse(json)?,
+            conv_context: match json.get("encoder_config.conv_context").as_array() {
+                Some(sides) => (
+                    sides.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                    sides.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                ),
+                None => {
+                    let half = (enc("conv_kernel_size")? - 1) / 2;
+                    (half, half)
+                }
+            },
         };
         if !config.hidden.is_multiple_of(config.heads)
             || !config.mels.is_multiple_of(8)
             || (head == HeadKind::Transducer && config.durations.is_empty())
             || (transducer && config.max_symbols == 0)
             || config.blank >= config.vocab
+            || config.conv_context.0 + config.conv_context.1 + 1 != config.conv_kernel
         {
             return Err("config.json has inconsistent sizes".into());
         }
@@ -635,6 +703,14 @@ impl Block {
                         *value = (*value + p) * scale;
                         max = max.max(*value);
                     }
+                    let keys = c.attention.keys(i, t);
+                    if keys != (0..t) {
+                        // Keys outside the context get no weight; the
+                        // largest score is the largest of the ones kept.
+                        row[..keys.start].fill(f32::NEG_INFINITY);
+                        row[keys.end..].fill(f32::NEG_INFINITY);
+                        max = row[keys.clone()].iter().fold(f32::NEG_INFINITY, |m, v| m.max(*v));
+                    }
                     row.iter_mut().for_each(|value| *value -= max);
                     activation::exp(row);
                     let inv = 1.0 / row.iter().sum::<f32>();
@@ -667,7 +743,7 @@ impl Block {
         // Accumulated with +=: the one buffer here that must start at zero.
         let mut mixed = Buf::zeroed(t * d);
         team::chunks_mut(&mut mixed, d, |i, out| {
-            time_conv_row(self, &gated, (t, kernel), i, out);
+            time_conv_row(self, &gated, (t, kernel, c.conv_context.0), i, out);
             activation::silu(out);
         });
         self.pw2.forward(&mixed, t)
@@ -677,10 +753,10 @@ impl Block {
 multiversion! {
     /// Frame `i` of the conv module's depthwise conv over time, then its batch
     /// norm. `out` starts at zero.
-    fn time_conv_row(block: &Block, gated: &[f32], t_kernel: (usize, usize), i: usize, out: &mut [f32]) {
-        let (t, kernel) = t_kernel;
+    fn time_conv_row(block: &Block, gated: &[f32], t_kernel: (usize, usize, usize), i: usize, out: &mut [f32]) {
+        // `pad`: the frames before frame i that tap 0 reads (`conv_context.0`).
+        let (t, kernel, pad) = t_kernel;
         let d = out.len();
-        let pad = (kernel - 1) / 2;
         for k in 0..kernel {
             let src = i + k;
             if src < pad || src - pad >= t {

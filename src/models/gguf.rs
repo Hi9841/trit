@@ -145,18 +145,37 @@ impl Gguf {
             other => return Err(unsupported(&format!("head `{other}` is not read"))),
         };
         let enc = |key: &str| self.num(&format!("stt.parakeet.encoder.{key}"));
-        let full = ["att_context_left", "att_context_right"].iter().all(|key| {
+        let side = |key: &str| {
             self.get(&format!("stt.parakeet.encoder.{key}"))
                 .as_i64()
-                .is_none_or(|side| side == -1)
-        });
+                .unwrap_or(-1)
+        };
         let text = |key: &str| self.get(key).as_str().unwrap_or_default();
         let float = |key: &str| self.get(key).as_f64().unwrap_or(f64::NAN);
-        if !full {
-            return Err(unsupported(
-                "its attention context is limited (a streaming model)",
-            ));
-        }
+        let style = text("stt.parakeet.encoder.att_context_style");
+        // Offline, a chunked_limited_with_rc model (Unified) attends to
+        // the whole clip; its chunk menu is for streaming.
+        let style = match style {
+            "" | "regular" | "chunked_limited_with_rc" => "regular",
+            // Cache-aware streaming: also causal subsampling and conv; not read yet.
+            "chunked_limited" => {
+                return Err(unsupported(
+                    "it is a cache-aware streaming model; Trit does not run those yet",
+                ))
+            }
+            other => return Err(unsupported(&format!("attention style `{other}` is not run"))),
+        };
+        let kernel = enc("conv_kernel")?;
+        let conv = |key: &str, default: u64| {
+            self.get(&format!("stt.parakeet.encoder.{key}"))
+                .as_i64()
+                .filter(|v| *v >= 0)
+                .map_or(default, |v| v as u64)
+        };
+        let conv_context = [
+            conv("conv_context_left", (kernel - 1) / 2),
+            conv("conv_context_right", (kernel - 1) / 2),
+        ];
         if !matches!(
             text("stt.parakeet.encoder.conv_norm_type"),
             "" | "batch_norm"
@@ -194,6 +213,9 @@ impl Gguf {
                 "subsampling_conv_kernel_size": 3,
                 "subsampling_conv_stride": 2,
                 "scale_input": self.get("stt.parakeet.encoder.xscaling").as_bool().unwrap_or(false),
+                "attention_context": [side("att_context_left"), side("att_context_right")],
+                "attention_style": style,
+                "conv_context": conv_context,
             },
         });
         if model_type == "parakeet_ctc" {
