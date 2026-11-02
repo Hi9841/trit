@@ -13,6 +13,7 @@ on:
       - Cargo.toml
       - src/catalog.rs
       - bench/benchmarks.json
+      - bench/gguf-results.json
       - docs/engine-comparison.md
       - LICENSE
       - .github/workflows/pages.yml
