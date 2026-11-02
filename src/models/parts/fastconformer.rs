@@ -260,6 +260,7 @@ impl Config {
             Some("parakeet_rnnt") => ("parakeet_rnnt", HeadKind::Rnnt),
             Some("gigaam_rnnt") => ("gigaam_rnnt", HeadKind::Rnnt),
             Some("canary") => ("canary", HeadKind::Encoder),
+            Some("canary_qwen") => ("canary_qwen", HeadKind::Encoder),
             _ => ("parakeet_tdt", HeadKind::Transducer),
         };
         let enc = |key: &str| json.num(&format!("encoder_config.{key}"));

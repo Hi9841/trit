@@ -12,6 +12,8 @@ use crate::cpu::tensors::Tensors;
 use crate::{Device, Precision};
 
 mod canary;
+mod canary_qwen;
+mod fun_asr;
 mod gigaam;
 mod granite_ctc;
 mod medasr;
@@ -33,6 +35,8 @@ enum Arch {
     Sensevoice,
     Medasr,
     GraniteCtc,
+    CanaryQwen,
+    FunAsr,
 }
 
 /// What a tensor of the file becomes.
@@ -160,8 +164,10 @@ impl Gguf {
             Some("sensevoice") => Ok(Arch::Sensevoice),
             Some("medasr") => Ok(Arch::Medasr),
             Some("granite_speech5_ctc") => Ok(Arch::GraniteCtc),
+            Some("canary_qwen") => Ok(Arch::CanaryQwen),
+            Some("funasr_nano") => Ok(Arch::FunAsr),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, and granite_speech5_ctc",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, and funasr_nano",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -203,6 +209,8 @@ impl Gguf {
                 Arch::Sensevoice => sensevoice::hf_name(name),
                 Arch::Medasr => medasr::hf_name(name),
                 Arch::GraniteCtc => granite_ctc::hf_name(name),
+                Arch::CanaryQwen => canary_qwen::hf_name(name),
+                Arch::FunAsr => fun_asr::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -242,6 +250,12 @@ impl Gguf {
             (Arch::Canary, "config.json") => {
                 canary::config(self).map(|v| v.to_string()).map_err(fail)
             }
+            (Arch::FunAsr, "config.json") => {
+                fun_asr::config(self).map(|v| v.to_string()).map_err(fail)
+            }
+            (Arch::CanaryQwen, "config.json") => canary_qwen::config(self)
+                .map(|v| v.to_string())
+                .map_err(fail),
             (Arch::GraniteCtc, "config.json") => granite_ctc::config(self)
                 .map(|v| v.to_string())
                 .map_err(fail),

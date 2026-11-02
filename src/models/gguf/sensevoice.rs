@@ -73,17 +73,27 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
 
 /// A transcribe.cpp SenseVoice tensor name as FunASR's state dict names it.
 pub fn hf_name(name: &str) -> Option<Name> {
-    const TOP: [(&str, &str); 5] = [
+    const TOP: [(&str, &str); 3] = [
         ("frontend.cmvn.", "frontend.cmvn."),
         ("enc.embed.", "embed."),
-        ("enc.after_norm.", "encoder.after_norm."),
-        ("enc.tp_norm.", "encoder.tp_norm."),
         ("ctc.head.", "ctc.ctc_lo."),
     ];
     for (from, to) in TOP {
         if let Some(rest) = name.strip_prefix(from) {
             return Some(Name::To(format!("{to}{rest}")));
         }
+    }
+    encoder_name(name, "encoder")
+}
+
+/// A transcribe.cpp SAN-M encoder name (`enc.encoders0.0...`, as SenseVoice
+/// and Fun-ASR files name it) as FunASR names it under `prefix`.
+pub fn encoder_name(name: &str, prefix: &str) -> Option<Name> {
+    if let Some(rest) = name.strip_prefix("enc.after_norm.") {
+        return Some(Name::To(format!("{prefix}.after_norm.{rest}")));
+    }
+    if let Some(rest) = name.strip_prefix("enc.tp_norm.") {
+        return Some(Name::To(format!("{prefix}.tp_norm.{rest}")));
     }
     let rest = name.strip_prefix("enc.")?;
     let (stack, rest) = rest.split_once('.')?;
@@ -102,7 +112,7 @@ pub fn hf_name(name: &str) -> Option<Name> {
     ];
     let (from, to) = BLOCK.iter().find(|(from, _)| part.starts_with(from))?;
     Some(Name::To(format!(
-        "encoder.{stack}.{layer}.{to}{}",
+        "{prefix}.{stack}.{layer}.{to}{}",
         &part[from.len()..]
     )))
 }

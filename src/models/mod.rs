@@ -12,7 +12,8 @@ pub mod nemo;
 pub mod parts;
 
 use families::{
-    canary, granite_ctc, moonshine, parakeet, qwen3_asr, sensevoice, wav2vec2, whisper,
+    canary, canary_qwen, fun_asr, granite_ctc, moonshine, parakeet, qwen3_asr, sensevoice,
+    wav2vec2, whisper,
 };
 
 use crate::{BiasWeights, Device, Options, Precision, Segment, Spread};
@@ -95,7 +96,7 @@ pub struct Row {
 }
 
 /// Every family, by `model_type`. Tall products (Whisper) use every core.
-pub const FAMILIES: [Row; 13] = [
+pub const FAMILIES: [Row; 15] = [
     Row {
         model_type: "parakeet_tdt",
         spread: Spread::OneCache,
@@ -150,6 +151,16 @@ pub const FAMILIES: [Row; 13] = [
         model_type: "qwen3_asr",
         spread: Spread::OneCache,
         load: |files, c, p, d| Ok(Box::new(qwen3_asr::Qwen3Asr::load(files, c, p, d)?)),
+    },
+    Row {
+        model_type: "canary_qwen",
+        spread: Spread::OneCache,
+        load: |files, c, p, d| Ok(Box::new(canary_qwen::CanaryQwen::load(files, c, p, d)?)),
+    },
+    Row {
+        model_type: "fun_asr_nano",
+        spread: Spread::OneCache,
+        load: |files, c, p, d| Ok(Box::new(fun_asr::FunAsr::load(files, c, p, d)?)),
     },
     Row {
         model_type: "granite_ctc",
@@ -325,6 +336,38 @@ impl Family for wav2vec2::Wav2Vec2 {
         windowed(self.pieces(samples))
     }
     /// Characters with no decoder to steer: no term can be favored.
+    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
+        terms.to_vec()
+    }
+}
+
+impl Family for canary_qwen::CanaryQwen {
+    fn kind(&self) -> &'static str {
+        "canary_qwen"
+    }
+    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
+        joined(self.pieces(samples, options))
+    }
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        windowed(self.pieces(samples, options))
+    }
+    /// The language model has no term bias yet: every term is skipped.
+    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
+        terms.to_vec()
+    }
+}
+
+impl Family for fun_asr::FunAsr {
+    fn kind(&self) -> &'static str {
+        "fun_asr_nano"
+    }
+    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
+        joined(self.pieces(samples, options))
+    }
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        windowed(self.pieces(samples, options))
+    }
+    /// The hotword prompt is not wired yet: every term is skipped.
     fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
         terms.to_vec()
     }

@@ -80,7 +80,10 @@ pub fn hf_name(name: &str) -> Option<Name> {
     if name.starts_with("frontend.") {
         return Some(Name::Skip);
     }
-    const TOP: [(&str, &str); 9] = [
+    if name.starts_with("dec.") {
+        return language_model_name(name, "thinker.model");
+    }
+    const TOP: [(&str, &str); 7] = [
         ("enc.conv.0.", "thinker.audio_tower.conv2d1."),
         ("enc.conv.1.", "thinker.audio_tower.conv2d2."),
         ("enc.conv.2.", "thinker.audio_tower.conv2d3."),
@@ -88,15 +91,12 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("enc.ln_post.", "thinker.audio_tower.ln_post."),
         ("enc.proj1.", "thinker.audio_tower.proj1."),
         ("enc.proj2.", "thinker.audio_tower.proj2."),
-        ("dec.token_embd.", "thinker.model.embed_tokens."),
-        ("dec.output_norm.", "thinker.model.norm."),
     ];
     for (from, to) in TOP {
         if let Some(rest) = name.strip_prefix(from) {
             return Some(Name::To(format!("{to}{rest}")));
         }
     }
-    // The same GGUF suffix names a different norm in the two stacks.
     const ENCODER: [(&str, &str); 8] = [
         ("norm_attn.", "self_attn_layer_norm."),
         ("attn.q.", "self_attn.q_proj."),
@@ -107,6 +107,26 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("ffn.fc1.", "fc1."),
         ("ffn.fc2.", "fc2."),
     ];
+    let (layer, part) = name.strip_prefix("enc.blocks.")?.split_once('.')?;
+    let (from, to) = ENCODER.iter().find(|(from, _)| part.starts_with(from))?;
+    Some(Name::To(format!(
+        "thinker.audio_tower.layers.{layer}.{to}{}",
+        &part[from.len()..]
+    )))
+}
+
+/// A transcribe.cpp Qwen3 language model name (`dec.*`, as Qwen3-ASR and
+/// Canary-Qwen files name it) under the Hugging Face `model` path, such as
+/// `thinker.model` or `llm.model`.
+pub fn language_model_name(name: &str, model: &str) -> Option<Name> {
+    for (from, to) in [
+        ("dec.token_embd.", "embed_tokens."),
+        ("dec.output_norm.", "norm."),
+    ] {
+        if let Some(rest) = name.strip_prefix(from) {
+            return Some(Name::To(format!("{model}.{to}{rest}")));
+        }
+    }
     const DECODER: [(&str, &str); 11] = [
         ("norm_attn.", "input_layernorm."),
         ("norm_ffn.", "post_attention_layernorm."),
@@ -120,16 +140,14 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("ffn.up.", "mlp.up_proj."),
         ("ffn.down.", "mlp.down_proj."),
     ];
-    let (prefix, rest, table): (&str, &str, &[(&str, &str)]) =
-        if let Some(rest) = name.strip_prefix("enc.blocks.") {
-            ("thinker.audio_tower", rest, &ENCODER)
-        } else {
-            ("thinker.model", name.strip_prefix("dec.blocks.")?, &DECODER)
-        };
-    let (layer, part) = rest.split_once('.')?;
-    let (from, to) = table.iter().find(|(from, _)| part.starts_with(from))?;
+    // Fun-ASR files say `dec.layers`, the others `dec.blocks`.
+    let (layer, part) = name
+        .strip_prefix("dec.blocks.")
+        .or_else(|| name.strip_prefix("dec.layers."))?
+        .split_once('.')?;
+    let (from, to) = DECODER.iter().find(|(from, _)| part.starts_with(from))?;
     Some(Name::To(format!(
-        "{prefix}.layers.{layer}.{to}{}",
+        "{model}.layers.{layer}.{to}{}",
         &part[from.len()..]
     )))
 }

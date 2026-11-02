@@ -3,6 +3,8 @@
 //! `src/tts/`.
 
 pub mod canary;
+pub mod canary_qwen;
+pub mod fun_asr;
 pub mod granite_ctc;
 pub mod moonshine;
 pub mod parakeet;
