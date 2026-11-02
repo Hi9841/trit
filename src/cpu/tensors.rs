@@ -34,6 +34,9 @@ struct Entry {
     /// Byte range in the file.
     start: usize,
     end: usize,
+    /// `rows x cols` of a Fermion record (`super::fermion`), which `f32`
+    /// expands; `dtype` is its kind.
+    matrix: Option<(usize, usize)>,
 }
 
 impl Tensors {
@@ -89,6 +92,7 @@ impl Tensors {
                         file: opened.len(),
                         start: tensor.start,
                         end: tensor.end,
+                        matrix: None,
                     },
                 );
             }
@@ -129,6 +133,7 @@ impl Tensors {
                         file: 0,
                         start: tensor.start,
                         end: tensor.end,
+                        matrix: None,
                     },
                 ))
             })
@@ -193,6 +198,7 @@ impl Tensors {
                         file: 0,
                         start,
                         end,
+                        matrix: None,
                     },
                 )
             })
@@ -203,6 +209,45 @@ impl Tensors {
             precision,
             device,
             native: true,
+        })
+    }
+
+    /// Opens the records of a Fermion container, byte ranges of `path`. An
+    /// `fp16` record is read as F16; the other kinds are expanded as they
+    /// are read.
+    pub fn open_fermion(
+        path: &Path,
+        records: &[super::fermion::Record],
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
+        let error = |e: std::io::Error| format!("Could not read {}: {e}", path.display());
+        let file = File::open(path).map_err(error)?;
+        let total: usize = records.iter().map(|r| r.end - r.start).sum();
+        super::store::will_read(total as u64);
+        let entries = records
+            .iter()
+            .map(|r| {
+                let (dtype, matrix) = match r.kind.as_str() {
+                    "fp16" => ("F16".to_string(), None),
+                    kind => (kind.to_string(), Some(r.matrix)),
+                };
+                let entry = Entry {
+                    dtype,
+                    file: 0,
+                    start: r.start,
+                    end: r.end,
+                    matrix,
+                };
+                (r.name.clone(), entry)
+            })
+            .collect();
+        Ok(Self {
+            files: vec![file],
+            entries,
+            precision,
+            device,
+            native: false,
         })
     }
 
@@ -296,6 +341,10 @@ impl Tensors {
     /// The tensor as f32 values, from F32, F16, BF16, or Q8_0 storage.
     pub fn f32(&self, name: &str) -> Result<Vec<f32>, String> {
         let entry = self.entry(name)?;
+        if let Some((rows, cols)) = entry.matrix {
+            return super::fermion::expand(&entry.dtype, &self.raw(name, entry)?, rows, cols)
+                .map_err(|e| format!("tensor {name}: {e}"));
+        }
         if entry.dtype == "Q8_0" {
             let count = (entry.end - entry.start) / Q8_0_BYTES * 32;
             return Ok(self.q8_0(name, count)?.to_f32());
@@ -352,7 +401,9 @@ impl Tensors {
     /// F32 and BF16 are rounded to the nearest f16 as they are read.
     pub fn f16_bits(&self, name: &str, len: usize) -> Result<Vec<u16>, String> {
         let entry = self.entry(name)?;
-        if entry.dtype == "Q8_0" || super::ggml_quants::BlockType::from_name(&entry.dtype).is_some()
+        if entry.dtype == "Q8_0"
+            || entry.matrix.is_some()
+            || super::ggml_quants::BlockType::from_name(&entry.dtype).is_some()
         {
             return Ok(self
                 .f32_len(name, len)?
@@ -445,6 +496,7 @@ fn parse_header(
                 file,
                 start,
                 end,
+                matrix: None,
             },
         );
     }

@@ -64,104 +64,18 @@ impl Archive {
         Ok(archive)
     }
 
-    /// The config that `convert_nemo_to_hf.py` writes for this model, after
-    /// checking that the model has the shape the FastConformer runs.
+    /// The config that `convert_nemo_to_hf.py` writes for this model.
     pub fn config(&self) -> Result<Json, String> {
-        let y = &self.yaml;
-        let unsupported = |what: &str| {
-            format!(
-                "{}: {what}; Trit runs this NeMo shape only through a Hugging Face folder",
-                self.path.display()
-            )
-        };
-        let encoder = &y["encoder"];
-        let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
-        let num = |v: &Value, what: &str| {
-            v.as_u64()
-                .ok_or_else(|| format!("model_config.yaml has no {what}"))
-        };
-        if !text(&encoder["_target_"]).ends_with("ConformerEncoder") {
-            return Err(unsupported("the encoder is not a Conformer"));
-        }
-        if text(&encoder["subsampling"]) != "dw_striding"
-            || encoder["causal_downsampling"].as_bool() == Some(true)
-            || text(&encoder["self_attention_model"]) != "rel_pos"
-            || encoder["untie_biases"].as_bool() == Some(false)
-            || !matches!(text(&encoder["conv_norm_type"]).as_str(), "" | "batch_norm")
-        {
-            return Err(unsupported("the encoder layers differ from Parakeet's"));
-        }
-        // Offline transcription attends to the whole clip: [-1, -1]. A
-        // limited left or right context is a streaming model.
-        let context = &encoder["att_context_size"];
-        let full = match context.as_array() {
-            None => true,
-            Some(pair) => pair.iter().all(|side| side.as_i64() == Some(-1)),
-        };
-        if !full {
-            return Err(unsupported(
-                "its attention context is limited (a streaming model)",
-            ));
-        }
-        let pre = &y["preprocessor"];
-        let float = |v: &Value, default: f64| v.as_f64().unwrap_or(default);
-        if num(&pre["sample_rate"], "preprocessor.sample_rate")? != 16_000
-            || num(&pre["n_fft"], "preprocessor.n_fft")? != 512
-            || (float(&pre["window_size"], 0.0) - 0.025).abs() > 1e-9
-            || (float(&pre["window_stride"], 0.0) - 0.01).abs() > 1e-9
-            || !matches!(text(&pre["window"]).as_str(), "" | "hann")
-            || text(&pre["normalize"]) != "per_feature"
-            || (float(&pre["preemph"], 0.97) - 0.97).abs() > 1e-9
-            || pre["features"] != encoder["feat_in"]
-        {
-            return Err(unsupported("its audio features differ from Parakeet's"));
-        }
-        let hidden = num(&encoder["d_model"], "encoder.d_model")?;
-        let encoder_config = json!({
-            "hidden_size": hidden,
-            "intermediate_size": hidden * num(&encoder["ff_expansion_factor"], "encoder.ff_expansion_factor")?,
-            "num_attention_heads": num(&encoder["n_heads"], "encoder.n_heads")?,
-            "num_hidden_layers": num(&encoder["n_layers"], "encoder.n_layers")?,
-            "num_mel_bins": num(&encoder["feat_in"], "encoder.feat_in")?,
-            "conv_kernel_size": num(&encoder["conv_kernel_size"], "encoder.conv_kernel_size")?,
-            "subsampling_factor": num(&encoder["subsampling_factor"], "encoder.subsampling_factor")?,
-            "subsampling_conv_channels": num(&encoder["subsampling_conv_channels"], "encoder.subsampling_conv_channels")?,
-            // NeMo's dw_striding stack: 3x3 kernels, stride 2.
-            "subsampling_conv_kernel_size": 3,
-            "subsampling_conv_stride": 2,
-            "scale_input": encoder["xscaling"].as_bool().unwrap_or(true),
-        });
-        let decoder = &y["decoder"];
-        if !text(&decoder["_target_"]).ends_with("RNNTDecoder")
-            || !text(&y["joint"]["_target_"]).ends_with("RNNTJoint")
-        {
-            return Err(unsupported("it has no RNNT decoder"));
-        }
-        let labels = y["labels"]
-            .as_array()
-            .or_else(|| y["joint"]["vocabulary"].as_array())
-            .ok_or("model_config.yaml has no labels")?;
-        // The blank comes after the labels.
-        let blank = labels.len();
-        let prednet = &decoder["prednet"];
+        let config = hf_config(&self.yaml, &self.path)?;
         // TDT archives (token durations) are not read yet: no TDT archive has
         // been checked against its converted folder.
-        let durations = y["decoding"]["durations"]
-            .as_array()
-            .or_else(|| y["model_defaults"]["tdt_durations"].as_array());
-        if durations.is_some_and(|list| !list.is_empty()) {
-            return Err(unsupported("it is a TDT model"));
+        if config.get("durations").is_array() {
+            return Err(format!(
+                "{}: it is a TDT model; Trit runs this NeMo shape only through a Hugging Face folder",
+                self.path.display()
+            ));
         }
-        let config = json!({
-            "model_type": "parakeet_rnnt",
-            "vocab_size": blank + 1,
-            "blank_token_id": blank,
-            "decoder_hidden_size": prednet["pred_hidden"].as_u64().unwrap_or(640),
-            "num_decoder_layers": prednet["pred_rnn_layers"].as_u64().unwrap_or(2),
-            "max_symbols_per_step": MAX_SYMBOLS_PER_STEP,
-            "encoder_config": encoder_config,
-        });
-        Ok(Json::from_value(config))
+        Ok(config)
     }
 
     /// The weights, under the names `convert_nemo_to_hf.py` gives them.
@@ -213,6 +127,106 @@ impl Archive {
         String::from_utf8(self.read(self.member(name)?)?)
             .map_err(|_| format!("{name} in {} is not UTF-8", self.path.display()))
     }
+}
+
+/// The config that `convert_nemo_to_hf.py` writes for NeMo config `y`
+/// (`model_config.yaml` as JSON) of the model at `path`, after checking
+/// that the model has the shape the FastConformer runs: RNNT, or TDT when
+/// the config lists token durations.
+pub fn hf_config(y: &Value, path: &Path) -> Result<Json, String> {
+    let unsupported = |what: &str| {
+        format!(
+            "{}: {what}; Trit runs this NeMo shape only through a Hugging Face folder",
+            path.display()
+        )
+    };
+    let encoder = &y["encoder"];
+    let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    let num = |v: &Value, what: &str| {
+        v.as_u64()
+            .ok_or_else(|| format!("model_config.yaml has no {what}"))
+    };
+    if !text(&encoder["_target_"]).ends_with("ConformerEncoder") {
+        return Err(unsupported("the encoder is not a Conformer"));
+    }
+    if text(&encoder["subsampling"]) != "dw_striding"
+        || encoder["causal_downsampling"].as_bool() == Some(true)
+        || text(&encoder["self_attention_model"]) != "rel_pos"
+        || encoder["untie_biases"].as_bool() == Some(false)
+        || !matches!(text(&encoder["conv_norm_type"]).as_str(), "" | "batch_norm")
+    {
+        return Err(unsupported("the encoder layers differ from Parakeet's"));
+    }
+    // Offline transcription attends to the whole clip: [-1, -1]. A
+    // limited left or right context is a streaming model.
+    let context = &encoder["att_context_size"];
+    let full = match context.as_array() {
+        None => true,
+        Some(pair) => pair.iter().all(|side| side.as_i64() == Some(-1)),
+    };
+    if !full {
+        return Err(unsupported(
+            "its attention context is limited (a streaming model)",
+        ));
+    }
+    let pre = &y["preprocessor"];
+    let float = |v: &Value, default: f64| v.as_f64().unwrap_or(default);
+    if num(&pre["sample_rate"], "preprocessor.sample_rate")? != 16_000
+        || num(&pre["n_fft"], "preprocessor.n_fft")? != 512
+        || (float(&pre["window_size"], 0.0) - 0.025).abs() > 1e-9
+        || (float(&pre["window_stride"], 0.0) - 0.01).abs() > 1e-9
+        || !matches!(text(&pre["window"]).as_str(), "" | "hann")
+        || text(&pre["normalize"]) != "per_feature"
+        || (float(&pre["preemph"], 0.97) - 0.97).abs() > 1e-9
+        || pre["features"] != encoder["feat_in"]
+    {
+        return Err(unsupported("its audio features differ from Parakeet's"));
+    }
+    let hidden = num(&encoder["d_model"], "encoder.d_model")?;
+    let encoder_config = json!({
+        "hidden_size": hidden,
+        "intermediate_size": hidden * num(&encoder["ff_expansion_factor"], "encoder.ff_expansion_factor")?,
+        "num_attention_heads": num(&encoder["n_heads"], "encoder.n_heads")?,
+        "num_hidden_layers": num(&encoder["n_layers"], "encoder.n_layers")?,
+        "num_mel_bins": num(&encoder["feat_in"], "encoder.feat_in")?,
+        "conv_kernel_size": num(&encoder["conv_kernel_size"], "encoder.conv_kernel_size")?,
+        "subsampling_factor": num(&encoder["subsampling_factor"], "encoder.subsampling_factor")?,
+        "subsampling_conv_channels": num(&encoder["subsampling_conv_channels"], "encoder.subsampling_conv_channels")?,
+        // NeMo's dw_striding stack: 3x3 kernels, stride 2.
+        "subsampling_conv_kernel_size": 3,
+        "subsampling_conv_stride": 2,
+        "scale_input": encoder["xscaling"].as_bool().unwrap_or(true),
+    });
+    let decoder = &y["decoder"];
+    if !text(&decoder["_target_"]).ends_with("RNNTDecoder")
+        || !text(&y["joint"]["_target_"]).ends_with("RNNTJoint")
+    {
+        return Err(unsupported("it has no RNNT decoder"));
+    }
+    let labels = y["labels"]
+        .as_array()
+        .or_else(|| y["joint"]["vocabulary"].as_array())
+        .ok_or("model_config.yaml has no labels")?;
+    // The blank comes after the labels.
+    let blank = labels.len();
+    let prednet = &decoder["prednet"];
+    let durations = y["decoding"]["durations"]
+        .as_array()
+        .or_else(|| y["model_defaults"]["tdt_durations"].as_array())
+        .filter(|list| !list.is_empty());
+    let mut config = json!({
+        "model_type": if durations.is_some() { "parakeet_tdt" } else { "parakeet_rnnt" },
+        "vocab_size": blank + 1,
+        "blank_token_id": blank,
+        "decoder_hidden_size": prednet["pred_hidden"].as_u64().unwrap_or(640),
+        "num_decoder_layers": prednet["pred_rnn_layers"].as_u64().unwrap_or(2),
+        "max_symbols_per_step": MAX_SYMBOLS_PER_STEP,
+        "encoder_config": encoder_config,
+    });
+    if let Some(durations) = durations {
+        config["durations"] = json!(durations);
+    }
+    Ok(Json::from_value(config))
 }
 
 /// A NeMo tensor name as `convert_nemo_to_hf.py` renames it (its two

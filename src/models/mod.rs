@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod families;
+pub mod fermion;
 pub mod files;
 pub mod gguf;
 pub mod layers;
@@ -20,31 +21,39 @@ use crate::{BiasWeights, Device, Options, Precision, Segment, Spread};
 use std::path::Path;
 
 /// A model that one published file holds, in place of `config.json` and
-/// `model.safetensors`: an NVIDIA NeMo archive or a GGUF file. Each gives
-/// the config, tensor names, and tokenizer of the Hugging Face checkpoint.
+/// `model.safetensors`: an NVIDIA NeMo archive, a GGUF file, or a Fermion
+/// container. Each gives the config, tensor names, and tokenizer of the
+/// Hugging Face checkpoint.
 pub enum Package {
     Nemo(nemo::Archive),
     Gguf(gguf::Gguf),
+    Fermion(fermion::Container),
 }
 
 impl Package {
-    /// The package of a model folder: its one `.nemo` or `.gguf` file, when
-    /// the folder has no `config.json`.
+    /// The package of a model folder: its `model.fermion`, or its one
+    /// `.nemo` or `.gguf` file when the folder has no `config.json`.
     pub fn find(dir: &Path) -> Result<Option<Self>, String> {
-        match (nemo::find(dir), gguf::find(dir)) {
-            (Some(_), Some(_)) => Err(format!(
-                "{} holds a .nemo and a .gguf file; keep one model per folder",
+        match (fermion::find(dir), nemo::find(dir), gguf::find(dir)) {
+            (Some(path), None, None) => fermion::Container::open(&path).map(|c| Some(Self::Fermion(c))),
+            (None, Some(path), None) => nemo::Archive::open(&path).map(|a| Some(Self::Nemo(a))),
+            (None, None, Some(path)) => gguf::Gguf::open(&path).map(|g| Some(Self::Gguf(g))),
+            (None, None, None) => Ok(None),
+            _ => Err(format!(
+                "{} holds more than one model file (.fermion, .nemo, .gguf); keep one model per folder",
                 dir.display()
             )),
-            (Some(path), None) => nemo::Archive::open(&path).map(|a| Some(Self::Nemo(a))),
-            (None, Some(path)) => gguf::Gguf::open(&path).map(|g| Some(Self::Gguf(g))),
-            (None, None) => Ok(None),
         }
     }
 
     /// Whether `dir` holds a package (`find` would open one).
     pub fn in_folder(dir: &Path) -> bool {
-        nemo::find(dir).is_some() != gguf::find(dir).is_some()
+        let found = [
+            fermion::find(dir).is_some(),
+            nemo::find(dir).is_some(),
+            gguf::find(dir).is_some(),
+        ];
+        found.iter().filter(|found| **found).count() == 1
     }
 
     /// Whether the package gives file `name` of a Hugging Face folder.
@@ -52,6 +61,7 @@ impl Package {
         match self {
             Self::Nemo(archive) => archive.provides(name),
             Self::Gguf(file) => file.provides(name),
+            Self::Fermion(container) => container.provides(name),
         }
     }
 
@@ -60,6 +70,7 @@ impl Package {
         match self {
             Self::Nemo(archive) => archive.file(name),
             Self::Gguf(file) => file.file(name),
+            Self::Fermion(container) => container.file(name),
         }
     }
 
@@ -71,6 +82,7 @@ impl Package {
         match self {
             Self::Nemo(archive) => archive.tensors(precision, device),
             Self::Gguf(file) => file.tensors(precision, device),
+            Self::Fermion(container) => container.tensors(precision, device),
         }
     }
 }

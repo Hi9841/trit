@@ -5,6 +5,7 @@ mod simd;
 
 pub mod activation;
 pub mod buf;
+pub mod fermion;
 pub mod fgemm;
 pub mod gemm;
 pub mod ggml_quants;

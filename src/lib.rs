@@ -479,8 +479,8 @@ pub fn missing_voice(explicit: Option<&Path>) -> String {
 }
 
 /// True when `dir` holds every file of `MODEL_FILES` (the weights as one
-/// file or as shards), or one NVIDIA NeMo archive (`.nemo`) or GGUF file
-/// (`.gguf`) and no `config.json`.
+/// file or as shards), one NVIDIA NeMo archive (`.nemo`) or GGUF file
+/// (`.gguf`) and no `config.json`, or a Fermion container (`model.fermion`).
 pub fn is_model(dir: &Path) -> bool {
     let weights =
         dir.join(cpu::tensors::WEIGHTS).is_file() || dir.join(cpu::tensors::SHARD_INDEX).is_file();
