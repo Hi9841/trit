@@ -13,6 +13,7 @@ use crate::{Device, Precision};
 
 mod canary;
 mod gigaam;
+mod granite_ctc;
 mod medasr;
 mod moonshine;
 mod parakeet;
@@ -31,6 +32,7 @@ enum Arch {
     Gigaam,
     Sensevoice,
     Medasr,
+    GraniteCtc,
 }
 
 /// What a tensor of the file becomes.
@@ -157,8 +159,9 @@ impl Gguf {
             Some("gigaam") => Ok(Arch::Gigaam),
             Some("sensevoice") => Ok(Arch::Sensevoice),
             Some("medasr") => Ok(Arch::Medasr),
+            Some("granite_speech5_ctc") => Ok(Arch::GraniteCtc),
             other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, and medasr",
+                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, and granite_speech5_ctc",
                 self.path.display(),
                 other.unwrap_or("(none)")
             )),
@@ -199,6 +202,7 @@ impl Gguf {
                 Arch::Gigaam => gigaam::hf_name(name),
                 Arch::Sensevoice => sensevoice::hf_name(name),
                 Arch::Medasr => medasr::hf_name(name),
+                Arch::GraniteCtc => granite_ctc::hf_name(name),
             };
             match to {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
@@ -238,6 +242,9 @@ impl Gguf {
             (Arch::Canary, "config.json") => {
                 canary::config(self).map(|v| v.to_string()).map_err(fail)
             }
+            (Arch::GraniteCtc, "config.json") => granite_ctc::config(self)
+                .map(|v| v.to_string())
+                .map_err(fail),
             (Arch::Medasr, "config.json") => {
                 medasr::config(self).map(|v| v.to_string()).map_err(fail)
             }
@@ -281,7 +288,11 @@ impl Gguf {
                 .and_then(Value::as_u64)
                 .unwrap_or(1)
         };
-        let first_control = (0..tokens.len()).find(|&id| kind(id) == 3);
+        // The first control token after the base vocabulary (a leading
+        // `<|blank|>` is part of it).
+        let first_control = (0..tokens.len())
+            .position(|id| kind(id) == 1)
+            .and_then(|normal| (normal..tokens.len()).find(|&id| kind(id) == 3));
         let mut vocab = Map::new();
         let mut added = Vec::new();
         for (id, token) in tokens.iter().enumerate() {
@@ -297,6 +308,11 @@ impl Gguf {
             "model": { "type": "BPE", "vocab": vocab, "merges": self.get("tokenizer.ggml.merges") },
             "added_tokens": added,
         });
+        // llama.cpp's `gpt2` model is byte-level BPE; `bpe` with merges is a
+        // SentencePiece BPE (`▁` and `<0x..>` pieces, Moonshine).
+        if self.get("tokenizer.ggml.model").as_str() == Some("gpt2") {
+            json["decoder"] = json!({ "type": "ByteLevel" });
+        }
         // Qwen's pre-tokenizer, which `Bpe::parse` knows by its pattern.
         if self.get("tokenizer.ggml.pre").as_str() == Some("qwen2") {
             json["pre_tokenizer"] = json!({ "type": "Split", "pattern": {
