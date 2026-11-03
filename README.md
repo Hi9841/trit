@@ -8,6 +8,8 @@ GigaAM, Cohere Transcribe, and more), with its own kernels: no Python, no
 PyTorch, no ONNX Runtime.
 It can also clean a transcript with Superwhisper S1-mini, and speak text with
 Kokoro-82M (28 English voices) or a VITS voice.
+It runs on Windows, Linux, macOS, and Android, on x86-64 and arm64, with
+kernels for AVX-512, AVX2, and Arm NEON (`sdot` and `smmla` on Apple M chips).
 
 [TDT](https://github.com/Hi9841/tdt), an offline dictation app for Windows,
 uses Trit for all of its speech. Trit is free for noncommercial use only

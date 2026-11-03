@@ -682,6 +682,36 @@ converts them at load. Trit quantizes to Q8_0 as ggml does
 (`quantize_row_q8_0`), so `q8_0` on f32 weights gives the same blocks as a
 Q8_0 GGUF file of the same weights.
 
+## CPU kernels
+
+Trit selects the fastest kernel path of the CPU when it starts. `trit` and
+`cpu_path()` show the path.
+
+| CPU | Ternary (Redux) | Int8 | f32 and f16 |
+|---|---|---|---|
+| x86-64 with AVX-512 VNNI | `avx512-vnni` | `vnni512` | `avx512` |
+| x86-64 with AVX2 | `avx2` | `vnni256` (with AVX-VNNI) or `avx2` | `avx2` |
+| Apple M2 and later, other Armv8.6 cores | `neon-dotprod` | `neon-i8mm` | `neon` |
+| Apple M1, other Armv8.2 cores | `neon-dotprod` | `neon-dotprod` | `neon` |
+| Other arm64 | `neon` | `neon` | `neon` |
+
+The int8 paths of one CPU give the same values: the integer sums are exact,
+and the float steps are the same.
+
+Threads:
+
+- Windows and Linux: the worker team uses the physical cores of one L3
+  cache, pinned (Whisper uses all physical cores).
+- macOS: one thread per performance core (`hw.perflevel0.physicalcpu`).
+  macOS has no affinity masks, so each team thread runs at the
+  user-interactive QoS class, and macOS keeps it on a performance core. A
+  team with a thread on an efficiency core runs at the speed of that core.
+- Android: the fast cores only.
+
+macOS: build on the Mac with `cargo build --release --workspace` (Apple
+Silicon or Intel); Trit needs no other tool. The GPU path uses Metal (see
+[GPU](#gpu)).
+
 ## GPU
 
 Speech to text can run on the GPU through wgpu: DirectX 12, Vulkan, or Metal.
@@ -775,7 +805,7 @@ Parakeet Redux. Other models run on the GPU and gain little; a decoder step
 | `TRIT_VOICE` | The voice folder, when the caller names none (else Kokoro, then MMS-TTS) |
 | `TRIT_THREADS` | The worker count; turns pinning off |
 | `TRIT_DEVICE` | `cpu`, `gpu`, or `auto`. Overrides the device of a load |
-| `TRIT_ISA` | `scalar`, `avx2`, or `avxvnni` forces another kernel path, for tests |
+| `TRIT_ISA` | Forces another kernel path, for tests: `scalar`, `avx2`, or `avxvnni` on x86-64; `scalar`, `neon`, or `dotprod` on arm64 |
 | `TRIT_LIB` | The library path, for the Python and Node bindings |
 
 ## Layout of the code

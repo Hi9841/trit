@@ -31,6 +31,9 @@ macro_rules! multiversion {
                 #[cfg(target_arch = "x86_64")]
                 // SAFETY: the level was detected from the CPU.
                 $crate::cpu::fgemm::Level::Avx2 => unsafe { avx2($($arg),*) },
+                // NEON is the arm64 baseline, so the plain body already uses it.
+                #[cfg(target_arch = "aarch64")]
+                $crate::cpu::fgemm::Level::Neon => imp($($arg),*),
                 $crate::cpu::fgemm::Level::Scalar => imp($($arg),*),
             }
         }

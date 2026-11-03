@@ -37,3 +37,20 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Skill
         run: target/release/trit.exe skill --check skill/SKILL.md
+
+  # Apple Silicon: the NEON, sdot, and smmla kernels, the macOS thread
+  # setup, and the Metal GPU code. The home view prints the kernel paths.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked --release --workspace
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Kernel paths
+        run: target/release/trit

@@ -19,8 +19,10 @@ mod torch_file;
 
 /// The kernels this CPU runs, for example `ternary avx512-vnni, int8
 /// vnni512, float avx512`: the ternary and int8 products (`avx512-vnni`,
-/// `avx2`, `scalar`; int8 also `vnni256` on AVX-VNNI CPUs) and the f32/f16
-/// products (`avx512`, `avx2`, `scalar`). `TRIT_ISA` forces a slower path.
+/// `avx2`, `scalar`; int8 also `vnni256` on AVX-VNNI CPUs; on arm64
+/// `neon-dotprod` or `neon`, and int8 `neon-i8mm` on Apple M2 and later)
+/// and the f32/f16 products (`avx512`, `avx2`, `neon`, `scalar`).
+/// `TRIT_ISA` forces a slower path.
 pub fn cpu_path() -> &'static str {
     static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
@@ -70,6 +72,10 @@ fn engine_threads(spread: Spread) -> (usize, usize) {
         .filter(|t| *t > 0)
     {
         return (threads, 0);
+    }
+    #[cfg(target_os = "android")]
+    if let Some(mask) = fast_cores(std::path::Path::new("/sys/devices/system/cpu")) {
+        return (mask.count_ones() as usize, mask);
     }
     let fallback = || {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -249,4 +255,34 @@ fn topology() -> Option<Topology> {
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn topology() -> Option<Topology> {
     None
+}
+
+/// Android: the mask of the fast cores, those with at least half the
+/// capacity of the fastest (`cpuN/cpu_capacity`, else
+/// `cpufreq/cpuinfo_max_freq`). Phones mix big and little cores; a step
+/// ends with its last task, so a team with a task on a little core runs
+/// at the little core's speed, and spinning little cores cost battery.
+/// `None` when sysfs tells nothing.
+#[cfg(target_os = "android")]
+fn fast_cores(root: &std::path::Path) -> Option<usize> {
+    let read = |cpu: usize, file: &str| -> Option<u64> {
+        let path = root.join(format!("cpu{cpu}/{file}"));
+        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    };
+    // One source for every core, so the speeds compare.
+    let speeds_from = |file: &str| -> Vec<(usize, u64)> {
+        (0..usize::BITS as usize)
+            .filter_map(|cpu| read(cpu, file).map(|speed| (cpu, speed)))
+            .collect()
+    };
+    let mut speeds = speeds_from("cpu_capacity");
+    if speeds.is_empty() {
+        speeds = speeds_from("cpufreq/cpuinfo_max_freq");
+    }
+    let fastest = speeds.iter().map(|(_, speed)| *speed).max()?;
+    let mask = speeds
+        .iter()
+        .filter(|(_, speed)| 2 * speed >= fastest)
+        .fold(0usize, |mask, (cpu, _)| mask | 1 << cpu);
+    (mask != 0).then_some(mask)
 }

@@ -80,6 +80,9 @@ fn apply(values: &mut [f32], op: Op) {
         #[cfg(target_arch = "x86_64")]
         // SAFETY: the level was detected from the CPU.
         Level::Avx2 => unsafe { avx2::apply(values, op) },
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: NEON is part of every arm64 CPU.
+        Level::Neon => unsafe { neon::apply(values, op) },
         Level::Scalar => values.iter_mut().for_each(|v| *v = scalar(*v, op)),
     }
 }
@@ -252,5 +255,70 @@ mod avx2 {
         );
         let two_n = _mm256_slli_epi32::<23>(_mm256_add_epi32(n_int, _mm256_set1_epi32(127)));
         _mm256_mul_ps(y, _mm256_castsi256_ps(two_n))
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use super::{Op, ERFC, FRAC_1_SQRT_2, HIGH, LN2_HI, LN2_LO, LOG2E, LOW, POLY};
+    use std::arch::aarch64::*;
+
+    pub unsafe fn apply(values: &mut [f32], op: Op) {
+        let (chunks, tail) = values.as_chunks_mut::<4>();
+        for chunk in chunks {
+            let v = vld1q_f32(chunk.as_ptr());
+            vst1q_f32(chunk.as_mut_ptr(), compute(v, op));
+        }
+        if !tail.is_empty() {
+            // The tail goes through the same lanes, so every value gets the same rounding.
+            let mut padded = [0.0f32; 4];
+            padded[..tail.len()].copy_from_slice(tail);
+            let v = compute(vld1q_f32(padded.as_ptr()), op);
+            vst1q_f32(padded.as_mut_ptr(), v);
+            tail.copy_from_slice(&padded[..tail.len()]);
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn compute(v: float32x4_t, op: Op) -> float32x4_t {
+        let one = vdupq_n_f32(1.0);
+        match op {
+            Op::Exp => exp(v),
+            Op::Silu => vdivq_f32(v, vaddq_f32(one, exp(vnegq_f32(v)))),
+            Op::Sigmoid => vdivq_f32(one, vaddq_f32(one, exp(vnegq_f32(v)))),
+            Op::Tanh => {
+                let two = vdupq_n_f32(2.0);
+                let e = exp(vnegq_f32(vmulq_f32(two, v)));
+                vsubq_f32(vdivq_f32(two, vaddq_f32(one, e)), one)
+            }
+            Op::Gelu => {
+                let z = vmulq_n_f32(vabsq_f32(v), FRAC_1_SQRT_2);
+                let t = vdivq_f32(one, vfmaq_n_f32(one, z, 0.5));
+                let mut p = vdupq_n_f32(0.0);
+                for c in ERFC {
+                    p = vfmaq_f32(vdupq_n_f32(c), p, t);
+                }
+                let tail = vmulq_f32(t, exp(vfmsq_f32(p, z, z)));
+                let positive = vcgeq_f32(v, vdupq_n_f32(0.0));
+                let erfc = vbslq_f32(positive, vsubq_f32(vdupq_n_f32(2.0), tail), tail);
+                vmulq_f32(vmulq_n_f32(v, 0.5), erfc)
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn exp(x: float32x4_t) -> float32x4_t {
+        let x = vminq_f32(vmaxq_f32(x, vdupq_n_f32(LOW)), vdupq_n_f32(HIGH));
+        let n_int = vcvtnq_s32_f32(vmulq_n_f32(x, LOG2E));
+        let n = vcvtq_f32_s32(n_int);
+        let r = vfmsq_n_f32(x, n, LN2_HI);
+        let r = vfmsq_n_f32(r, n, LN2_LO);
+        let mut p = vdupq_n_f32(0.0);
+        for c in POLY {
+            p = vfmaq_f32(vdupq_n_f32(c), p, r);
+        }
+        let y = vfmaq_f32(vaddq_f32(r, vdupq_n_f32(1.0)), p, vmulq_f32(r, r));
+        let two_n = vshlq_n_s32::<23>(vaddq_s32(n_int, vdupq_n_s32(127)));
+        vmulq_f32(y, vreinterpretq_f32_s32(two_n))
     }
 }

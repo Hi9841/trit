@@ -323,7 +323,14 @@ fn set_ideal(_cpu: Option<u32>) -> Option<u32> {
 /// until it runs again; at normal priority, a build on every core paused
 /// team threads for hundreds of ms per take. The team parks when idle, so
 /// the priority costs other programs nothing then.
+#[cfg(not(target_os = "macos"))]
 const ABOVE_NORMAL: i32 = 1;
+
+/// macOS: QOS_CLASS_USER_INTERACTIVE, the class macOS keeps on the
+/// performance cores. At the default class a team thread can run on an
+/// efficiency core, and every step then waits for it.
+#[cfg(target_os = "macos")]
+const ABOVE_NORMAL: i32 = 0x21;
 
 /// Sets this thread's priority and returns the previous one; `None` when
 /// the thread already had it, or the call failed.
@@ -343,8 +350,34 @@ fn set_priority(priority: i32) -> Option<i32> {
     }
 }
 
-/// Raising a thread's priority needs privileges outside Windows.
-#[cfg(not(windows))]
+/// macOS: the same with the thread's QoS class (`priority` is a
+/// `qos_class_t`). A thread may set its own class without privileges.
+#[cfg(target_os = "macos")]
+fn set_priority(priority: i32) -> Option<i32> {
+    extern "C" {
+        fn pthread_self() -> usize;
+        fn pthread_get_qos_class_np(thread: usize, class: *mut u32, relative: *mut i32) -> i32;
+        fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32;
+    }
+    // QOS_CLASS_DEFAULT: what an unspecified class (0) restores to; macOS
+    // refuses to set 0.
+    const DEFAULT: u32 = 0x15;
+    let (mut previous, mut relative) = (0u32, 0i32);
+    // SAFETY: `pthread_self` names the calling thread; both pointers name
+    // locals that live through the call.
+    unsafe {
+        if pthread_get_qos_class_np(pthread_self(), &mut previous, &mut relative) != 0 {
+            return None;
+        }
+        if previous == priority as u32 || pthread_set_qos_class_self_np(priority as u32, 0) != 0 {
+            return None;
+        }
+    }
+    Some(if previous == 0 { DEFAULT } else { previous } as i32)
+}
+
+/// Raising a thread's priority needs privileges on Linux and Android.
+#[cfg(not(any(windows, target_os = "macos")))]
 fn set_priority(_priority: i32) -> Option<i32> {
     None
 }
@@ -362,8 +395,8 @@ fn set_affinity(mask: usize) -> usize {
     unsafe { SetThreadAffinityMask(GetCurrentThread(), mask) }
 }
 
-/// Linux: the same, with `sched_setaffinity` on the calling thread.
-#[cfg(target_os = "linux")]
+/// Linux and Android: the same, with `sched_setaffinity` on the calling thread.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn set_affinity(mask: usize) -> usize {
     extern "C" {
         fn sched_getaffinity(pid: i32, size: usize, mask: *mut usize) -> i32;
@@ -387,7 +420,7 @@ fn set_affinity(mask: usize) -> usize {
     previous
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 fn set_affinity(_mask: usize) -> usize {
     0
 }

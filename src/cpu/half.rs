@@ -90,6 +90,8 @@ impl HalfDense {
                 #[cfg(target_arch = "x86_64")]
                 // SAFETY: the level was detected from the CPU.
                 Level::Avx2 => unsafe { avx2_rows(weights, k, x, rows) },
+                #[cfg(target_arch = "aarch64")]
+                Level::Neon => neon_rows(weights, k, x, rows),
                 Level::Scalar => scalar_rows(weights, k, x, rows),
             }
             if let Some(bias) = &self.bias {
@@ -192,5 +194,52 @@ unsafe fn avx2_tile<const R: usize>(weights: &[u16], k: usize, x: &[f32], out: &
             total += f16_to_f32(weights[r * k + j]) * x[j];
         }
         out[r] = total;
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn neon_rows(weights: &[u16], k: usize, x: &[f32], out: &mut [f32]) {
+    let mut first = 0;
+    while first + ROWS_AT_ONCE <= out.len() {
+        neon_tile::<ROWS_AT_ONCE>(&weights[first * k..], k, x, &mut out[first..]);
+        first += ROWS_AT_ONCE;
+    }
+    while first < out.len() {
+        neon_tile::<1>(&weights[first * k..], k, x, &mut out[first..]);
+        first += 1;
+    }
+}
+
+/// `R` rows of `weights` from its start into `out[..R]`. Two accumulators
+/// per row, so four rows keep eight FMA chains in flight.
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::needless_range_loop)]
+fn neon_tile<const R: usize>(weights: &[u16], k: usize, x: &[f32], out: &mut [f32]) {
+    use super::fgemm::f16x4;
+    use std::arch::aarch64::*;
+    assert!(weights.len() >= R * k && out.len() >= R && x.len() >= k);
+    // SAFETY: the assert keeps every load below inside `weights` and `x`.
+    unsafe {
+        let mut acc = [[vdupq_n_f32(0.0); 2]; R];
+        let mut i = 0;
+        while i + 8 <= k {
+            let xv = [
+                vld1q_f32(x.as_ptr().add(i)),
+                vld1q_f32(x.as_ptr().add(i + 4)),
+            ];
+            for r in 0..R {
+                let w = weights.as_ptr().add(r * k + i);
+                acc[r][0] = vfmaq_f32(acc[r][0], f16x4(w), xv[0]);
+                acc[r][1] = vfmaq_f32(acc[r][1], f16x4(w.add(4)), xv[1]);
+            }
+            i += 8;
+        }
+        for r in 0..R {
+            let mut total = vaddvq_f32(vaddq_f32(acc[r][0], acc[r][1]));
+            for j in i..k {
+                total += f16_to_f32(weights[r * k + j]) * x[j];
+            }
+            out[r] = total;
+        }
     }
 }

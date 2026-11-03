@@ -24,6 +24,9 @@ pub(crate) enum Level {
     Avx2,
     #[cfg(target_arch = "x86_64")]
     Avx512,
+    /// Every arm64 CPU.
+    #[cfg(target_arch = "aarch64")]
+    Neon,
 }
 
 impl Level {
@@ -34,11 +37,14 @@ impl Level {
             Level::Avx2 => "avx2",
             #[cfg(target_arch = "x86_64")]
             Level::Avx512 => "avx512",
+            #[cfg(target_arch = "aarch64")]
+            Level::Neon => "neon",
         }
     }
 }
 
-/// The widest float path this CPU runs. `TRIT_ISA=scalar|avx2` forces a slower one.
+/// The widest float path this CPU runs. `TRIT_ISA=scalar|avx2` forces a slower one;
+/// on arm64, `TRIT_ISA=scalar` forces the scalar path.
 pub(crate) fn level() -> Level {
     static LEVEL: OnceLock<Level> = OnceLock::new();
     *LEVEL.get_or_init(|| {
@@ -61,6 +67,10 @@ pub(crate) fn level() -> Level {
                 return Level::Avx2;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        if forced != "scalar" {
+            return Level::Neon;
+        }
         let _ = forced;
         Level::Scalar
     })
@@ -81,6 +91,9 @@ pub trait Weight: Copy + Send + Sync + 'static {
     /// 8 values from `p`.
     #[cfg(target_arch = "x86_64")]
     unsafe fn load8(p: *const Self) -> std::arch::x86_64::__m256;
+    /// 4 values from `p`.
+    #[cfg(target_arch = "aarch64")]
+    unsafe fn load4(p: *const Self) -> std::arch::aarch64::float32x4_t;
 }
 
 impl Weight for f32 {
@@ -102,6 +115,11 @@ impl Weight for f32 {
     unsafe fn load8(p: *const Self) -> std::arch::x86_64::__m256 {
         std::arch::x86_64::_mm256_loadu_ps(p)
     }
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    unsafe fn load4(p: *const Self) -> std::arch::aarch64::float32x4_t {
+        std::arch::aarch64::vld1q_f32(p)
+    }
 }
 
 /// f16 bits. The CPUs of the AVX2 and AVX-512 paths have F16C (see `level`).
@@ -116,6 +134,24 @@ impl Weight for u16 {
         if level() != Level::Scalar {
             // SAFETY: the AVX2 and AVX-512 levels imply F16C (see `level`).
             unsafe { widen_f16c(src, dst) };
+            return;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if level() == Level::Neon {
+            let (chunks, tail) = src.as_chunks::<4>();
+            for (i, chunk) in chunks.iter().enumerate() {
+                // SAFETY: `dst` is sized like `src`, so 4 values fit at `i * 4`.
+                unsafe {
+                    std::arch::aarch64::vst1q_f32(
+                        dst.as_mut_ptr().add(i * 4),
+                        f16x4(chunk.as_ptr()),
+                    );
+                }
+            }
+            let done = chunks.len() * 4;
+            for (d, s) in dst[done..].iter_mut().zip(tail) {
+                *d = s.to_f32();
+            }
             return;
         }
         for (d, s) in dst.iter_mut().zip(src) {
@@ -134,6 +170,27 @@ impl Weight for u16 {
         use std::arch::x86_64::*;
         _mm256_cvtph_ps(_mm_loadu_si128(p.cast()))
     }
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    unsafe fn load4(p: *const Self) -> std::arch::aarch64::float32x4_t {
+        f16x4(p)
+    }
+}
+
+/// 4 f16 values from `p` as f32, with `fcvtl` (every arm64 CPU has it).
+/// Inline assembly: Rust's f16 vector types are not stable yet.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub(crate) unsafe fn f16x4(p: *const u16) -> std::arch::aarch64::float32x4_t {
+    let half = std::arch::aarch64::vld1_u16(p);
+    let wide: std::arch::aarch64::float32x4_t;
+    std::arch::asm!(
+        "fcvtl {wide:v}.4s, {half:v}.4h",
+        wide = lateout(vreg) wide,
+        half = in(vreg) half,
+        options(pure, nomem, nostack, preserves_flags),
+    );
+    wide
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -259,6 +316,8 @@ unsafe fn block<W: Weight>(
         Level::Avx512 => avx512::block(x, k, w, n, rows, cols, out.0),
         #[cfg(target_arch = "x86_64")]
         Level::Avx2 => avx2::block(x, k, w, n, rows, cols, out.0),
+        #[cfg(target_arch = "aarch64")]
+        Level::Neon => neon::block(x, k, w, n, rows, cols, out.0),
         Level::Scalar => {
             for i in rows {
                 for j in cols.clone() {
@@ -466,6 +525,90 @@ mod avx2 {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use super::Weight;
+    use std::arch::aarch64::*;
+
+    /// 4 x 4 tiles, as on AVX-512: 16 accumulators, 4 weight vectors, 1 input.
+    pub unsafe fn block<W: Weight>(
+        x: &[f32],
+        k: usize,
+        w: &[W],
+        n: usize,
+        rows: std::ops::Range<usize>,
+        cols: std::ops::Range<usize>,
+        out: *mut f32,
+    ) {
+        let mut i = rows.start;
+        while i < rows.end {
+            let r = (rows.end - i).min(4);
+            let mut j = cols.start;
+            while j < cols.end {
+                let c = (cols.end - j).min(4);
+                let xp = x.as_ptr().add(i * k);
+                let wp = w.as_ptr().add(j * k);
+                let op = out.add(i * n + j);
+                match (r, c) {
+                    (4, 4) => tile::<4, 4, W>(xp, wp, k, op, n),
+                    (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n),
+                    (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n),
+                    (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n),
+                    (3, 4) => tile::<3, 4, W>(xp, wp, k, op, n),
+                    (3, 3) => tile::<3, 3, W>(xp, wp, k, op, n),
+                    (3, 2) => tile::<3, 2, W>(xp, wp, k, op, n),
+                    (3, 1) => tile::<3, 1, W>(xp, wp, k, op, n),
+                    (2, 4) => tile::<2, 4, W>(xp, wp, k, op, n),
+                    (2, 3) => tile::<2, 3, W>(xp, wp, k, op, n),
+                    (2, 2) => tile::<2, 2, W>(xp, wp, k, op, n),
+                    (2, 1) => tile::<2, 1, W>(xp, wp, k, op, n),
+                    (1, 4) => tile::<1, 4, W>(xp, wp, k, op, n),
+                    (1, 3) => tile::<1, 3, W>(xp, wp, k, op, n),
+                    (1, 2) => tile::<1, 2, W>(xp, wp, k, op, n),
+                    _ => tile::<1, 1, W>(xp, wp, k, op, n),
+                }
+                j += c;
+            }
+            i += r;
+        }
+    }
+
+    #[inline(always)]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn tile<const R: usize, const C: usize, W: Weight>(
+        x: *const f32,
+        w: *const W,
+        k: usize,
+        out: *mut f32,
+        n: usize,
+    ) {
+        let mut acc = [[vdupq_n_f32(0.0); C]; R];
+        let mut kk = 0;
+        while kk + 4 <= k {
+            let mut wv = [vdupq_n_f32(0.0); C];
+            for (c, v) in wv.iter_mut().enumerate() {
+                *v = W::load4(w.add(c * k + kk));
+            }
+            for (r, row) in acc.iter_mut().enumerate() {
+                let xv = vld1q_f32(x.add(r * k + kk));
+                for (c, a) in row.iter_mut().enumerate() {
+                    *a = vfmaq_f32(*a, xv, wv[c]);
+                }
+            }
+            kk += 4;
+        }
+        for r in 0..R {
+            for c in 0..C {
+                let mut total = vaddvq_f32(acc[r][c]);
+                for t in kk..k {
+                    total += *x.add(r * k + t) * (*w.add(c * k + t)).to_f32();
+                }
+                *out.add(r * n + c) = total;
+            }
+        }
+    }
+}
+
 /// `out = x * w` (m x n) for row-major `x` (m x k) and `w` (k x n), on the
 /// calling thread, for a task that is itself one of many parallel tasks:
 /// every output row is a sum of `w` rows scaled by `x` values. The tiles
@@ -481,6 +624,9 @@ pub fn matmul_nn_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &
         #[cfg(target_arch = "x86_64")]
         // SAFETY: as above.
         Level::Avx2 => unsafe { nn_avx2::block(x, k, w, n, 0..m, 0..n, out.as_mut_ptr()) },
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: as above; NEON is part of every arm64 CPU.
+        Level::Neon => unsafe { nn_neon::block(x, k, w, n, m, out.as_mut_ptr()) },
         Level::Scalar => {
             for (i, row) in out.chunks_exact_mut(n).take(m).enumerate() {
                 row.fill(0.0);
@@ -653,6 +799,83 @@ mod nn_avx2 {
             let o = out.add((i + r) * n + j);
             _mm256_storeu_ps(o, lo[r]);
             _mm256_storeu_ps(o.add(8), hi[r]);
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+mod nn_neon {
+    use std::arch::aarch64::*;
+
+    /// 6 rows by 16 columns: 24 accumulators, 4 strips of `w`, 1 input.
+    pub unsafe fn block(x: &[f32], k: usize, w: &[f32], n: usize, m: usize, out: *mut f32) {
+        let mut i = 0;
+        while i < m {
+            let r = (m - i).min(6);
+            let mut j = 0;
+            while j < n {
+                let c = (n - j).min(16);
+                if c == 16 {
+                    match r {
+                        6 => tile::<6>(x, k, w, n, i, j, out),
+                        5 => tile::<5>(x, k, w, n, i, j, out),
+                        4 => tile::<4>(x, k, w, n, i, j, out),
+                        3 => tile::<3>(x, k, w, n, i, j, out),
+                        2 => tile::<2>(x, k, w, n, i, j, out),
+                        _ => tile::<1>(x, k, w, n, i, j, out),
+                    }
+                } else {
+                    // The right edge, under 16 columns: plain loops.
+                    for row in i..i + r {
+                        for col in j..j + c {
+                            let mut total = 0.0f32;
+                            for e in 0..k {
+                                total += x[row * k + e] * w[e * n + col];
+                            }
+                            *out.add(row * n + col) = total;
+                        }
+                    }
+                }
+                j += c;
+            }
+            i += r;
+        }
+    }
+
+    #[inline(always)]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn tile<const R: usize>(
+        x: &[f32],
+        k: usize,
+        w: &[f32],
+        n: usize,
+        i: usize,
+        j: usize,
+        out: *mut f32,
+    ) {
+        let mut acc = [[vdupq_n_f32(0.0); 4]; R];
+        let wp = w.as_ptr().add(j);
+        let xp = x.as_ptr().add(i * k);
+        for e in 0..k {
+            let row = wp.add(e * n);
+            let b = [
+                vld1q_f32(row),
+                vld1q_f32(row.add(4)),
+                vld1q_f32(row.add(8)),
+                vld1q_f32(row.add(12)),
+            ];
+            for r in 0..R {
+                let a = vdupq_n_f32(*xp.add(r * k + e));
+                for q in 0..4 {
+                    acc[r][q] = vfmaq_f32(acc[r][q], a, b[q]);
+                }
+            }
+        }
+        for r in 0..R {
+            let o = out.add((i + r) * n + j);
+            for q in 0..4 {
+                vst1q_f32(o.add(q * 4), acc[r][q]);
+            }
         }
     }
 }

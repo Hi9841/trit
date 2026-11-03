@@ -10,10 +10,20 @@ repository = "https://github.com/Hi9841/trit"
 name = "trit_ffi"
 crate-type = ["cdylib", "staticlib"]
 
+[features]
+default = ["gpu"]
+# The GPU device for trit_load_ex. Phone builds turn it off with --no-default-features.
+gpu = ["trit/gpu"]
+
 [dependencies]
-trit = { path = "..", features = ["gpu"] }
+trit = { path = ".." }
 mimalloc = { version = "0.1", default-features = false }
 serde_json = "1.0"
+
+# Android apps load this library with dlopen, and bionic refuses initial-exec TLS
+# (mimalloc's default) in a library loaded that way.
+[target.'cfg(target_os = "android")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"
