@@ -38,6 +38,10 @@ const MAX_LOAD_WINDOW: Duration = Duration::from_secs(30);
 /// fraction of all the domain's processors. One hardware thread on each core
 /// is 0.5, and a move costs the warm caches, so noise must not start one.
 const MOVE_AT_BUSY_GAP: f64 = 0.25;
+/// A team thread takes much less than this to start a task, even under load.
+/// A longer wait means that the workers do not exist: a forked child keeps
+/// only the thread that called `fork`.
+const ALL_THREADS_WAIT: Duration = Duration::from_secs(1);
 
 struct Job {
     run: *const (dyn Fn(usize) + Sync),
@@ -91,7 +95,8 @@ thread_local! {
 
 impl Team {
     /// `threads` includes the calling thread, which works on every job too.
-    fn new(threads: usize, domain: usize, domains: Vec<usize>) -> Self {
+    /// `slot` names the threads: a process can have both teams.
+    fn new(slot: usize, threads: usize, domain: usize, domains: Vec<usize>) -> Self {
         let shared = Arc::new(Shared {
             generation: AtomicUsize::new(0),
             job: AtomicPtr::new(std::ptr::null_mut()),
@@ -107,7 +112,7 @@ impl Team {
         for index in 0..workers {
             let for_worker = Arc::clone(&shared);
             let spawned = std::thread::Builder::new()
-                .name(format!("tdt-speech-{index}"))
+                .name(format!("trit-speech-{slot}-{index}"))
                 .spawn(move || {
                     set_affinity(domain);
                     set_priority(ABOVE_NORMAL);
@@ -303,7 +308,7 @@ static TEAM: [OnceLock<Team>; TEAMS] = [OnceLock::new(), OnceLock::new()];
 pub fn start(slot: usize, size: impl FnOnce() -> (usize, usize, Vec<usize>)) {
     TEAM[slot].get_or_init(|| {
         let (threads, domain, domains) = size();
-        Team::new(threads.max(1), domain, domains)
+        Team::new(slot, threads.max(1), domain, domains)
     });
 }
 
@@ -639,7 +644,9 @@ fn set_affinity(_mask: usize) -> usize {
 /// Runs `run` once on every thread of every started team, the workers
 /// included: work that must happen on each thread, such as returning the
 /// memory a thread's allocator keeps. Each task waits until every thread of
-/// its team holds one, so no thread takes two.
+/// its team holds one, so no thread takes two. When the threads do not all
+/// come within `ALL_THREADS_WAIT`, `run` runs on the caller only, so it must
+/// be safe to repeat there.
 pub fn on_every_thread(run: impl Fn() + Sync) {
     // Inside a task the team runs inline on this one thread, and the tasks
     // below would wait for each other forever.
@@ -650,13 +657,22 @@ pub fn on_every_thread(run: impl Fn() + Sync) {
     for team in TEAM.iter().filter_map(OnceLock::get) {
         let threads = team.workers + 1;
         let started = AtomicUsize::new(0);
+        let gave_up = AtomicBool::new(false);
         team.for_each(threads, &|_| {
             started.fetch_add(1, Ordering::AcqRel);
+            let since = Instant::now();
             while started.load(Ordering::Acquire) < threads {
+                if gave_up.load(Ordering::Relaxed) || since.elapsed() > ALL_THREADS_WAIT {
+                    gave_up.store(true, Ordering::Relaxed);
+                    return;
+                }
                 std::hint::spin_loop();
             }
             run();
         });
+        if gave_up.load(Ordering::Relaxed) {
+            run();
+        }
     }
     if TEAM.iter().all(|team| team.get().is_none()) {
         run();
@@ -668,6 +684,7 @@ pub fn on_every_thread(run: impl Fn() + Sync) {
 fn team() -> &'static Team {
     TEAM[CURRENT.get()].get_or_init(|| {
         Team::new(
+            CURRENT.get(),
             std::thread::available_parallelism().map_or(4, |n| n.get()),
             0,
             Vec::new(),

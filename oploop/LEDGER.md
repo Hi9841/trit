@@ -665,3 +665,87 @@ against 59 ms a take): its int8 CPU weights become f16 on the GPU.
   noise turned into "I don't want to do it."
 - Seen only on audio that starts inside speech: 0 of 400 long takes and 0 of 143 owner takes
   came back empty. TDT's windows treat an empty window as a failed join. Not fixed in Trit.
+
+## Session 2026-11-05 (review fixes, Trit 0.9.0)
+
+A review of the engine for stability gave these changes. The gate compared the `trit` CLI of
+`main` (2352bce) with the fixed build, clip by clip, through `safe.cmd` (8 processors).
+
+Text gate, texts that differ between the two builds:
+
+- Parakeet Redux: clean 0 of 200, other 0 of 200, tech 0 of 40, the owner's 143 takes 0, the
+  long sets 0 of 200 and 0 of 200 (135 of these clips are over 60 s). With the owner's
+  dictionary: takes 0 of 143, tech 0 of 40. With a dictionary of 22 names: long sets 0 of 400.
+- Parakeet Unified English (GGUF, `--precision int8`): clean 0, other 0, tech 0, takes 0.
+- Whisper tiny (tech 0 of 40, clean 0 of 200), Moonshine tiny, Parakeet TDT-CTC 110M Q8_0,
+  Nemotron streaming Q8_0, Parakeet CTC 0.6B, wav2vec2 base: tech 0 of 40 each.
+- GPU (`--device gpu`, RTX 4090, Vulkan), `main` against fixed: Redux tech 0 of 40 and clean 0
+  of 200, Whisper tiny tech 0 of 40.
+
+Speed, Redux on the 200 clean clips, total of the per-clip times, 4 rounds in turns, fixed
+against `main`: 8,157 against 8,149 ms under the 8-processor mask (ratio 1.001), and 8,107
+against 8,071 ms with the full mask (1.004). No speed claim for Redux. Whisper tiny under the
+8-processor mask: 6,011 to 2,130 ms on tech and 34,789 to 13,367 ms on clean (one run each),
+because the team no longer has more threads than the process has cores.
+
+Changes:
+
+- Team size: `engine_threads` counts only the cores inside the process mask and keeps the
+  team mask inside it. Linux also stops at `available_parallelism` (a CPU quota is in no mask).
+- Hybrid CPUs: with `TRIT_FAST_CORES=1` on Windows, with more than one `EfficiencyClass` and
+  4 or more cores of the highest class, the team uses those cores, pinned. Off by default: it
+  cannot be measured here (this PC reports class 0 on all 16 cores), and with few fast cores
+  all the cores can be the faster team.
+- Threads are `trit-speech-{slot}-{index}`. `on_every_thread` gives up after 1 s and runs on
+  the caller (a forked child has no workers), so `release_memory` cannot wait without end.
+- `trit_last_error` holds the message of a panic on the calling thread.
+- `Level::Avx512` needs `avx512bw` and `avx512vl` too: `multiversion!` compiles with them.
+- Damaged files: the GGUF header has bounds on the tensor count, the alignment, the sizes, and
+  the array depth. `Tokenizer::parse` rejects an id far past its entries. The NeMo and PyTorch
+  readers add sizes with a check, and an inflated zip member has a limit of 256 MB. The cache
+  index rejects an offset that is not aligned.
+- Cache: each cached load deletes `weights-*.tmp` in `.trit/` that are older than one hour.
+- Position tables: the table of the load stays. A take over 30 s builds a table apart (about
+  148 MB for a model 1,024 wide), and `release_memory` drops it. The long sets cover this path.
+- `trit::Cancel` and `Options::cancel` stop a Parakeet call between encoder blocks, decoder
+  steps, and windows. No C ABI change.
+- Dictionary: a sound check starts at most `SPAN_REACH` frames before its first word, so a long
+  pause before a candidate does not add joint rows for each frame. A token id past the
+  dictionary tables counts as a piece with no letters.
+- GPU: a readback waits at most 10 s (`Device::poll` with a time limit), and after 3 failures
+  in sequence all later calls use the CPU.
+
+Rejected, with the measurement:
+
+- Steering without the team's own load (`GetProcessTimes` taken off the busy time of the
+  current domain). The defect is real: on a quiet PC `main` moved the team 28 times in one
+  7 s run over the 143 takes, about one move for each 250 ms, and the change gave 0 moves
+  (1 move, at 313 ms, with five busy cores on the first domain). But in a batch the moves
+  cost nothing here: with the change the 200 clean clips took 0.9 % more (8,144 against
+  8,069 ms, 4 rounds, full mask), and under the 8-processor mask, where no build moves, the
+  two were level (0.999). Not measured: isolated takes, where a move puts the read that the
+  user waits for on cores that slept.
+- The panic payload of a worker kept in the task loop of `run_tasks` (a lock in the panic
+  branch): 0.8 % to 1.1 % more time on the 200 clean clips in five runs of 3 or 4 rounds.
+  The layout of `Shared` was not the cause: three layouts, with each word on its own cache
+  line too, gave the same loss, and the code of `main` in `run_tasks` removed it. The panic
+  hook of the host still prints the message of the worker.
+- A yield in the wait of `Team::for_each` for its last tasks. `SwitchToThread` can give the
+  CPU to a thread of lower priority for a time slice. With the team size inside the process
+  mask it has no case left.
+- A window cut at a pause that the decoder shows, for recordings over 60 s. Against the cut at
+  the quietest 100 ms: long-clean 726 to 729 errors, long-other 1,213 to 1,207 (55,414 words),
+  and 25 % more time on both sets (64,183 to 80,466 ms and 60,911 to 75,631 ms), because each
+  window is read at the full 60 s and read again when it has no pause.
+- A join of two TDT windows at a pause that both show (with word times from Trit). When the
+  first window drops speech near its end and the second drops the same speech near its start,
+  both show a pause there, the join passes, and the speech is lost. The equal-word join fails
+  in that case and the whole take runs, which loses nothing.
+
+Not done:
+
+- A cache that a load trusts with no conversion. Each layer converts its weights before it
+  asks for the cached buffer, so this needs a change of every loader.
+- One joint product for the frames between two tokens. It needs an A/B session.
+- The new Linux and macOS lines did not compile on this PC (no C compiler for those targets).
+- `trit ... | head` ends with a panic on the closed pipe (seen with `trit doctor`).

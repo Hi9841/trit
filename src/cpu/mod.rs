@@ -66,7 +66,9 @@ pub fn threads(spread: Spread) -> usize {
     engine_threads(spread).0
 }
 
-/// Team size and the affinity mask of its L3 domain (0: no pinning).
+/// Team size and the affinity mask of its cores (0: no pinning). The team
+/// has no more threads than the process has CPUs: more threads than CPUs
+/// spin while the task that a step waits for has no CPU.
 /// `TRIT_THREADS` overrides the physical core count and turns pinning off.
 fn engine_threads(spread: Spread) -> (usize, usize) {
     if let Some(threads) = std::env::var("TRIT_THREADS")
@@ -84,11 +86,113 @@ fn engine_threads(spread: Spread) -> (usize, usize) {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         (threads, 0)
     };
-    match (spread, topology()) {
+    let layout = topology().map(|(cores, l3)| (inside_process(cores), l3));
+    // Not measured on a hybrid CPU yet, so `TRIT_FAST_CORES=1` turns it on:
+    // with few fast cores, all the cores can be the faster team.
+    #[cfg(windows)]
+    if std::env::var("TRIT_FAST_CORES").is_ok_and(|value| value == "1") {
+        if let Some(team) = layout.as_ref().and_then(|(cores, _)| fastest_cores(cores)) {
+            return team;
+        }
+    }
+    let (threads, domain) = match (spread, layout) {
         (Spread::OneCache, Some((cores, l3))) => pick_domain(&cores, &l3).unwrap_or_else(fallback),
         (Spread::AllCores, Some((cores, _))) if !cores.is_empty() => (cores.len(), 0),
         _ => fallback(),
+    };
+    // A CPU quota of a container is in no mask.
+    #[cfg(target_os = "linux")]
+    let threads = threads.min(std::thread::available_parallelism().map_or(threads, |n| n.get()));
+    (threads, domain & allowed_mask())
+}
+
+/// The processors this process may run on, all bits set when unknown.
+fn allowed_mask() -> usize {
+    match team::process_mask() {
+        0 => usize::MAX,
+        mask => mask,
     }
+}
+
+/// The physical cores with a processor that this process may run on.
+fn inside_process(cores: Vec<usize>) -> Vec<usize> {
+    let allowed = allowed_mask();
+    cores
+        .into_iter()
+        .filter(|core| core & allowed != 0)
+        .collect()
+}
+
+/// A hybrid CPU: the cores of the highest efficiency class, as the team size
+/// and their mask. A step ends with its last task, so a team with a task on
+/// an E-core runs at the E-core's speed. `None` on a CPU with one class, or
+/// with fewer than `MIN_FAST_CORES` fast cores: the slow cores then still
+/// add more than they cost.
+#[cfg(windows)]
+fn fastest_cores(cores: &[usize]) -> Option<(usize, usize)> {
+    const MIN_FAST_CORES: usize = 4;
+    let classes: Vec<(usize, u8)> = core_classes()?
+        .into_iter()
+        .filter(|(mask, _)| cores.contains(mask))
+        .collect();
+    let highest = classes.iter().map(|(_, class)| *class).max()?;
+    let lowest = classes.iter().map(|(_, class)| *class).min()?;
+    let fast: Vec<usize> = classes
+        .iter()
+        .filter(|(_, class)| *class == highest)
+        .map(|(mask, _)| *mask)
+        .collect();
+    if highest == lowest || fast.len() < MIN_FAST_CORES {
+        return None;
+    }
+    let mask = fast.iter().fold(0, |all, core| all | core);
+    Some((fast.len(), mask & allowed_mask()))
+}
+
+/// The processor mask and the efficiency class of each physical core. `None`
+/// when the system does not say, or with several processor groups: masks of
+/// different groups do not compare, and no hybrid CPU has more than one.
+#[cfg(windows)]
+fn core_classes() -> Option<Vec<(usize, u8)>> {
+    use windows::Win32::System::SystemInformation::{
+        GetLogicalProcessorInformationEx, RelationProcessorCore,
+        SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+    };
+    let mut bytes = 0u32;
+    // SAFETY: the first call only reports the buffer size.
+    let _ = unsafe { GetLogicalProcessorInformationEx(RelationProcessorCore, None, &mut bytes) };
+    // u64 words: the entries hold pointer-sized masks. One more entry of
+    // room: a core entry is shorter than the type, and a reference to the
+    // last one must stay inside the buffer.
+    let room = bytes as usize + std::mem::size_of::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>();
+    let mut buffer = vec![0u64; room.div_ceil(8)];
+    let first = buffer
+        .as_mut_ptr()
+        .cast::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>();
+    // SAFETY: the buffer holds `bytes` bytes, as the first call asked.
+    unsafe { GetLogicalProcessorInformationEx(RelationProcessorCore, Some(first), &mut bytes) }
+        .ok()?;
+    let mut classes = Vec::new();
+    let mut at = 0usize;
+    while at < bytes as usize {
+        // SAFETY: the system fills the buffer with whole entries, each `Size`
+        // bytes long, and sizes are multiples of 8. `Processor` is the union
+        // member of the relation that the call asked for.
+        let (size, processor) = unsafe {
+            let entry = &*buffer
+                .as_ptr()
+                .add(at / 8)
+                .cast::<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>();
+            (entry.Size as usize, entry.Anonymous.Processor)
+        };
+        let group = processor.GroupMask[0];
+        if size == 0 || !size.is_multiple_of(8) || processor.GroupCount != 1 || group.Group != 0 {
+            return None;
+        }
+        classes.push((group.Mask, processor.EfficiencyClass));
+        at += size;
+    }
+    Some(classes)
 }
 
 /// The L3 domains the team of `domain` can move to, `domain` included: those

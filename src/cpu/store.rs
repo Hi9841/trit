@@ -23,6 +23,7 @@ use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Values a cache file can hold: no padding, every bit pattern valid.
 pub trait Plain: Copy + Send + Sync + 'static {}
@@ -38,6 +39,8 @@ const ALIGN: u64 = 64;
 const MAGIC: &[u8; 8] = b"TRITW001";
 /// Magic and the offset of the index.
 const HEADER: u64 = 16;
+/// A temporary cache file this old has no writer: a load takes seconds.
+const OLD_TEMPORARY: Duration = Duration::from_secs(60 * 60);
 
 /// The weights of one layer: owned, or a view of a mapped cache file.
 pub struct Store<T: Plain> {
@@ -261,6 +264,10 @@ fn read_index(map: &Mapping) -> Option<HashMap<u64, Vec<(usize, usize)>>> {
         let entry = index_at + 8 + i * 24;
         let (key, at, len) = (word(entry)?, word(entry + 8)?, word(entry + 16)?);
         let (at, len) = (usize::try_from(at).ok()?, usize::try_from(len).ok()?);
+        // A mapped buffer is a slice of `f32`: it must start aligned.
+        if !at.is_multiple_of(ALIGN as usize) {
+            return None;
+        }
         map.get(at, len)?;
         index.entry(key).or_default().push((at, len));
     }
@@ -366,6 +373,7 @@ pub(crate) fn load<M>(
     };
     let folder = dir.join(".trit");
     let path = folder.join(&name);
+    remove_old_temporaries(&folder);
     // A file from an earlier load: keep the buffers it holds.
     if let Some(cache) = reader(&path) {
         let (model, session) = pass(Some(cache), report, (0.0, 1.0), &load);
@@ -411,6 +419,26 @@ fn remove_stale(folder: &Path, keep: &str) {
         let name = name.to_string_lossy();
         if name != keep && name.starts_with("weights-") && name.ends_with(".bin") {
             // A file that another process maps stays until it closes it.
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Removes the temporary files of loads that stopped before the end: each
+/// is as large as the cache. A recent file can be the load of another
+/// process, so it stays.
+fn remove_old_temporaries(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|at| at.elapsed().is_ok_and(|age| age > OLD_TEMPORARY));
+        if old && name.starts_with("weights-") && name.ends_with(".tmp") {
             let _ = std::fs::remove_file(entry.path());
         }
     }

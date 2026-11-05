@@ -90,6 +90,14 @@ impl Frontend {
 const WINDOW_SAMPLES: usize = 60 * 16_000;
 /// A pause this long ends a segment.
 const PAUSE_SECONDS: f32 = 1.0;
+/// The decoder's output for a part of the recording.
+struct Part {
+    /// The first sample of the part.
+    start: usize,
+    tokens: Vec<usize>,
+    /// The encoder frame of each token, from the start of the part.
+    frames: Vec<usize>,
+}
 
 impl Parakeet {
     pub fn load(
@@ -161,23 +169,44 @@ impl Parakeet {
     }
 
     /// Recordings longer than `WINDOW_SAMPLES` go through in windows cut at
-    /// quiet points: attention memory grows with the square of the length.
+    /// quiet points: attention memory grows with the square of the length. A
+    /// cancelled call gives no text.
     pub fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        let windows = crate::audio::windows(samples, WINDOW_SAMPLES);
-        if let [one] = windows[..] {
-            return self.tokenizer.decode(&self.decode_window(one, options).0);
+        self.text(&self.parts(samples, options), options)
+    }
+
+    fn text(&self, parts: &[Part], options: &Options) -> String {
+        if options.cancelled() {
+            return String::new();
         }
-        let pieces: Vec<String> = windows
-            .into_iter()
-            .map(|window| {
-                self.tokenizer
-                    .decode(&self.decode_window(window, options).0)
-                    .trim()
-                    .to_string()
-            })
+        if let [one] = parts {
+            return self.tokenizer.decode(&one.tokens);
+        }
+        let pieces: Vec<String> = parts
+            .iter()
+            .map(|part| self.tokenizer.decode(&part.tokens).trim().to_string())
             .filter(|piece| !piece.is_empty())
             .collect();
         pieces.join(" ")
+    }
+
+    /// Decodes a recording in windows cut at quiet points (`audio::windows`).
+    /// A recording of up to `WINDOW_SAMPLES` is one window. A cancelled call
+    /// stops between windows.
+    fn parts(&self, samples: &[f32], options: &Options) -> Vec<Part> {
+        let mut parts = Vec::new();
+        for window in crate::audio::windows(samples, WINDOW_SAMPLES) {
+            if options.cancelled() {
+                break;
+            }
+            let (tokens, frames) = self.decode_window(window, options);
+            parts.push(Part {
+                start: crate::audio::offset(samples, window),
+                tokens,
+                frames,
+            });
+        }
+        parts
     }
 
     /// The text in sentences: a segment ends at `.`, `?`, or `!`, or where
@@ -185,9 +214,9 @@ impl Parakeet {
     /// frame the decoder emitted it at.
     pub fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         let mut segments = Vec::new();
-        for window in crate::audio::windows(samples, WINDOW_SAMPLES) {
-            let offset = crate::audio::offset(samples, window) as f32 / crate::SAMPLE_RATE as f32;
-            let (tokens, frames) = self.decode_window(window, options);
+        for part in self.parts(samples, options) {
+            let offset = part.start as f32 / crate::SAMPLE_RATE as f32;
+            let Part { tokens, frames, .. } = part;
             let frame_seconds = self.model.config.frame_seconds();
             let time = |frame: usize| offset + frame as f32 * frame_seconds;
             let mut start = 0;
@@ -210,20 +239,29 @@ impl Parakeet {
                 }
             }
         }
+        if options.cancelled() {
+            segments.clear();
+        }
         segments
     }
 
-    /// Tokens of one window and the encoder frame of each.
+    /// Tokens of one window and the encoder frame of each. A cancelled
+    /// call has none.
     fn decode_window(&self, samples: &[f32], options: &Options) -> (Vec<usize>, Vec<usize>) {
+        let cancel = options.cancel.as_ref();
         let (features, frames) = self.frontend.compute(samples);
         // The subsampling needs at least one output frame per stage.
         if frames < 8 {
             return (Vec::new(), Vec::new());
         }
         // Redux's speech head: no speech, no text.
-        let Some((encoded, t)) = self.model.encode_speech(&features, frames) else {
+        let Some((encoded, t)) = self.model.encode_speech(&features, frames, cancel) else {
             return (Vec::new(), Vec::new());
         };
+        // An encoder that stopped early has no valid output.
+        if options.cancelled() {
+            return (Vec::new(), Vec::new());
+        }
         let encoded = self.model.prompted(encoded, t, options.language.as_deref());
         // Parakeet cannot be told a language; it can only be kept to English.
         let english = options
@@ -233,6 +271,6 @@ impl Parakeet {
         let terms = self.terms.read();
         let blocked: &[usize] = if english { &terms.blocked } else { &[] };
         self.model
-            .decode(&encoded, t, terms.dictionary.as_ref(), blocked)
+            .decode(&encoded, t, terms.dictionary.as_ref(), blocked, cancel)
     }
 }

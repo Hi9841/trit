@@ -36,10 +36,22 @@ fn guard<T>(failed: T, body: impl FnOnce() -> Result<T, String>) -> T {
             set_error(message);
             failed
         }
-        Err(_) => {
-            set_error("internal error in trit (panic)".into());
+        Err(panic) => {
+            set_error(panic_text(panic.as_ref()));
             failed
         }
+    }
+}
+
+/// The error text of a panic, with its message when it has one.
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+    match message {
+        Some(message) => format!("internal error in trit (panic): {message}"),
+        None => "internal error in trit (panic)".into(),
     }
 }
 

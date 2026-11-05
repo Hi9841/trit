@@ -1557,9 +1557,10 @@ fn read_stamps(
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = send.send(result);
     });
-    instance.poll_all(true);
-    recv.recv()
-        .map_err(|_| "gpu timestamp read was dropped".to_string())?
+    let _ = instance;
+    super::wait_for_device("gpu timestamp read")?;
+    recv.try_recv()
+        .map_err(|_| "gpu timestamp read did not complete".to_string())?
         .map_err(|error| format!("gpu timestamp read: {error}"))?;
     let ticks = match slice.get_mapped_range() {
         Ok(view) => {

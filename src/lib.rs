@@ -24,6 +24,8 @@ mod text;
 mod tts;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub use audio::wav::{read_wav, write_wav};
 pub use catalog::{known, Known, CATALOG};
@@ -68,7 +70,42 @@ pub struct Options {
     /// Write the speech as spoken (the default), or translate it into
     /// English (Whisper's multilingual models, Canary).
     pub task: Task,
+    /// Stops the call early (see `Cancel`). `None` runs to the end.
+    pub cancel: Option<Cancel>,
 }
+
+/// Stops a call that runs on another thread. Parakeet looks at it between
+/// encoder blocks, between decoder steps, and between windows, and the call
+/// then returns no text. The caller holds this value, so it knows that the
+/// empty text is not silence. The other families do not look at it yet and
+/// run to the end. Clones share one flag; two values are equal when they
+/// share it.
+#[derive(Clone, Debug, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stops the calls that hold this flag. A flag stays set: use a new one
+    /// for the next call.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+impl PartialEq for Cancel {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Cancel {}
 
 /// What to write.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,6 +132,10 @@ impl Task {
 impl Options {
     pub(crate) fn fallback(&self) -> bool {
         self.fallback.unwrap_or(true)
+    }
+
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancel.as_ref().is_some_and(Cancel::is_cancelled)
     }
 
     /// `beam`, or `default` when it is 0; at most `MAX_BEAMS`.
@@ -314,10 +355,12 @@ impl Trit {
 /// The engines take their temporaries from mimalloc (when the host's global
 /// allocator is mimalloc, as in the CLI, the C library, and TDT), which keeps
 /// freed pages for reuse. Call it after a load and when the app goes idle,
-/// not between calls: the next call would allocate the pages again. With the
+/// not between calls: the next call would allocate the pages again. It also
+/// drops the position tables that recordings longer than 30 s built. With the
 /// `gpu` feature it also frees the pooled GPU buffers and the staging buffers
 /// of dropped GPU models.
 pub fn release_memory() {
+    models::parts::fastconformer::release_positions();
     cpu::buf::clear_pool();
     #[cfg(feature = "gpu")]
     gpu::trim();

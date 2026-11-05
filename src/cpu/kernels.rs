@@ -276,10 +276,13 @@ impl Ternary {
     pub fn forward(&self, x: &[f32], m: usize) -> Buf {
         #[cfg(feature = "gpu")]
         if let Some(layer) = &self.gpu {
-            if !crate::gpu::host_products() {
+            if !crate::gpu::host_products() && crate::gpu::usable() {
                 match layer.forward(x, m, false) {
-                    Ok(out) => return out,
-                    Err(error) => crate::gpu::log_fallback(&error),
+                    Ok(out) => {
+                        crate::gpu::worked();
+                        return out;
+                    }
+                    Err(error) => crate::gpu::failed(&error),
                 }
             }
         }

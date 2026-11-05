@@ -60,7 +60,12 @@ pub(crate) fn level() -> Level {
                 "avx2" if avx2 => return Level::Avx2,
                 _ => {}
             }
-            if is_x86_feature_detected!("avx512f") {
+            // `multiversion!` compiles this level with all of these.
+            if avx2
+                && is_x86_feature_detected!("avx512f")
+                && is_x86_feature_detected!("avx512bw")
+                && is_x86_feature_detected!("avx512vl")
+            {
                 return Level::Avx512;
             }
             if avx2 {
@@ -707,7 +712,8 @@ mod nn_avx512 {
         for e in 0..k {
             let row = wp.add(e * n);
             let b0 = _mm512_maskz_loadu_ps(mask_lo, row);
-            let b1 = _mm512_maskz_loadu_ps(mask_hi, row.add(16));
+            // With a mask of 0 this points past the buffer, and nothing loads.
+            let b1 = _mm512_maskz_loadu_ps(mask_hi, row.wrapping_add(16));
             for r in 0..R {
                 let a = _mm512_set1_ps(*xp.add(r * k + e));
                 lo[r] = _mm512_fmadd_ps(a, b0, lo[r]);

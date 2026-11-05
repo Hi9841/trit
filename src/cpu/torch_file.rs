@@ -108,6 +108,11 @@ fn collect(
     }
 }
 
+/// The most bytes one compressed member may inflate to. PyTorch stores
+/// tensors with no compression, and the pickle of a model is a few MB, so a
+/// larger result is a damaged or hostile file.
+const MAX_INFLATED: usize = 256 << 20;
+
 /// A stored file of the zip: its compression method, and its data.
 struct Member {
     method: u16,
@@ -186,14 +191,24 @@ impl Zip {
                 }
                 extra = &extra[(4 + len).min(extra.len())..];
             }
-            let local_header = read(file, base + local as usize, 30)?;
-            let data = base
-                + local as usize
+            // Checked: a zip64 size or offset near 2^64 wrapped past the
+            // test, and the read then asked for that many bytes.
+            let past_end = || format!("zip member {name} runs past the end of the file");
+            let local = usize::try_from(local)
+                .ok()
+                .and_then(|local| base.checked_add(local))
+                .filter(|local| *local <= base + total)
+                .ok_or_else(past_end)?;
+            let local_header = read(file, local, 30)?;
+            let data = local
                 + 30
                 + usize::from(u16le(&local_header, 26))
                 + usize::from(u16le(&local_header, 28));
-            if data + size as usize > base + total {
-                return Err(format!("zip member {name} runs past the end of the file"));
+            let end = usize::try_from(size)
+                .ok()
+                .and_then(|size| data.checked_add(size));
+            if end.is_none_or(|end| end > base + total) {
+                return Err(past_end());
             }
             names.insert(
                 name,
@@ -213,8 +228,8 @@ impl Zip {
         let raw = read(file, member.data, member.size)?;
         match member.method {
             0 => Ok(raw),
-            8 => miniz_oxide::inflate::decompress_to_vec(&raw)
-                .map_err(|e| format!("cannot inflate a zip member: {e:?}")),
+            8 => miniz_oxide::inflate::decompress_to_vec_with_limit(&raw, MAX_INFLATED)
+                .map_err(|e| format!("cannot inflate a zip member: {:?}", e.status)),
             other => Err(format!("zip compression method {other} is not supported")),
         }
     }

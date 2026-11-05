@@ -66,6 +66,11 @@ use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 4] = b"GGUF";
 const DEFAULT_ALIGNMENT: u64 = 32;
+/// The smallest tensor entry of the header: an empty name, no dimensions, a
+/// type, and an offset.
+const MIN_TENSOR_ENTRY: u64 = 24;
+/// Arrays inside arrays. GGUF writers use one level; each level recurses.
+const MAX_ARRAY_DEPTH: usize = 4;
 
 /// The `.gguf` file of a model folder: the one GGUF file in a folder that
 /// has no `config.json`.
@@ -110,9 +115,12 @@ impl Gguf {
         for _ in 0..kv_count {
             let key = reader.string().map_err(fail)?;
             let kind = reader.u32().map_err(fail)?;
-            meta.insert(key, reader.value(kind).map_err(fail)?);
+            meta.insert(key, reader.value(kind, 0).map_err(fail)?);
         }
-        let mut infos = Vec::with_capacity(tensor_count as usize);
+        if tensor_count > total / MIN_TENSOR_ENTRY {
+            return Err(fail("the tensor list runs past the end of the file".into()));
+        }
+        let mut infos = Vec::new();
         for _ in 0..tensor_count {
             let name = reader.string().map_err(fail)?;
             let dims = reader.u32().map_err(fail)?;
@@ -128,19 +136,24 @@ impl Gguf {
             .get("general.alignment")
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_ALIGNMENT);
+        if alignment == 0 {
+            return Err(fail("general.alignment is 0".into()));
+        }
         let here = reader.position().map_err(fail)?;
-        let data = here.div_ceil(alignment) * alignment;
+        let data = here
+            .checked_next_multiple_of(alignment)
+            .ok_or_else(|| fail("the tensor data runs past the end of the file".into()))?;
         let mut tensors = Vec::with_capacity(infos.len());
         for (name, kind, count, offset) in infos {
             let block = crate::cpu::ggml_quants::BlockType::from_ggml(kind);
             let (dtype, bytes) = match (kind, block) {
-                (0, _) => ("F32", count * 4),
-                (1, _) => ("F16", count * 2),
-                (8, _) if count % 32 == 0 => ("Q8_0", count / 32 * 34),
-                (30, _) => ("BF16", count * 2),
+                (0, _) => ("F32", count.checked_mul(4)),
+                (1, _) => ("F16", count.checked_mul(2)),
+                (8, _) if count % 32 == 0 => ("Q8_0", (count / 32).checked_mul(34)),
+                (30, _) => ("BF16", count.checked_mul(2)),
                 (_, Some((block, name))) if count % block.block().0 as u64 == 0 => {
                     let (values, size) = block.block();
-                    (name, count / values as u64 * size as u64)
+                    (name, (count / values as u64).checked_mul(size as u64))
                 }
                 (other, _) => {
                     return Err(fail(format!(
@@ -148,16 +161,14 @@ impl Gguf {
                     )))
                 }
             };
-            let start = data + offset;
-            if start + bytes > total {
+            let span = data.checked_add(offset).and_then(|start| {
+                let end = start.checked_add(bytes?)?;
+                (end <= total).then_some((start, end))
+            });
+            let Some((start, end)) = span else {
                 return Err(fail(format!("tensor {name} runs past the end of the file")));
-            }
-            tensors.push((
-                name,
-                dtype.to_string(),
-                start as usize,
-                (start + bytes) as usize,
-            ));
+            };
+            tensors.push((name, dtype.to_string(), start as usize, end as usize));
         }
         Ok(Self {
             path: path.to_path_buf(),
@@ -450,8 +461,8 @@ impl Reader {
             .map_err(|e| format!("cannot read the header: {e}"))
     }
 
-    /// One metadata value of GGUF type `kind`.
-    fn value(&mut self, kind: u32) -> Result<Value, String> {
+    /// One metadata value of GGUF type `kind`, inside `depth` arrays.
+    fn value(&mut self, kind: u32, depth: usize) -> Result<Value, String> {
         Ok(match kind {
             0 => json!(self.array::<1>()?[0]),
             1 => json!(i8::from_le_bytes(self.array()?)),
@@ -463,6 +474,9 @@ impl Reader {
             7 => json!(self.array::<1>()?[0] != 0),
             8 => Value::String(self.string()?),
             9 => {
+                if depth >= MAX_ARRAY_DEPTH {
+                    return Err("the header arrays are nested too deep".into());
+                }
                 let item = self.u32()?;
                 let count = self.u64()?;
                 if count > 1 << 24 {
@@ -470,7 +484,7 @@ impl Reader {
                 }
                 Value::Array(
                     (0..count)
-                        .map(|_| self.value(item))
+                        .map(|_| self.value(item, depth + 1))
                         .collect::<Result<_, _>>()?,
                 )
             }

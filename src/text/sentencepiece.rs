@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 
 pub const WORD_START: char = '\u{2581}';
+/// Ids that `model.vocab` may leave free past twice its entries.
+const MAX_ID_GAP: usize = 1 << 16;
 
 pub struct Tokenizer {
     pieces: Vec<String>,
@@ -35,7 +37,18 @@ impl Tokenizer {
                 .filter_map(|(piece, id)| Some((piece.clone(), id.as_u64()? as usize)))
                 .collect()
         };
-        let size = entries.iter().map(|(_, id)| id + 1).max().unwrap_or(0);
+        // A real vocabulary has few gaps. The table takes the size of the
+        // largest id, and an allocation that fails ends the process.
+        let limit = entries.len().saturating_mul(2).saturating_add(MAX_ID_GAP);
+        let largest = entries.iter().map(|(_, id)| *id).max();
+        if largest.is_some_and(|id| id >= limit) {
+            return Err(format!(
+                "tokenizer.json: id {} is far past the {} pieces of model.vocab",
+                largest.unwrap_or(0),
+                entries.len()
+            ));
+        }
+        let size = largest.map_or(0, |id| id + 1);
         let mut pieces = vec![String::new(); size];
         let mut ids = HashMap::new();
         for (piece, id) in entries {

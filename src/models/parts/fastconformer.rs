@@ -14,8 +14,9 @@ use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
 use crate::models::config::Json;
 use crate::models::layers::{conv_columns, Norm, Rotary};
-use parking_lot::RwLock;
-use std::sync::Arc;
+use crate::Cancel;
+use parking_lot::{Mutex, RwLock};
+use std::sync::{Arc, Weak};
 
 const BATCH_NORM_EPS: f32 = 1e-5;
 
@@ -1359,9 +1360,26 @@ pub const POSITION_REACH: usize = 375;
 /// Projected relative positions for `reach` down to `-reach`, one row each.
 /// A row depends only on its position, never on the take's length or on
 /// other rows, so one table serves every take up to `reach + 1` frames.
+/// The table of the load stays. A longer take builds a table apart, in
+/// `grown`, and `release_positions` drops it: about 148 MB for a take over
+/// 30 s, and most takes never need it again.
 #[derive(Default)]
 struct RelCache {
     table: RwLock<Option<Arc<RelRows>>>,
+    grown: Arc<GrownRows>,
+}
+
+type GrownRows = RwLock<Option<Arc<RelRows>>>;
+
+/// The tables that grew since the last `release_positions`, of every model.
+static GROWN: Mutex<Vec<Weak<GrownRows>>> = Mutex::new(Vec::new());
+
+/// Drops the position tables that long takes built. A take that needs one
+/// builds it again; a row depends only on its position, so the text stays.
+pub(crate) fn release_positions() {
+    for grown in GROWN.lock().drain(..).filter_map(|grown| grown.upgrade()) {
+        *grown.write() = None;
+    }
 }
 
 struct RelRows {
@@ -1385,8 +1403,9 @@ impl RelRows {
 }
 
 impl RelCache {
-    /// The table, grown first when `t` frames reach past it. `keep` stores
-    /// a new table: `Store::weights` at load, `Store::owned` after.
+    /// A table for `t` frames, built first when `t` frames reach past both.
+    /// `keep` stores a new table: `Store::weights` at load, `Store::owned`
+    /// after.
     fn rows(
         &self,
         t: usize,
@@ -1394,16 +1413,28 @@ impl RelCache {
         keep: fn(Vec<f32>) -> Store<f32>,
         project: impl Fn(&[f32], usize) -> Buf,
     ) -> Arc<RelRows> {
-        if let Some(rows) = self.table.read().as_ref().filter(|r| r.reach + 1 >= t) {
+        let fits = |rows: &&Arc<RelRows>| rows.reach + 1 >= t;
+        if let Some(rows) = self.table.read().as_ref().filter(fits) {
             return Arc::clone(rows);
         }
+        if let Some(rows) = self.grown.read().as_ref().filter(fits) {
+            return Arc::clone(rows);
+        }
+        // One builder at a time: a second one finds the table of the first.
         let mut table = self.table.write();
-        if let Some(rows) = table.as_ref().filter(|r| r.reach + 1 >= t) {
+        if let Some(rows) = table.as_ref().filter(fits) {
             return Arc::clone(rows);
         }
-        let reach = (t - 1)
-            .max(POSITION_REACH)
-            .max(table.as_ref().map_or(0, |r| 2 * r.reach));
+        if let Some(rows) = self.grown.read().as_ref().filter(fits) {
+            return Arc::clone(rows);
+        }
+        let largest = self
+            .grown
+            .read()
+            .as_ref()
+            .or(table.as_ref())
+            .map_or(0, |r| r.reach);
+        let reach = (t - 1).max(POSITION_REACH).max(2 * largest);
         let count = 2 * reach + 1;
         let projected = project(&relative_positions(reach + 1, d), count);
         let hd = d / heads;
@@ -1417,7 +1448,12 @@ impl RelCache {
             reach,
             rows: keep(by_head.into_vec()),
         });
-        *table = Some(Arc::clone(&rows));
+        if table.is_none() {
+            *table = Some(Arc::clone(&rows));
+        } else {
+            *self.grown.write() = Some(Arc::clone(&rows));
+            GROWN.lock().push(Arc::downgrade(&self.grown));
+        }
         rows
     }
 }
@@ -1718,27 +1754,36 @@ impl Parakeet {
     /// Encoder output after the 24 blocks: `frames x hidden`.
     pub fn encode(&self, features: &[f32], frames: usize) -> (Buf, usize) {
         let (x, t) = self.subsampling.forward(features, frames, self.config.mels);
-        self.encode_subsampled(x, t)
+        self.encode_subsampled(x, t, None)
     }
 
     /// `encode`, or `None` when the model's speech head finds no speech
-    /// (a model without one always encodes).
-    pub fn encode_speech(&self, features: &[f32], frames: usize) -> Option<(Buf, usize)> {
+    /// (a model without one always encodes). After `cancel` the output is
+    /// not valid: the caller must look at the flag.
+    pub fn encode_speech(
+        &self,
+        features: &[f32],
+        frames: usize,
+        cancel: Option<&Cancel>,
+    ) -> Option<(Buf, usize)> {
         let (x, t) = self.subsampling.forward(features, frames, self.config.mels);
         if self.vad.as_ref().is_some_and(|vad| !vad.speech(&x, t)) {
             return None;
         }
-        Some(self.encode_subsampled(x, t))
+        Some(self.encode_subsampled(x, t, cancel))
     }
 
-    fn encode_subsampled(&self, mut x: Buf, t: usize) -> (Buf, usize) {
+    fn encode_subsampled(&self, mut x: Buf, t: usize, cancel: Option<&Cancel>) -> (Buf, usize) {
         #[cfg(feature = "gpu")]
         if let Some(encoder) = &self.gpu_encoder {
-            if t >= GPU_MIN_FRAMES {
+            if t >= GPU_MIN_FRAMES && crate::gpu::usable() {
                 let d = self.config.hidden;
                 match encoder.encode(&x, t, |reach| relative_positions(reach + 1, d)) {
-                    Ok(encoded) => return (encoded, t),
-                    Err(error) => crate::gpu::log_fallback(&error),
+                    Ok(encoded) => {
+                        crate::gpu::worked();
+                        return (encoded, t);
+                    }
+                    Err(error) => crate::gpu::failed(&error),
                 }
             }
         }
@@ -1756,6 +1801,9 @@ impl Parakeet {
             kernel.apply(&mut x, t);
         }
         for block in &self.blocks {
+            if cancel.is_some_and(Cancel::is_cancelled) {
+                break;
+            }
             block.forward(&mut x, t, c);
         }
         if let Some(norm) = &self.out_norm {
@@ -1794,19 +1842,21 @@ impl Parakeet {
 
     /// Tokens of the encoder output `t x hidden`, each with the encoder
     /// frame it was emitted at. `dictionary` terms replace words they sound
-    /// like (TDT only); `banned` tokens are never picked.
+    /// like (TDT only); `banned` tokens are never picked. `cancel` gives no
+    /// tokens (transducer heads only).
     pub fn decode(
         &self,
         encoded: &[f32],
         t: usize,
         dictionary: Option<&Dictionary>,
         banned: &[usize],
+        cancel: Option<&Cancel>,
     ) -> (Vec<usize>, Vec<usize>) {
         let c = &self.config;
         match &self.head {
             Head::Transducer(tdt) => {
                 let projected = tdt.encoder_projector.forward(encoded, t);
-                tdt.decode(c, &projected, t, dictionary, banned)
+                tdt.decode(c, &projected, t, dictionary, banned, cancel)
             }
             Head::Ctc(head) => crate::models::parts::ctc::greedy(
                 &head.forward(encoded, t),

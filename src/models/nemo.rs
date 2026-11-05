@@ -293,7 +293,8 @@ fn read_tar(file: &File, total: usize) -> Result<HashMap<String, (usize, usize)>
             None => octal(&header[124..136])?,
         };
         let data = at + BLOCK;
-        if data + size > total {
+        // Checked: a base-256 size near 2^64 wrapped past this test.
+        if data.checked_add(size).is_none_or(|end| end > total) {
             return Err("a tar member runs past the end of the file".into());
         }
         match header[156] {

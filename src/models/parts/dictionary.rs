@@ -165,7 +165,7 @@ impl Dictionary {
                     words[last]
                         .tokens
                         .clone()
-                        .flat_map(|i| self.keys[tokens[i]].clone()),
+                        .flat_map(|i| self.key(tokens[i]).to_vec()),
                 );
                 let span = words[first].tokens.start..words[last].tokens.end;
                 let count = last - first + 1;
@@ -311,6 +311,11 @@ impl Dictionary {
         check
     }
 
+    /// The letters of `token`. An id past the tables has none.
+    fn key(&self, token: usize) -> &[char] {
+        self.keys.get(token).map_or(&[], Vec::as_slice)
+    }
+
     /// The words of `tokens`, each without its trailing punctuation.
     fn words(&self, tokens: &[usize]) -> Vec<Word> {
         let mut words: Vec<Word> = Vec::new();
@@ -318,7 +323,7 @@ impl Dictionary {
         // after it. A quote that starts a word ("▁'") ends it too.
         let mut open = false;
         for (i, &token) in tokens.iter().enumerate() {
-            let letters = !self.keys[token].is_empty();
+            let letters = !self.key(token).is_empty();
             if self.starts.get(token).copied().unwrap_or(false) {
                 open = false;
             }

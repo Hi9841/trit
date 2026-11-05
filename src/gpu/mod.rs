@@ -32,6 +32,14 @@ pub(crate) const MIN_ROWS: usize = 48;
 
 static GPU: OnceLock<Result<Gpu, String>> = OnceLock::new();
 static LOGGED_FALLBACK: AtomicBool = AtomicBool::new(false);
+/// GPU calls that failed one after the other.
+static FAILURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// After this many failures in sequence the GPU stays off: each more try
+/// would cost its time and then the time of the CPU run.
+const MAX_FAILURES: u32 = 3;
+/// A readback takes milliseconds. A longer wait means that the driver hangs,
+/// and the call must go to the CPU.
+const READBACK_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 thread_local! {
     static HOST_PRODUCTS: Cell<bool> = const { Cell::new(false) };
@@ -45,6 +53,38 @@ pub(crate) fn use_host_products(host: bool) {
 /// The caller asked for the CPU product.
 pub(crate) fn host_products() -> bool {
     HOST_PRODUCTS.with(|flag| flag.get())
+}
+
+/// Whether calls still try the GPU.
+pub(crate) fn usable() -> bool {
+    FAILURES.load(Ordering::Relaxed) < MAX_FAILURES
+}
+
+/// A GPU call failed, and this call uses the CPU.
+pub(crate) fn failed(error: &str) {
+    log_fallback(error);
+    if FAILURES.fetch_add(1, Ordering::Relaxed) + 1 == MAX_FAILURES {
+        eprintln!("trit: the GPU failed {MAX_FAILURES} times. All later calls use the CPU.");
+    }
+}
+
+/// A GPU call gave its result.
+pub(crate) fn worked() {
+    if FAILURES.load(Ordering::Relaxed) != 0 && usable() {
+        FAILURES.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Waits for the last submission and its callbacks, at most `READBACK_LIMIT`.
+pub(crate) fn wait_for_device(what: &str) -> Result<(), String> {
+    Gpu::get()?
+        .device()
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(READBACK_LIMIT),
+        })
+        .map(drop)
+        .map_err(|error| format!("{what}: {error}"))
 }
 
 /// Log the first GPU failure. Later failures stay quiet.
@@ -753,9 +793,10 @@ pub(crate) fn readback(
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = send.send(result);
     });
-    instance.poll_all(true);
-    recv.recv()
-        .map_err(|_| "gpu readback was dropped".to_string())?
+    let _ = instance;
+    wait_for_device("gpu readback")?;
+    recv.try_recv()
+        .map_err(|_| "gpu readback did not complete".to_string())?
         .map_err(|error| format!("gpu readback: {error}"))?;
     let _unmap = Unmap(staging);
     let view = slice

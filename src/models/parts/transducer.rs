@@ -14,6 +14,7 @@ use crate::cpu::half::HalfDense;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
 use crate::models::layers::argmax;
+use crate::Cancel;
 use std::collections::HashMap;
 
 /// A decoder layer: f16 weights as stored under `Precision::Auto` and
@@ -215,7 +216,7 @@ impl Transducer {
 
     /// Greedy TDT decoding over projected encoder frames (`t x decoder_hidden`).
     /// `dictionary` terms then replace the words heard where the sound
-    /// allows (see `dictionary.rs`).
+    /// allows (see `dictionary.rs`). `cancel` gives no tokens.
     pub(crate) fn decode(
         &self,
         c: &Config,
@@ -223,8 +224,12 @@ impl Transducer {
         t: usize,
         dictionary: Option<&Dictionary>,
         banned: &[usize],
+        cancel: Option<&Cancel>,
     ) -> (Vec<usize>, Vec<usize>) {
-        let run = self.greedy(c, projected, t, banned, dictionary.is_some());
+        let run = self.greedy(c, projected, t, banned, dictionary.is_some(), cancel);
+        if cancel.is_some_and(Cancel::is_cancelled) {
+            return (Vec::new(), Vec::new());
+        }
         let Greedy {
             mut tokens,
             mut frames,
@@ -243,7 +248,7 @@ impl Transducer {
     }
 
     /// One greedy pass; `keep` records the decoder before each token for
-    /// the dictionary.
+    /// the dictionary. `cancel` ends the pass early.
     fn greedy(
         &self,
         c: &Config,
@@ -251,6 +256,7 @@ impl Transducer {
         t: usize,
         banned: &[usize],
         keep: bool,
+        cancel: Option<&Cancel>,
     ) -> Greedy {
         let dh = c.decoder_hidden;
         let mut state = DecoderState {
@@ -275,7 +281,7 @@ impl Transducer {
         snapshot(&mut run.trail, &state, &dec, 0);
         let (mut frame, mut symbols) = (0usize, 0usize);
         let mut joint_in = vec![0.0f32; dh];
-        while frame < t {
+        while frame < t && !cancel.is_some_and(Cancel::is_cancelled) {
             let enc = &projected[frame * dh..(frame + 1) * dh];
             for i in 0..dh {
                 joint_in[i] = (enc[i] + dec[i]).max(0.0);
@@ -366,7 +372,7 @@ impl Transducer {
             let terms: Vec<usize> = spellings.iter().map(|s| job(span.start, s, end)).collect();
             plans.push((words, terms, prior));
         }
-        let scores = self.score(c, heard, &jobs);
+        let scores = self.score(c, heard, frames, &jobs);
         let mut wins = Vec::new();
         for (candidate, (words, terms, prior)) in candidates.into_iter().zip(plans) {
             let gain = match words {
@@ -408,15 +414,24 @@ impl Transducer {
     /// its tokens and then reaches its end, summed over every alignment to
     /// the frames between (the TDT forward algorithm). Blanks move at least
     /// one frame; tokens may stay on theirs. All jobs share the decoder
-    /// steps and one joint product, so each weight is read once.
-    fn score(&self, c: &Config, heard: &Heard, jobs: &[Job]) -> Vec<f32> {
+    /// steps and one joint product, so each weight is read once. `frames`
+    /// holds the frame of each token heard.
+    fn score(&self, c: &Config, heard: &Heard, frames: &[usize], jobs: &[Job]) -> Vec<f32> {
         let dh = c.decoder_hidden;
-        // The frames each job crosses: from where its start left the
-        // decoder to its end, and the anchor token there.
+        // A job starts where its start left the decoder, and within
+        // `SPAN_REACH` of its first word: a long pause before the word would
+        // add joint rows for every frame and every prefix.
+        let first_frame = |start: usize| {
+            heard.trail[start]
+                .next
+                .max(frames[start].saturating_sub(SPAN_REACH))
+        };
+        // The frames each job crosses: from its first frame to its end, and
+        // the anchor token there.
         let spans: Vec<Option<(usize, usize, Option<usize>)>> = jobs
             .iter()
             .map(|job| {
-                let from = heard.trail[job.start].next;
+                let from = first_frame(job.start);
                 let (last, anchor) = match job.end {
                     End::Token(token, frame) => (frame, Some(token)),
                     End::Close(frame) => (frame, None),
@@ -491,7 +506,7 @@ impl Transducer {
         let mut input = Vec::new();
         let mut total = 0;
         for (node, output) in nodes.iter_mut().zip(&outputs) {
-            let from = heard.trail[node.start].next;
+            let from = first_frame(node.start);
             node.base = total;
             total += node.rows;
             for f in from..from + node.rows {
@@ -603,7 +618,8 @@ fn rows(width: usize, anchor: Option<usize>) -> usize {
     }
 }
 
-/// Frames after the last word of a span that its sound check covers: 2 s.
+/// Frames before the first word and after the last word of a span that its
+/// sound check covers: 2 s.
 const SPAN_REACH: usize = 25;
 
 /// A spelling to score: from the decoder before token `start` of the

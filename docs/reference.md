@@ -164,11 +164,12 @@ trit::release_memory();                                  // when the app goes id
 | `Trit::load_with(dir, &LoadOptions { precision, device, cache })` | The same with a `Precision` (`Auto`, `Int8`, `F16`, `F32`), a `Device` (`Cpu` default, `Gpu`, `Auto`), and `cache` (see "Weight cache") |
 | `Trit::load_reporting(dir, &LoadOptions, Option<Arc<dyn Fn(f32) + Send + Sync>>)` | `load_with`; the function gets the fraction loaded, 0 to 1, for a progress bar |
 | `Trit::transcribe(&self, &[f32]) -> String` | Text; the model detects the language |
-| `Trit::transcribe_with(&self, &[f32], &Options) -> String` | Text with `Options { language, task, beam, fallback }` |
+| `Trit::transcribe_with(&self, &[f32], &Options) -> String` | Text with `Options { language, task, beam, fallback, cancel }` |
+| `Cancel::new()`, `Cancel::cancel(&self)`, `Cancel::is_cancelled(&self)` | Stops a call from another thread through `Options::cancel`. Parakeet stops between encoder blocks, decoder steps, and windows, and the call returns no text. The other families do not look at the flag yet and run to the end. A flag stays set: use a new one for each call. There is no C ABI for it |
 | `Trit::segments(&self, &[f32], &Options) -> Vec<Segment>` | Timed parts: `start`, `end` in seconds, `text` |
 | `Trit::kind(&self) -> &str` | `parakeet_tdt`, `parakeet_ctc`, `canary`, `whisper`, or `moonshine` |
 | `Trit::set_dictionary(&self, &[String], BiasWeights) -> Vec<String>` | Terms to favor; returns the terms the model cannot spell |
-| `release_memory()` | Gives memory that earlier calls freed back to the system |
+| `release_memory()` | Gives memory that earlier calls freed back to the system, and drops the position tables that recordings over 30 s built (FastConformer models; the next long recording builds them again) |
 | `Cleaner::load(dir)`, `Cleaner::load_with(dir, &LoadOptions)`, `Cleaner::clean(&self, &str, &Style) -> String` | S1-mini transcript cleanup |
 | `find_model(Option<&Path>)`, `find_cleanup_model(Option<&Path>)` | The model search in [Models](#models) |
 | `missing_model(Option<&Path>) -> String` | Why `find_model` found nothing, with the fix |
@@ -703,7 +704,12 @@ Threads:
 - Windows and Linux: the worker team uses the physical cores of one L3
   cache, pinned (Whisper uses all physical cores). On Windows, the team moves
   to another L3 cache of the same size between runs when its own is at least
-  25 points busier.
+  25 points busier. A team has no more threads
+  than the process has cores: Windows counts the cores inside the process
+  mask, and Linux also stops at `available_parallelism` (affinity and CPU
+  quota). With `TRIT_FAST_CORES=1`, on a Windows CPU with several efficiency
+  classes and 4 or more cores of the highest class, the team uses only those
+  cores, pinned. This is off by default: it is not measured on such a CPU yet.
 - macOS: one thread per performance core (`hw.perflevel0.physicalcpu`).
   macOS has no affinity masks, so each team thread runs at the
   user-interactive QoS class, and macOS keeps it on a performance core. A
@@ -806,6 +812,7 @@ Parakeet Redux. Other models run on the GPU and gain little; a decoder step
 | `TRIT_CLEANUP_MODEL` | The S1-mini folder, when the caller names none |
 | `TRIT_VOICE` | The voice folder, when the caller names none (else Kokoro, then MMS-TTS) |
 | `TRIT_THREADS` | The worker count; turns pinning off |
+| `TRIT_FAST_CORES` | `1`: on a Windows hybrid CPU, the team uses only the cores of the highest efficiency class (4 or more) |
 | `TRIT_DEVICE` | `cpu`, `gpu`, or `auto`. Overrides the device of a load |
 | `TRIT_ISA` | Forces another kernel path, for tests: `scalar`, `avx2`, or `avxvnni` on x86-64; `scalar`, `neon`, or `dotprod` on arm64 |
 | `TRIT_LIB` | The library path, for the Python and Node bindings |
