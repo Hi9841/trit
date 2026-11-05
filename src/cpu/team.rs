@@ -11,6 +11,12 @@
 //! can wait a long time for a CPU; the threads that run take its tasks, and
 //! it finds nothing to do when it wakes. Waiting for every worker cost 3 to
 //! 5 s of a 6 to 9 s take.
+//!
+//! Priority does not help against a load on the second hardware thread of a
+//! team core: the load takes half of the core and the scheduler has nothing
+//! to preempt. A full load on the team's L3 domain cost 1.9 times the quiet
+//! time, and on a free domain the same take cost 1.3 times. So a team with a
+//! choice of domains moves to the quieter one between runs (`steer`).
 
 use parking_lot::{Condvar, Mutex};
 use std::any::Any;
@@ -18,10 +24,20 @@ use std::cell::Cell;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Longer than the gaps inside a take, short enough to be invisible as idle CPU.
 const SPIN_FOR: Duration = Duration::from_millis(3);
+
+/// A shorter window shows the team's own last run, not the load.
+const MIN_LOAD_WINDOW: Duration = Duration::from_millis(200);
+/// A longer window shows an idle gap, not the load now.
+const MAX_LOAD_WINDOW: Duration = Duration::from_secs(30);
+/// The team moves when its domain is this much busier than another, as a
+/// fraction of all the domain's processors. One hardware thread on each core
+/// is 0.5, and a move costs the warm caches, so noise must not start one.
+const MOVE_AT_BUSY_GAP: f64 = 0.25;
 
 struct Job {
     run: *const (dyn Fn(usize) + Sync),
@@ -55,8 +71,14 @@ struct Shared {
 pub struct Team {
     shared: Arc<Shared>,
     workers: usize,
+    /// The worker threads, kept to move them to another domain.
+    threads: Vec<JoinHandle<()>>,
     /// Affinity mask of the team's L3 domain, 0 when the team is not pinned.
-    domain: usize,
+    domain: AtomicUsize,
+    /// Domains of the same size that the team can move to, its own included.
+    domains: Vec<usize>,
+    /// When and what the last look at the processors saw.
+    load: Mutex<Option<(Instant, Vec<CpuTimes>)>>,
     /// One caller at a time; a nested call from inside a task runs inline.
     submit: Mutex<()>,
 }
@@ -69,7 +91,7 @@ thread_local! {
 
 impl Team {
     /// `threads` includes the calling thread, which works on every job too.
-    fn new(threads: usize, domain: usize) -> Self {
+    fn new(threads: usize, domain: usize, domains: Vec<usize>) -> Self {
         let shared = Arc::new(Shared {
             generation: AtomicUsize::new(0),
             job: AtomicPtr::new(std::ptr::null_mut()),
@@ -81,6 +103,7 @@ impl Team {
             wake: Condvar::new(),
         });
         let workers = threads.saturating_sub(1);
+        let mut handles = Vec::with_capacity(workers);
         for index in 0..workers {
             let for_worker = Arc::clone(&shared);
             let spawned = std::thread::Builder::new()
@@ -88,23 +111,71 @@ impl Team {
                 .spawn(move || {
                     set_affinity(domain);
                     set_priority(ABOVE_NORMAL);
+                    keep_full_speed();
                     set_ideal(ideal_cpu(domain, index + 1, threads));
                     work(&for_worker);
                 });
-            if spawned.is_err() {
+            match spawned {
+                Ok(handle) => handles.push(handle),
                 // Fewer threads only make the engine slower.
-                return Self::with_workers(shared, index, domain);
+                Err(_) => break,
             }
         }
-        Self::with_workers(shared, workers, domain)
-    }
-
-    fn with_workers(shared: Arc<Shared>, workers: usize, domain: usize) -> Self {
         Self {
             shared,
-            workers,
-            domain,
+            workers: handles.len(),
+            threads: handles,
+            domain: AtomicUsize::new(domain),
+            domains,
+            load: Mutex::new(None),
             submit: Mutex::new(()),
+        }
+    }
+
+    /// Moves the team to a quieter domain when the load of the last window
+    /// shows one. Two runs of a take give the window, so the work before
+    /// the end of the take does the looking and the moving.
+    fn steer(&self) {
+        if self.domains.len() < 2 {
+            return;
+        }
+        let Some(mut load) = self.load.try_lock() else {
+            return;
+        };
+        let Some(times) = cpu_times() else {
+            return;
+        };
+        let now = Instant::now();
+        let window = load.as_ref().map(|(at, _)| now.duration_since(*at));
+        if window.is_some_and(|window| window < MIN_LOAD_WINDOW) {
+            return;
+        }
+        let before = load.replace((now, times));
+        let (Some((_, before)), Some((_, times))) = (before, load.as_ref()) else {
+            return;
+        };
+        if window.is_some_and(|window| window > MAX_LOAD_WINDOW) {
+            return;
+        }
+        let current = self.domain.load(Ordering::Relaxed);
+        let busy = |domain: usize| busy_fraction(&before, times, domain);
+        let quietest = self
+            .domains
+            .iter()
+            .copied()
+            .min_by(|a, b| busy(*a).total_cmp(&busy(*b)));
+        if let Some(domain) = quietest {
+            if busy(current) - busy(domain) >= MOVE_AT_BUSY_GAP {
+                self.move_to(domain);
+            }
+        }
+    }
+
+    fn move_to(&self, domain: usize) {
+        self.domain.store(domain, Ordering::Relaxed);
+        let threads = self.workers + 1;
+        for (index, handle) in self.threads.iter().enumerate() {
+            pin_thread(handle, domain, ideal_cpu(domain, index + 1, threads));
         }
     }
 
@@ -226,12 +297,13 @@ fn work(s: &Shared) {
 pub const TEAMS: usize = 2;
 static TEAM: [OnceLock<Team>; TEAMS] = [OnceLock::new(), OnceLock::new()];
 
-/// Starts team `slot` with the threads (the caller included) and the
-/// affinity mask (0: none) that `size` gives. Later calls do nothing.
-pub fn start(slot: usize, size: impl FnOnce() -> (usize, usize)) {
+/// Starts team `slot` with the threads (the caller included), the affinity
+/// mask (0: none), and the masks it can move to that `size` gives. Later
+/// calls do nothing.
+pub fn start(slot: usize, size: impl FnOnce() -> (usize, usize, Vec<usize>)) {
     TEAM[slot].get_or_init(|| {
-        let (threads, domain) = size();
-        Team::new(threads.max(1), domain)
+        let (threads, domain, domains) = size();
+        Team::new(threads.max(1), domain, domains)
     });
 }
 
@@ -240,11 +312,14 @@ pub fn start(slot: usize, size: impl FnOnce() -> (usize, usize)) {
 pub fn enter(slot: usize) -> Entered {
     let previous = CURRENT.replace(slot);
     let team = team();
+    team.steer();
+    let domain = team.domain.load(Ordering::Relaxed);
+    keep_full_speed();
     Entered {
         previous,
-        affinity: set_affinity(team.domain),
+        affinity: set_affinity(domain),
         priority: set_priority(ABOVE_NORMAL),
-        ideal: set_ideal(ideal_cpu(team.domain, 0, team.workers + 1)),
+        ideal: set_ideal(ideal_cpu(domain, 0, team.workers + 1)),
     }
 }
 
@@ -287,9 +362,113 @@ fn ideal_cpu(domain: usize, index: usize, threads: usize) -> Option<u32> {
     Some(cpus[(index * stride) % cpus.len()])
 }
 
+/// The time one processor spent, in the system's ticks.
+#[derive(Clone, Copy)]
+struct CpuTimes {
+    busy: i64,
+    total: i64,
+}
+
+/// The fraction of the processors of `domain` that were busy between the
+/// two looks. Each list holds one entry per processor, in processor order.
+fn busy_fraction(before: &[CpuTimes], after: &[CpuTimes], domain: usize) -> f64 {
+    let (mut busy, mut total) = (0, 0);
+    for (cpu, (first, last)) in before.iter().zip(after).enumerate() {
+        if cpu < usize::BITS as usize && domain >> cpu & 1 == 1 {
+            busy += last.busy - first.busy;
+            total += last.total - first.total;
+        }
+    }
+    if total > 0 {
+        busy as f64 / total as f64
+    } else {
+        0.0
+    }
+}
+
+/// The time of each processor of this processor group, or `None` when the
+/// system does not say. Without it a team stays on its first domain.
+#[cfg(windows)]
+fn cpu_times() -> Option<Vec<CpuTimes>> {
+    /// SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION. `kernel` includes `idle`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Performance {
+        idle: i64,
+        kernel: i64,
+        user: i64,
+        dpc: i64,
+        interrupt: i64,
+        interrupts: u32,
+    }
+    /// SystemProcessorPerformanceInformation.
+    const PROCESSOR_PERFORMANCE: u32 = 8;
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQuerySystemInformation(
+            class: u32,
+            info: *mut std::ffi::c_void,
+            length: u32,
+            returned: *mut u32,
+        ) -> i32;
+    }
+    let mut info = [Performance::default(); usize::BITS as usize];
+    let mut returned = 0u32;
+    // SAFETY: `info` holds the length given, and both pointers name locals
+    // that live through the call. The call fills whole entries.
+    let status = unsafe {
+        NtQuerySystemInformation(
+            PROCESSOR_PERFORMANCE,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+            &mut returned,
+        )
+    };
+    if status < 0 {
+        return None;
+    }
+    let count = returned as usize / std::mem::size_of::<Performance>();
+    Some(
+        info[..count]
+            .iter()
+            .map(|cpu| CpuTimes {
+                busy: cpu.kernel + cpu.user - cpu.idle,
+                total: cpu.kernel + cpu.user,
+            })
+            .collect(),
+    )
+}
+
+#[cfg(not(windows))]
+fn cpu_times() -> Option<Vec<CpuTimes>> {
+    None
+}
+
+/// Puts a worker on `domain`. It needs no wake: a parked worker starts there,
+/// and a running one moves at once.
+#[cfg(windows)]
+fn pin_thread(thread: &JoinHandle<()>, domain: usize, ideal: Option<u32>) {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::{SetThreadAffinityMask, SetThreadIdealProcessor};
+    let handle = HANDLE(thread.as_raw_handle());
+    // SAFETY: the `JoinHandle` keeps the thread's handle open through both
+    // calls, and neither call takes a pointer. A failed call leaves the
+    // thread where it was, which only costs speed.
+    unsafe {
+        SetThreadAffinityMask(handle, domain);
+        if let Some(ideal) = ideal {
+            SetThreadIdealProcessor(handle, ideal);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn pin_thread(_thread: &JoinHandle<()>, _domain: usize, _ideal: Option<u32>) {}
+
 /// The processors this process may run on (0 when unknown).
 #[cfg(windows)]
-fn process_mask() -> usize {
+pub(super) fn process_mask() -> usize {
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
     let (mut process, mut system) = (0usize, 0usize);
     // SAFETY: both pointers name locals that live through the call.
@@ -300,7 +479,7 @@ fn process_mask() -> usize {
 }
 
 #[cfg(not(windows))]
-fn process_mask() -> usize {
+pub(super) fn process_mask() -> usize {
     0
 }
 
@@ -331,6 +510,38 @@ const ABOVE_NORMAL: i32 = 1;
 /// efficiency core, and every step then waits for it.
 #[cfg(target_os = "macos")]
 const ABOVE_NORMAL: i32 = 0x21;
+
+/// Keeps the calling thread out of Windows power throttling. An app in the
+/// background counts as low importance: Windows can lower the clock of its
+/// threads, and on a hybrid CPU move them to the slow cores, and every step
+/// then waits for them. The state stays with the thread, and a team thread
+/// only runs while there is work.
+#[cfg(windows)]
+fn keep_full_speed() {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadInformation, ThreadPowerThrottling,
+        THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        THREAD_POWER_THROTTLING_STATE,
+    };
+    let state = THREAD_POWER_THROTTLING_STATE {
+        Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // SAFETY: the pseudo handle names the calling thread, and `state` lives
+    // through the call with the size given. A failed call changes nothing.
+    let _ = unsafe {
+        SetThreadInformation(
+            GetCurrentThread(),
+            ThreadPowerThrottling,
+            std::ptr::from_ref(&state).cast(),
+            std::mem::size_of_val(&state) as u32,
+        )
+    };
+}
+
+#[cfg(not(windows))]
+fn keep_full_speed() {}
 
 /// Sets this thread's priority and returns the previous one; `None` when
 /// the thread already had it, or the call failed.
@@ -459,6 +670,7 @@ fn team() -> &'static Team {
         Team::new(
             std::thread::available_parallelism().map_or(4, |n| n.get()),
             0,
+            Vec::new(),
         )
     })
 }

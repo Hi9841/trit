@@ -701,7 +701,9 @@ and the float steps are the same.
 Threads:
 
 - Windows and Linux: the worker team uses the physical cores of one L3
-  cache, pinned (Whisper uses all physical cores).
+  cache, pinned (Whisper uses all physical cores). On Windows, the team moves
+  to another L3 cache of the same size between runs when its own is at least
+  25 points busier.
 - macOS: one thread per performance core (`hw.perflevel0.physicalcpu`).
   macOS has no affinity masks, so each team thread runs at the
   user-interactive QoS class, and macOS keeps it on a performance core. A

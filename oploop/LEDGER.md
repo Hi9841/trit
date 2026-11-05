@@ -633,3 +633,35 @@ against 59 ms a take): its int8 CPU weights become f16 on the GPU.
   takes: Redux 0 of 486 texts differ, errors 392 = 392, medians 30.2 and 30.1 ms
   (per-clip ratio 1.006); Ultra 0 of 486, errors 255 = 255, 34.1 and 34.1 ms
   (ratio 0.994). The two ratios go opposite ways: noise.
+
+## Session 2026-11-04 (stable under load)
+
+- Load on the team's own L3 domain, 7950X3D, 16 workers on both hardware threads of
+  CCD0, Parakeet Unified, a 20 s take, p50: quiet 120 ms, loaded 222 ms (1.9 times).
+  `THREAD_PRIORITY_ABOVE_NORMAL` does not help: the load is on the second hardware
+  thread of each team core. The same take with the process on CCD1: 159 ms.
+- Quiet, the model runs at the same speed on both CCDs: 120 ms on CCD0 and on CCD1.
+  The V-cache gives Parakeet nothing here, so `pick_domain` stays as the first choice
+  only, and the team may leave it.
+- Change: `Team::steer` reads the per-processor times at each `enter`. With a window of
+  200 ms to 30 s and a gap of 25 points or more, the team moves to the quieter domain of
+  the same size. It moves through the thread handles, so no barrier waits for a CPU.
+- Result under the same load, with TDT's windows: 20 s take 138 to 103 ms, 8 s take
+  92 to 70 ms, 46 s take 68 to 43 ms (4 rounds each, steering off to on).
+- `keep_full_speed` takes team threads out of Windows power throttling, as the QoS class
+  does on macOS. A background app can get lower clocks or, on a hybrid CPU, the slow cores.
+  Not measured: this PC has neither, so only the call itself ran.
+- Not covered: a load on all cores of both CCDs (this PC crashes under it), and Linux
+  (`cpu_times` has no Linux source yet, so a team stays on its first domain there).
+
+### Open: a recording can decode to nothing (seen 2026-11-05)
+
+- Parakeet Unified, Trit 0.6.0 and 0.8.0, greedy: 29 s of clear speech that starts inside a
+  sentence gave 0 tokens, and 2 frames less audio gave 98 words. The encoder is healthy (no
+  NaN). At frame 4 the first word lost a close call (blank 0.04, word -0.28). The decoder
+  then stays in its first state, where the blank leads by more than 10, for the whole clip.
+- Rejected: run again from the closest call when a pass has no token. It rescued the clip,
+  but the margins overlap: real misses 0.20 to 0.58, no-speech clips 0.18 to 0.6 and up. Room
+  noise turned into "I don't want to do it."
+- Seen only on audio that starts inside speech: 0 of 400 long takes and 0 of 143 owner takes
+  came back empty. TDT's windows treat an empty window as a failed join. Not fixed in Trit.

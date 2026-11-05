@@ -54,7 +54,10 @@ pub enum Spread {
 /// contention, so a team has one thread per core.
 pub fn enter(spread: Spread) -> team::Entered {
     let slot = spread as usize;
-    team::start(slot, || engine_threads(spread));
+    team::start(slot, || {
+        let (threads, domain) = engine_threads(spread);
+        (threads, domain, equal_domains(domain))
+    });
     team::enter(slot)
 }
 
@@ -85,6 +88,27 @@ fn engine_threads(spread: Spread) -> (usize, usize) {
         (Spread::OneCache, Some((cores, l3))) => pick_domain(&cores, &l3).unwrap_or_else(fallback),
         (Spread::AllCores, Some((cores, _))) if !cores.is_empty() => (cores.len(), 0),
         _ => fallback(),
+    }
+}
+
+/// The L3 domains the team of `domain` can move to, `domain` included: those
+/// with as many cores, inside the process mask. Parakeet runs at the same
+/// speed on both CCDs of a 7950X3D, so a larger L3 is no reason to stay.
+fn equal_domains(domain: usize) -> Vec<usize> {
+    let Some((cores, l3)) = topology().filter(|_| domain != 0) else {
+        return Vec::new();
+    };
+    let count = |mask: usize| cores.iter().filter(|core| *core & mask != 0).count();
+    let allowed = team::process_mask();
+    let domains: Vec<usize> = l3
+        .iter()
+        .map(|(mask, _)| *mask)
+        .filter(|mask| count(*mask) == count(domain) && mask & !allowed == 0)
+        .collect();
+    if domains.contains(&domain) {
+        domains
+    } else {
+        Vec::new()
     }
 }
 
