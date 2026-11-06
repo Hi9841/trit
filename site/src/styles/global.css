@@ -150,9 +150,9 @@ a {
   cursor: pointer;
   transition:
     transform 160ms var(--ease-out),
-    background-color 150ms ease,
-    border-color 150ms ease,
-    color 150ms ease;
+    background-color 150ms var(--ease-out),
+    border-color 150ms var(--ease-out),
+    color 150ms var(--ease-out);
 }
 .button:active {
   transform: scale(0.97);
@@ -421,7 +421,7 @@ figcaption {
   text-decoration: underline;
   text-decoration-color: var(--rule);
   text-underline-offset: 4px;
-  transition: text-decoration-color 150ms ease;
+  transition: text-decoration-color 150ms var(--ease-out);
 }
 @media (hover: hover) and (pointer: fine) {
   .prose a:hover {
@@ -511,10 +511,10 @@ figcaption {
   font: 500 13px/1 var(--sans);
   cursor: pointer;
   transition:
-    color 150ms ease,
+    color 150ms var(--ease-out),
     transform 160ms var(--ease-out),
-    opacity 120ms ease,
-    filter 120ms ease;
+    opacity 120ms var(--ease-out),
+    filter 120ms var(--ease-out);
 }
 .code-copy:active {
   transform: scale(0.97);
@@ -701,7 +701,7 @@ figcaption {
   transform-origin: center;
 }
 .art.visible .eyes {
-  animation: blink 5.6s ease-in-out var(--blink, 2s) infinite;
+  animation: blink 5.6s var(--ease-in-out) var(--blink, 2s) infinite;
 }
 @keyframes blink {
   0%,

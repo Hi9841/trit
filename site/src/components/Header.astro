@@ -85,7 +85,7 @@ const page = (href: string) => (here === href || here.startsWith(`${href}/`) ? "
   .nav a {
     color: var(--muted);
     text-decoration: none;
-    transition: color 150ms ease;
+    transition: color 150ms var(--ease-out);
   }
   .nav a[aria-current="page"] {
     color: var(--ink);
@@ -109,7 +109,7 @@ const page = (href: string) => (here === href || here.startsWith(`${href}/`) ? "
     color: var(--muted);
     cursor: pointer;
     transition:
-      color 150ms ease,
+      color 150ms var(--ease-out),
       transform 160ms var(--ease-out);
   }
   .theme svg {

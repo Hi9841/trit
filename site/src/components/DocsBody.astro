@@ -95,8 +95,8 @@ const title = groups.flatMap((g) => g.pages).find((p) => p.href === current)?.ti
     color: var(--muted);
     text-decoration: none;
     transition:
-      color 150ms ease,
-      border-color 150ms ease;
+      color 150ms var(--ease-out),
+      border-color 150ms var(--ease-out);
   }
   .index a[aria-current] {
     border-left-color: var(--accent);
