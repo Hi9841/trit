@@ -18,7 +18,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: ./.github/actions/cargo-fork
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The fork keeps intermediate files here, not in ./target.
+          cache-directories: ~/.cargo/targets
       - name: No word lists
         shell: bash
         # Speech to text decodes with the model alone (AGENTS.md). Text to
@@ -48,7 +52,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: ./.github/actions/cargo-fork
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The fork keeps intermediate files here, not in ./target.
+          cache-directories: ~/.cargo/targets
       - name: Build
         run: cargo build --locked --release --workspace
       - name: Clippy
