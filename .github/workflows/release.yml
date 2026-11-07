@@ -1,0 +1,75 @@
+name: Release
+
+# Builds the CLI and the C library of a release and attaches them to it.
+# A published release starts it. To build an older tag, run it by hand.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag of a published release
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-linux
+            library: libtrit_ffi.so
+            cli: trit
+          - runner: ubuntu-24.04-arm
+            target: aarch64-linux
+            library: libtrit_ffi.so
+            cli: trit
+          - runner: macos-latest
+            target: aarch64-macos
+            library: libtrit_ffi.dylib
+            cli: trit
+          - runner: windows-latest
+            target: x86_64-windows
+            library: trit_ffi.dll
+            cli: trit.exe
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/cargo-fork
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The fork keeps intermediate files here, not in ./target.
+          cache-directories: ~/.cargo/targets
+      - name: Build
+        run: cargo build --locked --release --workspace
+      - name: Version
+        shell: bash
+        run: test "v$(target/release/${{ matrix.cli }} --version)" = "$TAG"
+      - name: Package
+        shell: bash
+        run: |
+          name="trit-$TAG-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/release/${{ matrix.cli }}" "target/release/${{ matrix.library }}" include/trit.h \
+            README.md LICENSE THIRD_PARTY_NOTICES.md "$name/"
+          cp -r LICENSES "$name/"
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a "$name.zip" "$name"
+            echo "ARCHIVE=$name.zip" >> "$GITHUB_ENV"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            echo "ARCHIVE=$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+      - name: Attach
+        shell: bash
+        run: gh release upload "$TAG" "$ARCHIVE" --clobber

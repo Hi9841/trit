@@ -77,3 +77,20 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Kernel paths
         run: target/release/trit
+
+  # x86-64 Linux: the AVX kernels, the Linux thread setup, and the Vulkan GPU
+  # code. The fork has no Linux action, so this job uses the plain cargo.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked --release --workspace
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Kernel paths
+        run: target/release/trit

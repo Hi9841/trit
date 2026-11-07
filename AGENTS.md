@@ -76,6 +76,7 @@ Do the steps in order. Each step ends on a check.
 | Phonemes of a text | `./target/release/trit phonemes "<text>"` (`--british`, `--no-fallback`) |
 | Same model on other runtimes | `uv run --no-project --python 3.12 python bench/runtimes.py <engine>` (`--rounds 3` for published numbers: the report gives the median and the spread) |
 | Same GGUF file as transcribe.cpp (Hex's engine) | `uv run --no-project --python 3.12 --with whisper-normalizer python bench/gguf.py run <models dir> --rounds 3`, then `... bench/gguf.py report`; build `bench/gguf` first (CMake) |
+| Release | Bump the version in `Cargo.toml` and `ffi/Cargo.toml`, push the tag, then `gh release create <tag>`. `.github/workflows/release.yml` attaches the Linux, macOS, and Windows builds. For an older tag: `gh workflow run release.yml -f tag=<tag>` |
 | Speed of one change | `uv run --no-project --python 3.12 --with numpy --with whisper-normalizer --with scipy python oploop/ab.py <model> <A.dll> <B.dll>` (interleaved A/B of two `trit_ffi` builds) |
 
 There are no unit tests. The checks are:
