@@ -39,7 +39,6 @@ impl Norm {
         })
     }
 
-    /// A norm from its weight and bias, with epsilon `eps`.
     pub fn new(weight: Vec<f32>, bias: Vec<f32>, eps: f32) -> Self {
         Self { weight, bias, eps }
     }
@@ -49,7 +48,6 @@ impl Norm {
         Self { eps, ..self }
     }
 
-    /// Rows of `x`, normalized; a row is `d` (the weight's size) values.
     pub fn apply(&self, x: &[f32], d: usize) -> Buf {
         debug_assert_eq!(d, self.weight.len());
         let mut out = Buf::scratch(x.len());
@@ -65,7 +63,6 @@ impl Norm {
         out
     }
 
-    /// `x += scale * y`, then the normalized `x`, in one pass per row.
     pub fn residual(&self, x: &mut [f32], y: &[f32], scale: f32) -> Buf {
         let size = self.weight.len();
         let mut out = Buf::scratch(x.len());
@@ -81,7 +78,6 @@ impl Norm {
 }
 
 multiversion! {
-    /// `out = (row - mean) / sqrt(var + eps) * weight + bias`.
     fn normalize_row(row: &[f32], weight: &[f32], bias: &[f32], eps: f32, out: &mut [f32]) {
         let (mean, var) = moments(row);
         let inv = 1.0 / (var + eps).sqrt();
@@ -92,7 +88,6 @@ multiversion! {
 }
 
 multiversion! {
-    /// `row += scale * add`.
     fn add_scaled(row: &mut [f32], add: &[f32], scale: f32) {
         for (v, a) in row.iter_mut().zip(add) {
             *v += scale * a;
@@ -137,7 +132,6 @@ impl RmsNorm {
         })
     }
 
-    /// Normalizes every `d`-wide row of `x` in place.
     pub fn apply_in_place(&self, x: &mut [f32]) {
         let d = self.weight.len();
         for row in x.chunks_exact_mut(d) {
@@ -168,7 +162,6 @@ pub enum Gelu {
 }
 
 impl Gelu {
-    /// The form a config's activation name asks for.
     pub fn parse(name: &str) -> Result<Self, String> {
         match name {
             "gelu" => Ok(Self::Exact),
@@ -179,13 +172,11 @@ impl Gelu {
         }
     }
 
-    /// GELU on `values`, row by row (`d` values per row).
     pub fn apply(self, values: &mut [f32], d: usize) {
         const C: f32 = 0.797_884_6; // sqrt(2 / pi)
         team::chunks_mut(values, d, |_, row| match self {
             Self::Exact => activation::gelu(row),
             Self::Tanh => {
-                // In stack blocks: a task allocates nothing.
                 let mut inner = [0.0f32; 256];
                 for block in row.chunks_mut(inner.len()) {
                     let inner = &mut inner[..block.len()];
@@ -202,7 +193,25 @@ impl Gelu {
     }
 }
 
-/// `x += y`.
+/// Batch norm at inference as `x * scale + shift`: `(scale, shift)`. `x_bias`
+/// is a bias the layer before the norm adds to `x`.
+pub fn folded_batch_norm(
+    weight: &[f32],
+    bias: &[f32],
+    mean: &[f32],
+    var: &[f32],
+    x_bias: &[f32],
+) -> (Vec<f32>, Vec<f32>) {
+    const EPS: f32 = 1e-5;
+    let scale: Vec<f32> = (weight.iter().zip(var))
+        .map(|(weight, var)| weight / (var + EPS).sqrt())
+        .collect();
+    let shift = (0..scale.len())
+        .map(|i| bias[i] + (x_bias[i] - mean[i]) * scale[i])
+        .collect();
+    (scale, shift)
+}
+
 pub fn add_into(x: &mut [f32], y: &[f32]) {
     team::chunks_mut(x, 4096, |chunk, xs| {
         for (a, b) in xs.iter_mut().zip(&y[chunk * 4096..]) {
@@ -346,7 +355,6 @@ impl HeadMajor {
     }
 }
 
-/// `attention` over keys and values already laid out per head.
 pub fn attention_with(
     (q, qs): (&[f32], usize),
     kv: &HeadMajor,
@@ -414,7 +422,6 @@ thread_local! {
     static SCRATCH: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Queries per attention task.
 const ATTENTION_ROWS: usize = 128;
 
 /// Index of the largest value; the first one wins a tie.

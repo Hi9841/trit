@@ -213,7 +213,7 @@ trit_free(engine);
 | `trit_load_with(const char *model, const char *precision)` | The same with `"auto"` (or NULL), `"int8"`, `"f16"`, `"f32"`. The device stays `"cpu"` |
 | `trit_load_ex(const char *model, const char *precision, const char *device)` | `trit_load_with` plus `"cpu"` (or NULL), `"gpu"`, or `"auto"` |
 | `trit_gpu_info(void)` | The adapter text, or NULL. Free with `trit_free_text`. `trit_last_error` gives the reason |
-| `trit_kind(engine)` | The family, static |
+| `trit_kind(engine)` | The `model_type`, static |
 | `trit_transcribe(engine, const float *samples, size_t count, const char *language)` | Text, or NULL |
 | `trit_transcribe_with(engine, samples, count, language, int beam)` | The same with beams (0: the model's default, 1: greedy, at most 16) |
 | `trit_transcribe_wav(engine, const char *path, const char *language)` | Text, or NULL |
@@ -799,8 +799,9 @@ Parakeet Redux. Other models run on the GPU and gain little; a decoder step
   for 3 ms after a step, then sleep, so an idle engine uses no CPU. `TRIT_THREADS` sets the
   count.
 - **CPU:** x86-64 with AVX-512 or AVX2 (with F16C) is fast; int8 also uses
-  AVX-VNNI. Other CPUs, ARM included, use the scalar path: the same text,
-  much slower. Only x86-64 Windows has been measured.
+  AVX-VNNI. arm64 runs NEON, and uses `sdot` and `smmla` when the CPU has
+  them. The scalar path gives the same text and is much slower. Only
+  x86-64 Windows has been measured.
 - **Whisper** always encodes a full 30 s window, so a short clip costs as
   much as a long one.
 
@@ -821,21 +822,22 @@ Parakeet Redux. Other models run on the GPU and gain little; a decoder step
 
 | Folder or file | Part |
 |---|---|
-| `src/lib.rs` | Public API, model search |
-| `src/main.rs` | The `trit` CLI |
+| `src/lib.rs` | Public API |
+| `src/locate.rs` | Model search |
+| `src/cli/` | The `trit` CLI |
 | `src/catalog.rs` | The model catalog |
 | `src/cleanup.rs` | `Cleaner`: S1-mini prompt and styles |
-| `src/tts/` | Text to speech: `Voice` and `Voicing` (`mod.rs`), Kokoro (`kokoro/`), VITS (`vits.rs`), the English phonemizer (`english/`: tokenizer, tagger, lexicon, numbers, BART fallback, data) |
+| `src/tts/` | Text to speech: `Voice` and `Voicing` (`mod.rs`), Kokoro (`kokoro/`), VITS (`vits.rs`), their layers (`conv.rs`, `lstm.rs`, `noise.rs`), the English phonemizer (`english/`: tokenizer, tagger, lexicon, numbers, BART fallback, data) |
 | `src/cpu/` | Kernels and threads: f32/f16 GEMM (`fgemm.rs`), dense layers and `Precision` (`gemm.rs`), int8 (`int8.rs`), ternary (`kernels.rs`), f16 matvec (`half.rs`), worker teams (`team.rs`), safetensors reader (`tensors.rs`), PyTorch checkpoint reader (`torch_file.rs`), ggml block types (`ggml_quants.rs`), Fermion records (`fermion.rs`) |
 | `src/gpu/` | GPU matrix products and the Parakeet encoder through wgpu (DX12, Vulkan, Metal), behind the `gpu` feature |
 | `src/audio/` | WAV reader and writer, STFT and its inverse (`stft.rs`), power spectrum (`dft.rs`), NeMo log-mel (`mel.rs`), Whisper log-mel (`whisper_mel.rs`), log-mel from a file's filterbank (`table_mel.rs`), Kaldi filterbank (`kaldi_fbank.rs`), windows for long audio |
 | `src/text/` | SentencePiece tokenizer (Parakeet, Moonshine), BPE: byte-level (Whisper, Qwen, Granite) and SentencePiece BPE |
 | `src/models/mod.rs` | `FAMILIES`: one row per `model_type` (its loader and thread spread), and the `Family` trait |
-| `src/models/config.rs` | The `config.json` reader that every family uses |
+| `src/config.rs` | The `config.json` reader that every family uses |
 | `src/models/files.rs`, `gguf/`, `nemo.rs`, `fermion.rs` | The files of a model: a Hugging Face folder, or one published file (GGUF, `.nemo`, Fermion) that gives the same `config.json`, tokenizer, and tensor names. `gguf/` has one file per GGUF architecture |
-| `src/models/layers.rs` | Shared layers: norms, GELU, rotary positions, attention, conv columns |
-| `src/models/parts/` | Building blocks that the config picks: the FastConformer encoder (`fastconformer.rs`), the TDT and RNNT head (`transducer.rs`), CTC (`ctc.rs`), beam search (`beam.rs`), the decoder-only language model of Qwen3, Llama, Mistral, and Granite (`causal_lm.rs`), the Granite Conformer (`granite_conformer.rs`), the SAN-M encoder (`sanm.rs`), the Moonshine Streaming encoder (`moonshine_streaming.rs`), the LSTM (`lstm.rs`), the sound-checked dictionary (`dictionary.rs`), the logit dictionary (`logit_bias.rs`), and 1-D convolutions: dilated, depthwise, transposed (`conv.rs`) |
-| `src/models/families/` | One file per checkpoint family. It reads the family's files and wires the parts: Parakeet (also GigaAM and MedASR), Canary (also Cohere Transcribe), Canary-Qwen, Whisper, Moonshine, wav2vec 2.0, Qwen3-ASR, Fun-ASR, SenseVoice, Granite Speech (autoregressive, NAR, CTC), Voxtral, Voxtral Realtime, MOSS, and the VITS voice (`vits.rs`) |
+| `src/layers.rs` | Shared layers: norms, GELU, rotary positions, attention, conv columns |
+| `src/models/parts/` | Building blocks that the config picks: the FastConformer encoder (`fastconformer.rs`), the TDT and RNNT head (`transducer.rs`), CTC (`ctc.rs`), beam search (`beam.rs`), the decoder-only language model of Qwen3, Llama, Mistral, and Granite (`causal_lm.rs`), the Granite Conformer (`granite_conformer.rs`), the SAN-M encoder (`sanm.rs`), the Moonshine Streaming encoder (`moonshine_streaming.rs`), the sound-checked dictionary (`dictionary.rs`), the logit dictionary (`logit_bias.rs`) |
+| `src/models/families/` | One file per checkpoint family. It reads the family's files and wires the parts: Parakeet (also GigaAM and MedASR), Canary (also Cohere Transcribe), Canary-Qwen, Whisper, Moonshine, wav2vec 2.0, Qwen3-ASR, Fun-ASR, SenseVoice, Granite Speech (autoregressive, NAR, CTC), Voxtral, Voxtral Realtime, and MOSS |
 | `ffi/` | `trit-ffi`: the C ABI |
 | `bindings/` | Python, C#, Node |
 

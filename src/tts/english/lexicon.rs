@@ -90,7 +90,6 @@ fn grow(d: HashMap<String, Entry>) -> HashMap<String, Entry> {
     grown
 }
 
-/// `apply_stress`.
 pub fn apply_stress(ps: Option<String>, stress: Option<f64>) -> Option<String> {
     let ps = ps?;
     let Some(stress) = stress else {
@@ -140,7 +139,6 @@ pub fn apply_stress(ps: Option<String>, stress: Option<f64>) -> Option<String> {
     })
 }
 
-/// `stress_weight`.
 pub fn stress_weight(ps: &str) -> usize {
     ps.chars()
         .map(|c| if DIPHTHONGS.contains(c) { 2 } else { 1 })
@@ -320,7 +318,6 @@ impl Lexicon {
         (None, None)
     }
 
-    /// `is_known`.
     fn is_known(&self, word: &str) -> bool {
         if self.golds.contains_key(word)
             || SYMBOLS.iter().any(|(k, _)| *k == word)
@@ -345,7 +342,6 @@ impl Lexicon {
         rest == upper(&rest)
     }
 
-    /// `lookup`.
     pub fn lookup(
         &self,
         word: &str,
@@ -407,7 +403,6 @@ impl Lexicon {
         })
     }
 
-    /// `stem_s`.
     fn stem_s(
         &self,
         word: &str,
@@ -459,7 +454,6 @@ impl Lexicon {
         })
     }
 
-    /// `stem_ed`.
     fn stem_ed(
         &self,
         word: &str,
@@ -504,7 +498,6 @@ impl Lexicon {
         Some(format!("{stem}ɪŋ"))
     }
 
-    /// `stem_ing`.
     fn stem_ing(
         &self,
         word: &str,
@@ -593,7 +586,6 @@ impl Lexicon {
         (None, None)
     }
 
-    /// `is_currency`.
     fn is_currency(word: &str) -> bool {
         if !word.contains('.') {
             return true;
@@ -788,7 +780,6 @@ impl Lexicon {
         }
     }
 
-    /// `append_currency`.
     fn append_currency(&self, ps: String, currency: Option<&str>) -> String {
         let Some(currency) = currency else { return ps };
         let Some((_, (unit, _))) = CURRENCIES.iter().find(|(k, _)| *k == currency) else {
@@ -800,7 +791,6 @@ impl Lexicon {
         }
     }
 
-    /// `is_number`.
     fn is_number(word: &str, is_head: bool) -> bool {
         if !word.chars().any(|c| c.is_ascii_digit()) {
             return false;

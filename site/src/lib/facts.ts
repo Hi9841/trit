@@ -117,9 +117,10 @@ export const faq: Answer[] = [
   {
     q: "Which computers does it run on?",
     a:
-      "x86-64 CPUs with AVX2 (and F16C) or AVX-512 run the fast kernels; Intel CPUs with AVX-VNNI also get the " +
-      "fast int8 path. Other CPUs, ARM included, use a scalar path that gives the same text but is much " +
-      "slower. Trit builds for Windows, Linux and macOS; only x86-64 Windows has been measured.",
+      "x86-64 CPUs with AVX2 (and F16C) or AVX-512 run the fast kernels. Intel CPUs with AVX-VNNI also get the " +
+      "fast int8 path. arm64 CPUs run NEON, and use sdot and smmla when the CPU has them. The scalar path " +
+      "gives the same text and is much slower. Trit builds for Windows, Linux and macOS. Only x86-64 Windows " +
+      "has been measured.",
   },
   {
     q: "Which programming languages can call it?",

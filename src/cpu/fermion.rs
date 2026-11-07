@@ -13,8 +13,8 @@
 
 use super::tensors::f16_to_f32;
 
-/// One record of a container: its tensor name, kind (`fp16`, or one of
-/// `KINDS`), rows and values per row, and byte range in the file.
+/// One record of a container: its tensor name, kind (`dtype`), rows and
+/// values per row, and byte range in the file.
 pub struct Record {
     pub name: String,
     pub kind: String,
@@ -23,8 +23,18 @@ pub struct Record {
     pub end: usize,
 }
 
-/// The kinds `expand` reads.
-pub const KINDS: [&str; 3] = ["five_value", "int6", "int8"];
+/// The safetensors dtype of a record kind. `fp16` is stored as F16. The
+/// other three keep their name and [`expand`] reads them. `None` is a kind
+/// Trit does not read.
+pub fn dtype(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "fp16" => "F16",
+        "five_value" => "five_value",
+        "int6" => "int6",
+        "int8" => "int8",
+        _ => return None,
+    })
+}
 
 /// Record `bytes` of `kind` as `rows x cols` f32 values.
 pub fn expand(kind: &str, bytes: &[u8], rows: usize, cols: usize) -> Result<Vec<f32>, String> {

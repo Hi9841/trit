@@ -4,6 +4,11 @@
 
 use crate::cpu::{buf::Buf, fgemm, team};
 
+pub(super) fn periodic_hann(n: usize, n_fft: usize) -> f64 {
+    let turn = std::f64::consts::TAU * n as f64 / n_fft as f64;
+    0.5 - 0.5 * turn.cos()
+}
+
 pub struct PowerSpectrum {
     win: usize,
     bins: usize,
@@ -15,14 +20,23 @@ pub struct PowerSpectrum {
 impl PowerSpectrum {
     /// A frame is `window.len()` samples, then zeros up to `n_fft`.
     pub fn new(n_fft: usize, window: &[f32]) -> Self {
-        let (win, bins) = (window.len(), n_fft / 2 + 1);
+        Self::fill(n_fft, window.len(), |n| f64::from(window[n]))
+    }
+
+    pub(super) fn hann(n_fft: usize) -> Self {
+        Self::fill(n_fft, n_fft, |n| periodic_hann(n, n_fft))
+    }
+
+    fn fill(n_fft: usize, win: usize, window: impl Fn(usize) -> f64) -> Self {
+        let bins = n_fft / 2 + 1;
         let tau = std::f64::consts::TAU;
         let mut basis = vec![0.0f32; 2 * bins * win];
         for bin in 0..bins {
-            for (n, w) in window.iter().enumerate() {
+            for n in 0..win {
                 let angle = tau * ((bin * n) % n_fft) as f64 / n_fft as f64;
-                basis[(2 * bin) * win + n] = (*w as f64 * angle.cos()) as f32;
-                basis[(2 * bin + 1) * win + n] = (-*w as f64 * angle.sin()) as f32;
+                let w = window(n);
+                basis[(2 * bin) * win + n] = (w * angle.cos()) as f32;
+                basis[(2 * bin + 1) * win + n] = (-w * angle.sin()) as f32;
             }
         }
         Self { win, bins, basis }

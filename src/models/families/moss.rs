@@ -6,22 +6,23 @@
 //! `[start][S01]text[end]`; the text keeps the words of each turn. The
 //! structure follows transcribe.cpp's port of the OpenMOSS code.
 
-use crate::audio::{self, whisper_mel::WhisperMel};
+use crate::audio::whisper_mel::WhisperMel;
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense};
-use crate::models::config::Json;
-use crate::models::families::whisper::model::{Encoder, EncoderShape};
+use crate::layers::{linear, Norm};
 use crate::models::files::Files;
-use crate::models::layers::{linear, Norm};
-use crate::models::parts::causal_lm::CausalLm;
+use crate::models::parts::audio_encoder::{Encoder, EncoderShape};
+use crate::models::parts::causal_lm::{CausalLm, TokenBudget};
+use crate::models::{speech_windows, Family};
 use crate::text::bpe::Bpe;
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 
-/// Audio per encoder pass.
 const CHUNK_SAMPLES: usize = crate::audio::whisper_mel::WINDOW_SAMPLES;
-/// Longest window per prompt.
-const WINDOW_SAMPLES: usize = 120 * 16_000;
-const MIN_NEW_TOKENS: usize = 256;
-const TOKENS_PER_SECOND: usize = 12;
+const WINDOW_SAMPLES: usize = 120 * crate::SAMPLE_RATE as usize;
+const BUDGET: TokenBudget = TokenBudget {
+    least: 256,
+    per_second: 12,
+};
 /// The adaptor's layer norm epsilon.
 const ADAPTOR_EPS: f32 = 1e-6;
 
@@ -45,63 +46,6 @@ pub struct Moss {
 }
 
 impl Moss {
-    pub fn load(
-        files: &Files,
-        json: &Json,
-        precision: Precision,
-        device: Device,
-    ) -> Result<Self, String> {
-        let e = |key: &str| json.num(&format!("encoder_config.{key}"));
-        let shape = EncoderShape {
-            d: e("hidden_size")?,
-            layers: e("num_hidden_layers")?,
-            heads: e("num_attention_heads")?,
-            ffn: e("intermediate_size")?,
-            mels: e("num_mel_bins")?,
-            positions: e("max_source_positions")?,
-        };
-        let (d_encoder, mels) = (shape.d, shape.mels);
-        let merge = json.num("audio_merge_size")?;
-        if json.num("adaptor_config.input_dim")? != merge * d_encoder {
-            return Err("config.json: the adaptor does not fit the encoder".into());
-        }
-        let ids = |key: &str| -> Vec<usize> {
-            json.get(key)
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.as_u64().map(|v| v as usize))
-                .collect()
-        };
-        let digits = ids("digit_tokens");
-        if digits.len() != 10 {
-            return Err("config.json: MOSS needs its ten digit tokens".into());
-        }
-        let t = files.tensors(precision, device)?;
-        let encoder = Encoder::load(&t, "model.encoder", shape)?;
-        let decoder = CausalLm::from_tensors(&t, json, ("llm_config.", "language_model."))?;
-        let width = decoder.width();
-        let model = Self {
-            mel: WhisperMel::new(mels),
-            encoder,
-            d_encoder,
-            merge,
-            fc1: linear(&t, "adaptor.fc1", width, merge * d_encoder)?,
-            fc2: linear(&t, "adaptor.fc2", width, width)?,
-            norm: Norm::load(&t, "adaptor.norm_out", width)?.with_eps(ADAPTOR_EPS),
-            decoder,
-            bpe: Bpe::parse(&files.read("tokenizer.json")?)?,
-            audio_token: json.num("audio_token_id")?,
-            tokens_per_second: json.float("audio_tokens_per_second").unwrap_or(12.5) as f32,
-            marker_seconds: json.num("time_marker_every_seconds").unwrap_or(0),
-            prefix: ids("prompt_prefix_tokens"),
-            suffix: ids("prompt_suffix_tokens"),
-            digits,
-            eos: json.num("eos_token_id")?,
-        };
-        Ok(model)
-    }
-
     /// Adaptor rows of `samples`, `n x width`: every 30 s chunk encoded
     /// whole, trimmed to the frames its audio covers, then joined.
     fn audio_rows(&self, samples: &[f32]) -> (Buf, usize) {
@@ -153,14 +97,60 @@ impl Moss {
         ids.extend_from_slice(&self.suffix);
         (ids, audio)
     }
+}
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    pub fn pieces(&self, samples: &[f32], _: &Options) -> Vec<(usize, usize, String)> {
-        let mut pieces = Vec::new();
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
-            if window.is_empty() || audio::is_silent(window) {
-                continue;
-            }
+impl Family for Moss {
+    fn load(
+        files: &Files,
+        json: &Json,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
+        let shape = EncoderShape::parse(json)?;
+        let (d_encoder, mels) = (shape.d, shape.mels);
+        let merge = json.num("audio_merge_size")?;
+        if json.num("adaptor_config.input_dim")? != merge * d_encoder {
+            return Err("config.json: the adaptor does not fit the encoder".into());
+        }
+        let ids = |key: &str| -> Vec<usize> {
+            json.get(key)
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_u64().map(|v| v as usize))
+                .collect()
+        };
+        let digits = ids("digit_tokens");
+        if digits.len() != 10 {
+            return Err("config.json: MOSS needs its ten digit tokens".into());
+        }
+        let t = files.tensors(precision, device)?;
+        let encoder = Encoder::load(&t, "model.encoder", shape)?;
+        let decoder = CausalLm::from_tensors(&t, json, ("llm_config.", "language_model."))?;
+        let width = decoder.width();
+        let model = Self {
+            mel: WhisperMel::new(mels),
+            encoder,
+            d_encoder,
+            merge,
+            fc1: linear(&t, "adaptor.fc1", width, merge * d_encoder)?,
+            fc2: linear(&t, "adaptor.fc2", width, width)?,
+            norm: Norm::load(&t, "adaptor.norm_out", width)?.with_eps(ADAPTOR_EPS),
+            decoder,
+            bpe: Bpe::parse(&files.read("tokenizer.json")?)?,
+            audio_token: json.num("audio_token_id")?,
+            tokens_per_second: json.float("audio_tokens_per_second").unwrap_or(12.5) as f32,
+            marker_seconds: json.num("time_marker_every_seconds").unwrap_or(0),
+            prefix: ids("prompt_prefix_tokens"),
+            suffix: ids("prompt_suffix_tokens"),
+            digits,
+            eos: json.num("eos_token_id")?,
+        };
+        Ok(model)
+    }
+
+    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             let (audio, n) = self.audio_rows(window);
             let (ids, positions) = self.prompt(n);
             let d = self.decoder.width();
@@ -168,15 +158,11 @@ impl Moss {
             for (row, at) in positions.iter().enumerate() {
                 rows[at * d..(at + 1) * d].copy_from_slice(&audio[row * d..(row + 1) * d]);
             }
-            let seconds = window.len() / crate::SAMPLE_RATE as usize;
-            let max_new = MIN_NEW_TOKENS.max(seconds * TOKENS_PER_SECOND);
-            let out = self.decoder.generate_rows(rows, max_new, &[self.eos]);
-            let text = plain_text(&self.bpe.decode(&out));
-            if !text.is_empty() {
-                pieces.push((audio::offset(samples, window), window.len(), text));
-            }
-        }
-        pieces
+            let out = self
+                .decoder
+                .generate_rows(rows, BUDGET.tokens(window.len()), &[self.eos]);
+            plain_text(&self.bpe.decode(&out))
+        })
     }
 }
 

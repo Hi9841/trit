@@ -3,8 +3,6 @@
 
 use std::path::Path;
 
-/// Reads a 16 kHz WAV file (16-bit PCM or 32-bit float, any channel count)
-/// and mixes it to mono. Other rates fail with the command that converts them.
 pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let not_wav = || format!("{} is not a WAV file", path.display());
@@ -58,8 +56,6 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
         .collect())
 }
 
-/// Writes mono `samples` (-1..1; beyond is clipped) as a 16-bit PCM WAV
-/// file at `rate` Hz.
 pub fn write_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> {
     let data = u32::try_from(samples.len() * 2)
         .ok()
@@ -85,7 +81,7 @@ pub fn write_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> 
     std::fs::write(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// The little-endian `u32` at `at`. The caller has checked that four bytes are there.
+/// The caller has checked that four bytes are there.
 fn le_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }

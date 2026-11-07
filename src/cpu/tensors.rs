@@ -5,6 +5,7 @@
 //! file into one buffer kept that memory in the process after load.
 
 use super::gemm::{Blocks, Precision};
+use super::ggml_quants::Q8_0_BYTES;
 use crate::Device;
 use std::collections::HashMap;
 use std::fs::File;
@@ -23,9 +24,6 @@ pub struct Tensors {
     /// stored in (`precision_of`), as the runtime that wrote it runs it.
     native: bool,
 }
-
-/// Bytes of one ggml Q8_0 block: an f16 scale and 32 int8 codes.
-const Q8_0_BYTES: usize = 34;
 
 struct Entry {
     dtype: String,
@@ -50,8 +48,15 @@ impl Tensors {
             return Self::open_files(&[single.as_path()], precision, device);
         }
         let index = dir.join(SHARD_INDEX);
-        let text = std::fs::read_to_string(&index)
-            .map_err(|e| format!("Could not read {}: {e}", single.display()))?;
+        let text = match std::fs::read_to_string(&index) {
+            Ok(text) => text,
+            // A missing index names the index. A present file that cannot be
+            // read keeps the `model.safetensors` path.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!("Could not read {}: {e}", index.display()));
+            }
+            Err(e) => return Err(format!("Could not read {}: {e}", single.display())),
+        };
         let json: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| format!("{} is not JSON: {e}", index.display()))?;
         let mut shards: Vec<&str> = json["weight_map"]
@@ -228,9 +233,10 @@ impl Tensors {
         let entries = records
             .iter()
             .map(|r| {
-                let (dtype, matrix) = match r.kind.as_str() {
-                    "fp16" => ("F16".to_string(), None),
-                    kind => (kind.to_string(), Some(r.matrix)),
+                let (dtype, matrix) = match super::fermion::dtype(&r.kind) {
+                    Some("F16") => ("F16".to_string(), None),
+                    Some(kind) => (kind.to_string(), Some(r.matrix)),
+                    None => (r.kind.clone(), Some(r.matrix)),
                 };
                 let entry = Entry {
                     dtype,

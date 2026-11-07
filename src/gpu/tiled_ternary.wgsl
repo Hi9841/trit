@@ -34,7 +34,7 @@ struct Params {
 var<workgroup> raw: array<vec4<f32>, 1024>;
 // [column in the tile][k / 4], with one spare vec4 per column.
 var<workgroup> ws: array<vec4<f32>, 288>;
-var<workgroup> part: array<f32, 256>;
+var<workgroup> part: array<f32, TILE * TILE>;
 var<workgroup> row_max: array<f32, 32>;
 
 fn decode(word: u32, lane: u32, scale: f32) -> f32 {
@@ -106,16 +106,16 @@ fn store_one(row: u32, col: u32, value: f32) {
         return;
     }
     var v = value;
-    if ((p.flags & 1u) != 0u) {
+    if ((p.flags & FLAG_BIAS) != 0u) {
         v = v + bias[col];
     }
-    if ((p.flags & 2u) != 0u) {
+    if ((p.flags & FLAG_RELU) != 0u) {
         v = max(v, 0.0);
     }
     y[row * p.n + col] = v;
 }
 
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(TILE, TILE, 1)
 fn gemm(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(local_invocation_index) linear: u32,

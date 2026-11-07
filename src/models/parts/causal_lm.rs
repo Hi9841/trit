@@ -6,10 +6,10 @@
 //! the logits. Trit uses it for text models that work on a transcript, such
 //! as Superwhisper S1-mini, and as the text decoder of the audio-LLM families.
 
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::config::Json;
+use crate::layers::{add_into, argmax, attention, linear, stacked, RmsNorm, Rotary};
 use crate::models::files::Files;
-use crate::models::layers::{add_into, argmax, attention, linear, stacked, RmsNorm, Rotary};
 use crate::{Device, Precision};
 
 struct Config {
@@ -92,7 +92,6 @@ pub struct CausalLm {
     config: Config,
     layers: Vec<Layer>,
     norm: RmsNorm,
-    /// Token embeddings.
     embed: Dense,
     /// The output projection when it is not tied to `embed`.
     head: Option<Dense>,
@@ -102,7 +101,18 @@ pub struct CausalLm {
     ffn_scales: Option<Vec<Vec<f32>>>,
 }
 
-/// The caches of a prompt start; see `CausalLm::prefix`.
+pub struct TokenBudget {
+    pub least: usize,
+    pub per_second: usize,
+}
+
+impl TokenBudget {
+    pub fn tokens(&self, samples: usize) -> usize {
+        let seconds = samples / crate::SAMPLE_RATE as usize;
+        self.least.max(seconds * self.per_second)
+    }
+}
+
 pub struct Prefix {
     tokens: Vec<usize>,
     keys: Vec<Vec<f32>>,
@@ -117,6 +127,12 @@ impl CausalLm {
         Self::from_tensors(&t, &config, ("", ""))
     }
 
+    /// `{prefix}model.{rest}`. `prefix` is `""`, `llm.`, `language_model.`, or
+    /// `thinker.`. `lm_head` stays beside `model`, not under it.
+    pub fn model_tensor(prefix: &str, rest: &str) -> String {
+        format!("{prefix}model.{rest}")
+    }
+
     /// The model whose config is under `config_at` and whose tensor names
     /// start with `prefix` (`thinker.` in Qwen3-ASR).
     pub fn from_tensors(
@@ -127,7 +143,7 @@ impl CausalLm {
         let c = Config::parse(json, config_at)?;
         let (d, hd) = (c.d, c.head_dim);
         let layers = team::map(c.layers, |i| -> Result<Layer, String> {
-            let p = format!("{prefix}model.layers.{i}");
+            let p = Self::model_tensor(prefix, &format!("layers.{i}"));
             let a = |n: &str| format!("{p}.self_attn.{n}");
             let m = |n: &str| format!("{p}.mlp.{n}");
             Ok(Layer {
@@ -164,8 +180,13 @@ impl CausalLm {
         };
         Ok(Self {
             layers,
-            norm: RmsNorm::load(t, &format!("{prefix}model.norm"), d, c.eps)?,
-            embed: Dense::table(t, &format!("{prefix}model.embed_tokens.weight"), c.vocab, d)?,
+            norm: RmsNorm::load(t, &Self::model_tensor(prefix, "norm"), d, c.eps)?,
+            embed: Dense::table(
+                t,
+                &Self::model_tensor(prefix, "embed_tokens.weight"),
+                c.vocab,
+                d,
+            )?,
             head,
             rotary: Rotary::halves(hd, c.rope_base),
             ffn_scales: None,
@@ -173,7 +194,6 @@ impl CausalLm {
         })
     }
 
-    /// Greedy continuation of `prompt` until a `stop` token or `max_new` tokens.
     /// Runs a prompt start that many calls share (a system prompt) once; a
     /// `generate` whose prompt begins with it starts from its caches.
     pub fn prefix(&self, tokens: &[usize]) -> Prefix {
@@ -191,7 +211,6 @@ impl CausalLm {
         }
     }
 
-    /// Greedy tokens after `prompt` until a `stop` token or `max_new` tokens.
     pub fn generate(
         &self,
         prompt: &[usize],
@@ -207,7 +226,6 @@ impl CausalLm {
             cache.extend_from_slice(from.map_or(&[][..], Vec::as_slice));
             cache
         };
-        // The prefix counts only when the prompt continues it.
         let prefix =
             prefix.filter(|p| prompt.len() > p.tokens.len() && prompt.starts_with(&p.tokens));
         let done = prefix.map_or(0, |p| p.tokens.len());
@@ -217,7 +235,6 @@ impl CausalLm {
         let mut values: Vec<Vec<f32>> = (0..c.layers)
             .map(|l| cache(prefix.map(|p| &p.values[l])))
             .collect();
-        // The rest of the prompt goes through as one batch; then one token per step.
         let logits = self.forward(&prompt[done..], done, &mut keys, &mut values);
         self.greedy(
             logits,
@@ -241,7 +258,26 @@ impl CausalLm {
         self.greedy(logits, length, (&mut keys, &mut values), max_new, stop)
     }
 
-    /// Greedy tokens from `logits`, the next position being `position`.
+    /// `generate_rows` after the prompt `head`, the rows `audio`, and the
+    /// prompt `tail`.
+    pub fn answer(
+        &self,
+        head: &[usize],
+        audio: &[f32],
+        tail: &[usize],
+        max_new: usize,
+        stop: &[usize],
+    ) -> Vec<usize> {
+        let d = self.config.d;
+        let audio_start = head.len() * d;
+        let tail_start = audio_start + audio.len();
+        let mut rows = Buf::scratch(tail_start + tail.len() * d);
+        rows[..audio_start].copy_from_slice(&self.embed(head));
+        rows[audio_start..tail_start].copy_from_slice(audio);
+        rows[tail_start..].copy_from_slice(&self.embed(tail));
+        self.generate_rows(rows, max_new, stop)
+    }
+
     fn greedy(
         &self,
         mut logits: Buf,
@@ -267,7 +303,6 @@ impl CausalLm {
         self.ffn_scales = Some(scales);
     }
 
-    /// The number of layers.
     pub fn layers(&self) -> usize {
         self.config.layers
     }
@@ -306,7 +341,6 @@ impl CausalLm {
         out
     }
 
-    /// The width of a token embedding.
     pub fn width(&self) -> usize {
         self.config.d
     }
@@ -444,14 +478,13 @@ impl CausalLm {
     }
 }
 
-/// `x *= w`; nothing for 1, so a model without multipliers keeps its sums.
+/// Nothing for 1, so a model without multipliers keeps its sums.
 fn scale(x: &mut [f32], w: f32) {
     if w != 1.0 {
         team::chunks_mut(x, 4096, |_, values| values.iter_mut().for_each(|v| *v *= w));
     }
 }
 
-/// `x += w * y`; `add_into` for 1.
 fn add_residual(x: &mut [f32], y: &[f32], w: f32) {
     if w == 1.0 {
         add_into(x, y);

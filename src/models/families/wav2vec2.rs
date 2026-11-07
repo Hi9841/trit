@@ -5,16 +5,16 @@
 //! (`feat_extract_norm: group`, the base models) and pre-norm
 //! (`do_stable_layer_norm`, the large and XLS-R models).
 
-use crate::audio;
+use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::config::Json;
+use crate::layers::{add_into, attention, conv_columns, linear, stacked, Gelu, Norm};
 use crate::models::files::Files;
-use crate::models::layers::{add_into, attention, conv_columns, linear, stacked, Gelu, Norm};
-use crate::{Device, Precision};
+use crate::models::{speech_windows, Family};
+use crate::{Device, Options, Precision, Segment};
 
 /// Longest window per pass: attention grows with the square of the frames
 /// (50 per second).
-const WINDOW_SAMPLES: usize = 40 * 16_000;
+const WINDOW_SAMPLES: usize = 40 * crate::SAMPLE_RATE as usize;
 /// Epsilon of the input normalization (`zero_mean_unit_var_norm`).
 const INPUT_EPS: f32 = 1e-7;
 /// Epsilon of the group norm of the first conv layer.
@@ -137,98 +137,6 @@ pub struct Wav2Vec2 {
 }
 
 impl Wav2Vec2 {
-    pub fn load(
-        files: &Files,
-        json: &Json,
-        precision: Precision,
-        device: Device,
-    ) -> Result<Self, String> {
-        let c = Config::parse(json)?;
-        let t = files.tensors(precision, device)?;
-        let p = "wav2vec2";
-        let d = c.d;
-        let mut convs = Vec::with_capacity(c.convs.len());
-        let mut channels = 1;
-        for (i, &(out, kernel, stride)) in c.convs.iter().enumerate() {
-            let name = format!("{p}.feature_extractor.conv_layers.{i}");
-            let norm = format!("{name}.layer_norm");
-            let norm = match (c.layer_norm_convs, i) {
-                (true, _) => Some(ConvNorm::Layer(Norm::load(&t, &norm, out)?)),
-                (false, 0) => Some(ConvNorm::Group {
-                    weight: t.f32_len(&format!("{norm}.weight"), out)?,
-                    bias: t.f32_len(&format!("{norm}.bias"), out)?,
-                }),
-                (false, _) => None,
-            };
-            convs.push(Conv {
-                weight: linear(&t, &format!("{name}.conv"), out, channels * kernel)?,
-                kernel,
-                stride,
-                norm,
-            });
-            channels = out;
-        }
-        let feature_norm = format!("{p}.feature_projection.layer_norm");
-        let feature_norm = match t.has(&format!("{feature_norm}.weight")) {
-            true => Some(Norm::load(&t, &feature_norm, channels)?),
-            false => None,
-        };
-        let layers = team::map(c.layers, |i| -> Result<Layer, String> {
-            let l = format!("{p}.encoder.layers.{i}");
-            let a = |n: &str| format!("{l}.attention.{n}");
-            Ok(Layer {
-                norm_attn: Norm::load(&t, &format!("{l}.layer_norm"), d)?,
-                qkv: stacked(&t, &[&a("q_proj"), &a("k_proj"), &a("v_proj")], d, d)?,
-                out: linear(&t, &a("out_proj"), d, d)?,
-                norm_ffn: Norm::load(&t, &format!("{l}.final_layer_norm"), d)?,
-                fc1: linear(
-                    &t,
-                    &format!("{l}.feed_forward.intermediate_dense"),
-                    c.ffn,
-                    d,
-                )?,
-                fc2: linear(&t, &format!("{l}.feed_forward.output_dense"), d, c.ffn)?,
-            })
-        })
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-        let normalize = files
-            .json("preprocessor_config.json")
-            .ok()
-            .and_then(|json| json["do_normalize"].as_bool())
-            .unwrap_or(true);
-        Ok(Self {
-            projection: linear(
-                &t,
-                &format!("{p}.feature_projection.projection"),
-                d,
-                channels,
-            )?,
-            feature_norm,
-            position: position_conv(&t, &format!("{p}.encoder.pos_conv_embed.conv"), &c)?,
-            encoder_norm: Norm::load(&t, &format!("{p}.encoder.layer_norm"), d)?,
-            layers,
-            head: linear(&t, "lm_head", c.vocab, d)?,
-            tokens: vocabulary(files, c.vocab)?,
-            normalize,
-            convs,
-            config: c,
-        })
-    }
-
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    /// The model writes one language (its fine-tuning's); options change nothing.
-    pub fn pieces(&self, samples: &[f32]) -> Vec<(usize, usize, String)> {
-        audio::windows(samples, WINDOW_SAMPLES)
-            .into_iter()
-            .filter(|window| !audio::is_silent(window))
-            .filter_map(|window| {
-                let text = self.transcribe_window(window);
-                (!text.is_empty()).then(|| (audio::offset(samples, window), window.len(), text))
-            })
-            .collect()
-    }
-
     fn transcribe_window(&self, samples: &[f32]) -> String {
         let Some((features, t)) = self.features(samples) else {
             return String::new();
@@ -350,6 +258,94 @@ impl Wav2Vec2 {
         }
         c.gelu.apply(&mut out, c.d);
         out
+    }
+}
+
+impl Family for Wav2Vec2 {
+    fn load(
+        files: &Files,
+        json: &Json,
+        precision: Precision,
+        device: Device,
+    ) -> Result<Self, String> {
+        let c = Config::parse(json)?;
+        let t = files.tensors(precision, device)?;
+        let p = "wav2vec2";
+        let d = c.d;
+        let mut convs = Vec::with_capacity(c.convs.len());
+        let mut channels = 1;
+        for (i, &(out, kernel, stride)) in c.convs.iter().enumerate() {
+            let name = format!("{p}.feature_extractor.conv_layers.{i}");
+            let norm = format!("{name}.layer_norm");
+            let norm = match (c.layer_norm_convs, i) {
+                (true, _) => Some(ConvNorm::Layer(Norm::load(&t, &norm, out)?)),
+                (false, 0) => Some(ConvNorm::Group {
+                    weight: t.f32_len(&format!("{norm}.weight"), out)?,
+                    bias: t.f32_len(&format!("{norm}.bias"), out)?,
+                }),
+                (false, _) => None,
+            };
+            convs.push(Conv {
+                weight: linear(&t, &format!("{name}.conv"), out, channels * kernel)?,
+                kernel,
+                stride,
+                norm,
+            });
+            channels = out;
+        }
+        let feature_norm = format!("{p}.feature_projection.layer_norm");
+        let feature_norm = match t.has(&format!("{feature_norm}.weight")) {
+            true => Some(Norm::load(&t, &feature_norm, channels)?),
+            false => None,
+        };
+        let layers = team::map(c.layers, |i| -> Result<Layer, String> {
+            let l = format!("{p}.encoder.layers.{i}");
+            let a = |n: &str| format!("{l}.attention.{n}");
+            Ok(Layer {
+                norm_attn: Norm::load(&t, &format!("{l}.layer_norm"), d)?,
+                qkv: stacked(&t, &[&a("q_proj"), &a("k_proj"), &a("v_proj")], d, d)?,
+                out: linear(&t, &a("out_proj"), d, d)?,
+                norm_ffn: Norm::load(&t, &format!("{l}.final_layer_norm"), d)?,
+                fc1: linear(
+                    &t,
+                    &format!("{l}.feed_forward.intermediate_dense"),
+                    c.ffn,
+                    d,
+                )?,
+                fc2: linear(&t, &format!("{l}.feed_forward.output_dense"), d, c.ffn)?,
+            })
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+        let normalize = files
+            .json("preprocessor_config.json")
+            .ok()
+            .and_then(|json| json["do_normalize"].as_bool())
+            .unwrap_or(true);
+        Ok(Self {
+            projection: linear(
+                &t,
+                &format!("{p}.feature_projection.projection"),
+                d,
+                channels,
+            )?,
+            feature_norm,
+            position: position_conv(&t, &format!("{p}.encoder.pos_conv_embed.conv"), &c)?,
+            encoder_norm: Norm::load(&t, &format!("{p}.encoder.layer_norm"), d)?,
+            layers,
+            head: linear(&t, "lm_head", c.vocab, d)?,
+            tokens: vocabulary(files, c.vocab)?,
+            normalize,
+            convs,
+            config: c,
+        })
+    }
+
+    /// The model writes one language (its fine-tuning's); options change nothing.
+    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
+            self.transcribe_window(window)
+        })
     }
 }
 

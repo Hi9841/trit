@@ -17,250 +17,40 @@ mod cpu;
 mod audio;
 mod catalog;
 mod cleanup;
+mod config;
+mod device;
 #[cfg(feature = "gpu")]
 mod gpu;
+mod layers;
+mod locate;
 mod models;
+mod options;
 mod text;
 mod tts;
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::path::Path;
 
 pub use audio::wav::{read_wav, write_wav};
 pub use catalog::{known, Known, CATALOG};
-pub use cleanup::{Cleaner, Context, Structure, Style, Styling, CLEANUP_REPO};
+pub use cleanup::{Cleaner, Context, Structure, Style, Styling, UnknownName, CLEANUP_REPO};
 pub use cpu::gemm::Precision;
 pub use cpu::{cpu_path, threads, Spread};
+pub(crate) use device::active_device;
+pub use device::{gpu_adapter, gpu_path, gpu_weight_bytes, Device};
+pub use locate::{
+    candidates, find_cleanup_model, find_model, find_voice, is_model, is_voice,
+    missing_cleanup_model, missing_model, missing_voice, model_candidates, MODEL_FILES, MODEL_REPO,
+};
 pub use models::parts::logit_bias::BiasWeights;
 pub use models::MODEL_TYPES;
-pub use tts::{phonemize, Voice, Voicing, VOICE_REPO, VOICE_REPOS};
+pub use options::{hundredths, joined, language_code, Cancel, Options, Segment, Task};
+pub use tts::{
+    phonemize, voice_accent, Voice, Voicing, PHONEMIZER_FALLBACKS, VOICE_REPO, VOICE_REPOS,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `transcribe` takes mono samples at this rate.
 pub const SAMPLE_RATE: u32 = 16_000;
-/// The Hugging Face repository of the default model.
-pub const MODEL_REPO: &str = "moondream/parakeet-redux";
-/// The most beams `Options::beam` gives. Each beam keeps its own decoder
-/// caches: Whisper tiny with 10^8 beams held 14 GB within a minute, and
-/// still grew.
-const MAX_BEAMS: usize = 16;
-/// The files every model folder holds; a family may need more. A large
-/// model may hold `model.safetensors.index.json` and its shards instead of
-/// `model.safetensors`.
-pub const MODEL_FILES: [&str; 2] = ["config.json", "model.safetensors"];
-
-/// How to transcribe. `Options::default()` lets the model choose.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Options {
-    /// The spoken language as an ISO 639-1 code (`"en"`, `"de"`). `None`
-    /// lets a multilingual model detect it. Parakeet cannot be told a
-    /// language; `"en"` keeps it to English tokens.
-    pub language: Option<String>,
-    /// Whisper: decode a 30 s window again at temperatures 0.2 to 1.0 when
-    /// its text repeats itself or the model is unsure, as OpenAI Whisper,
-    /// faster-whisper, and whisper.cpp do. `None` is on.
-    pub fallback: Option<bool>,
-    /// Beams for the decoder families. 0 (the default) is the model's own
-    /// choice: 5 for Whisper and Moonshine (fewer errors than greedy on
-    /// every test set, at 2 to 3 times the decoder time), greedy for Canary.
-    /// 1 is greedy, as the reference runtimes decode by default. More than
-    /// 16 decode with 16.
-    pub beam: usize,
-    /// Write the speech as spoken (the default), or translate it into
-    /// English (Whisper's multilingual models, Canary).
-    pub task: Task,
-    /// Stops the call early (see `Cancel`). `None` runs to the end.
-    pub cancel: Option<Cancel>,
-}
-
-/// Stops a call that runs on another thread. Parakeet looks at it between
-/// encoder blocks, between decoder steps, and between windows, and the call
-/// then returns no text. The caller holds this value, so it knows that the
-/// empty text is not silence. The other families do not look at it yet and
-/// run to the end. Clones share one flag; two values are equal when they
-/// share it.
-#[derive(Clone, Debug, Default)]
-pub struct Cancel(Arc<AtomicBool>);
-
-impl Cancel {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Stops the calls that hold this flag. A flag stays set: use a new one
-    /// for the next call.
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-impl PartialEq for Cancel {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for Cancel {}
-
-/// What to write.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Task {
-    /// The words as spoken, in the spoken language.
-    #[default]
-    Transcribe,
-    /// The speech translated into English.
-    Translate,
-}
-
-impl Task {
-    pub const NAMES: [&str; 2] = ["transcribe", "translate"];
-
-    pub fn parse(name: &str) -> Option<Self> {
-        match name {
-            "transcribe" => Some(Self::Transcribe),
-            "translate" => Some(Self::Translate),
-            _ => None,
-        }
-    }
-}
-
-impl Options {
-    pub(crate) fn fallback(&self) -> bool {
-        self.fallback.unwrap_or(true)
-    }
-
-    pub(crate) fn cancelled(&self) -> bool {
-        self.cancel.as_ref().is_some_and(Cancel::is_cancelled)
-    }
-
-    /// `beam`, or `default` when it is 0; at most `MAX_BEAMS`.
-    pub(crate) fn beams(&self, default: usize) -> usize {
-        if self.beam == 0 {
-            default
-        } else {
-            self.beam.min(MAX_BEAMS)
-        }
-    }
-
-    /// Options for one language, for example `Options::language("en")`.
-    pub fn language(code: &str) -> Self {
-        Self {
-            language: Some(code.trim().to_ascii_lowercase()),
-            ..Self::default()
-        }
-    }
-}
-
-/// A stretch of the recording and its text. Times are seconds from the start.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Segment {
-    pub start: f32,
-    pub end: f32,
-    pub text: String,
-}
-
-/// Where the dense and ternary products run.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Device {
-    /// Every product runs on the CPU.
-    #[default]
-    Cpu,
-    /// Dense and ternary products run on the GPU. The load fails when the
-    /// machine has no adapter, or when Trit was built without `gpu`.
-    Gpu,
-    /// The GPU when it is available, otherwise the CPU.
-    Auto,
-}
-
-impl Device {
-    pub const NAMES: [&str; 3] = ["cpu", "gpu", "auto"];
-
-    pub fn parse(name: &str) -> Result<Self, String> {
-        match name {
-            "cpu" => Ok(Self::Cpu),
-            "gpu" => Ok(Self::Gpu),
-            "auto" => Ok(Self::Auto),
-            other => Err(format!(
-                "device `{other}`: use one of {}",
-                Self::NAMES.join(", ")
-            )),
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        Self::NAMES[self as usize]
-    }
-}
-
-/// `TRIT_DEVICE=cpu|gpu|auto` overrides `requested`. `Gpu` fails when there
-/// is no adapter. Without the `gpu` feature, `Gpu` fails and `Auto` is the CPU.
-/// The result is `Cpu` or `Gpu`.
-pub(crate) fn active_device(requested: Device) -> Result<Device, String> {
-    let requested = match std::env::var("TRIT_DEVICE") {
-        Ok(name) if !name.is_empty() => Device::parse(&name.to_ascii_lowercase())?,
-        _ => requested,
-    };
-    match requested {
-        Device::Cpu => Ok(Device::Cpu),
-        Device::Gpu => {
-            #[cfg(feature = "gpu")]
-            {
-                gpu::Gpu::get().map(|_| Device::Gpu)
-            }
-            #[cfg(not(feature = "gpu"))]
-            {
-                Err("trit was built without the gpu feature".into())
-            }
-        }
-        Device::Auto => {
-            #[cfg(feature = "gpu")]
-            {
-                Ok(if gpu::Gpu::get().is_ok() {
-                    Device::Gpu
-                } else {
-                    Device::Cpu
-                })
-            }
-            #[cfg(not(feature = "gpu"))]
-            {
-                Ok(Device::Cpu)
-            }
-        }
-    }
-}
-
-/// The GPU adapter, for example `NVIDIA GeForce RTX 4090, Dx12, f16`.
-/// Without the `gpu` feature, or with no adapter, this is the reason.
-pub fn gpu_path() -> String {
-    #[cfg(feature = "gpu")]
-    {
-        match gpu::Gpu::get() {
-            Ok(gpu) => gpu.path().to_string(),
-            Err(error) => error,
-        }
-    }
-    #[cfg(not(feature = "gpu"))]
-    {
-        "trit was built without the gpu feature".into()
-    }
-}
-
-/// Bytes of weight buffers resident on the GPU. 0 before a GPU load.
-pub fn gpu_weight_bytes() -> u64 {
-    #[cfg(feature = "gpu")]
-    {
-        gpu::weight_bytes()
-    }
-    #[cfg(not(feature = "gpu"))]
-    {
-        0
-    }
-}
 
 /// How to load a model. `LoadOptions::default()` is `Precision::Auto` on the
 /// CPU, with no cache. `TRIT_DEVICE` overrides `device` at load.
@@ -336,6 +126,22 @@ impl Trit {
         self.model.transcribe(&audio::sanitized(samples), options)
     }
 
+    /// The text and, with `timestamps`, its segments. With timestamps the
+    /// text is the segments joined.
+    pub fn transcript(
+        &self,
+        samples: &[f32],
+        options: &Options,
+        timestamps: bool,
+    ) -> (String, Vec<Segment>) {
+        if timestamps {
+            let segments = self.segments(samples, options);
+            (joined(&segments), segments)
+        } else {
+            (self.transcribe_with(samples, options), Vec::new())
+        }
+    }
+
     /// The text in timed segments: sentences or pauses for Parakeet (from
     /// the times its decoder emits tokens), one per window of up to 30 s for
     /// Whisper and Moonshine, and 40 s for Canary.
@@ -360,7 +166,7 @@ impl Trit {
 /// `gpu` feature it also frees the pooled GPU buffers and the staging buffers
 /// of dropped GPU models.
 pub fn release_memory() {
-    models::parts::fastconformer::release_positions();
+    models::release_caches();
     cpu::buf::clear_pool();
     #[cfg(feature = "gpu")]
     gpu::trim();
@@ -368,164 +174,4 @@ pub fn release_memory() {
     // on the workers), and mi_collect reaches only the calling thread's.
     // SAFETY: mi_collect only walks mimalloc's own free lists.
     cpu::team::on_every_thread(|| unsafe { libmimalloc_sys::mi_collect(true) });
-}
-
-/// The model folder: `explicit` if given (a folder, or a `CATALOG` name
-/// found in the places of `candidates`), else `TRIT_MODEL`, else the first
-/// complete `parakeet-redux` folder under `./models`, `../models`, the folder
-/// of the executable, the TDT app data, or the Hugging Face cache.
-pub fn find_model(explicit: Option<&Path>) -> Option<PathBuf> {
-    if let Some(dir) = explicit {
-        if is_model(dir) {
-            return Some(dir.to_path_buf());
-        }
-        // A catalog name (`whisper-large-v3-turbo`) or repository: its usual places.
-        let entry = known(&dir.to_string_lossy())?;
-        return candidates(entry.repo).into_iter().find(|d| is_model(d));
-    }
-    if let Some(dir) = std::env::var_os("TRIT_MODEL") {
-        let dir = PathBuf::from(dir);
-        return is_model(&dir).then_some(dir);
-    }
-    model_candidates().into_iter().find(|dir| is_model(dir))
-}
-
-/// Why `find_model(explicit)` found nothing, with the command that fixes it.
-pub fn missing_model(explicit: Option<&Path>) -> String {
-    match explicit.map(|dir| (dir, known(&dir.to_string_lossy()))) {
-        Some((_, Some(entry))) => format!(
-            "{} is not on this computer; get it: {}",
-            entry.name,
-            entry.download_command()
-        ),
-        Some((dir, None)) => format!(
-            "{} is not a model folder ({}) or a name from `trit models`",
-            dir.display(),
-            MODEL_FILES.join(", ")
-        ),
-        None => format!(
-            "no model found; get it: {}",
-            known(MODEL_REPO).map_or_else(String::new, Known::download_command)
-        ),
-    }
-}
-
-/// The folders `find_model` searches, in order, when no folder is named.
-pub fn model_candidates() -> Vec<PathBuf> {
-    candidates(MODEL_REPO)
-}
-
-/// The places a model of Hugging Face repository `repo` (`owner/name`) may
-/// be: `models/<name>` under the current folder, its parent, the folder of
-/// the executable and two and three folders up, the TDT app data, then the
-/// snapshots of the Hugging Face cache.
-pub fn candidates(repo: &str) -> Vec<PathBuf> {
-    let name = repo.rsplit('/').next().unwrap_or(repo);
-    // The catalog's folder name too, where it differs (Kokoro-82M is models/kokoro-82m).
-    let names: Vec<&str> = std::iter::once(name)
-        .chain(known(repo).map(|k| k.name).filter(|n| *n != name))
-        .collect();
-    let mut roots = vec![PathBuf::from("models"), PathBuf::from("../models")];
-    if let Some(exe_dir) = std::env::current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-    {
-        roots.push(exe_dir.join("models"));
-        roots.push(exe_dir.join("../../models"));
-        roots.push(exe_dir.join("../../../models"));
-    }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        roots.push(PathBuf::from(local).join("TDT").join("models"));
-    }
-    let mut dirs: Vec<PathBuf> = roots
-        .iter()
-        .flat_map(|root| names.iter().map(move |name| root.join(name)))
-        .collect();
-    let hub = std::env::var_os("HF_HOME")
-        .map(|home| PathBuf::from(home).join("hub"))
-        .or_else(|| {
-            std::env::var_os("USERPROFILE")
-                .or_else(|| std::env::var_os("HOME"))
-                .map(|home| PathBuf::from(home).join(".cache/huggingface/hub"))
-        });
-    if let Some(hub) = hub {
-        let snapshots = hub
-            .join(format!("models--{}", repo.replace('/', "--")))
-            .join("snapshots");
-        if let Ok(entries) = std::fs::read_dir(snapshots) {
-            dirs.extend(entries.flatten().map(|entry| entry.path()));
-        }
-    }
-    dirs
-}
-
-/// The cleanup model folder: `explicit` if given, else `TRIT_CLEANUP_MODEL`,
-/// else the first complete `s1-mini` folder of `candidates(CLEANUP_REPO)`.
-pub fn find_cleanup_model(explicit: Option<&Path>) -> Option<PathBuf> {
-    if let Some(dir) = explicit {
-        return is_model(dir).then(|| dir.to_path_buf());
-    }
-    if let Some(dir) = std::env::var_os("TRIT_CLEANUP_MODEL") {
-        let dir = PathBuf::from(dir);
-        return is_model(&dir).then_some(dir);
-    }
-    candidates(CLEANUP_REPO)
-        .into_iter()
-        .find(|dir| is_model(dir))
-}
-
-/// The voice folder: `explicit` if given (a folder, or a `CATALOG` name
-/// found in the places of `candidates`), else `TRIT_VOICE`, else the first
-/// complete folder of `VOICE_REPOS` (Kokoro-82M, then MMS-TTS English).
-pub fn find_voice(explicit: Option<&Path>) -> Option<PathBuf> {
-    if let Some(dir) = explicit {
-        if is_voice(dir) {
-            return Some(dir.to_path_buf());
-        }
-        let entry = known(&dir.to_string_lossy())?;
-        return candidates(entry.repo).into_iter().find(|d| is_voice(d));
-    }
-    if let Some(dir) = std::env::var_os("TRIT_VOICE") {
-        let dir = PathBuf::from(dir);
-        return is_voice(&dir).then_some(dir);
-    }
-    VOICE_REPOS
-        .iter()
-        .flat_map(|repo| candidates(repo))
-        .find(|dir| is_voice(dir))
-}
-
-/// True when `dir` holds a voice: a VITS folder (as `is_model`) or a
-/// Kokoro folder (`config.json` with `istftnet` and a `.pth` checkpoint).
-pub fn is_voice(dir: &Path) -> bool {
-    is_model(dir) || tts::is_kokoro(dir)
-}
-
-/// Why `find_voice(explicit)` found nothing, with the command that fixes it.
-pub fn missing_voice(explicit: Option<&Path>) -> String {
-    match explicit.map(|dir| (dir, known(&dir.to_string_lossy()))) {
-        Some((_, Some(entry))) => format!(
-            "{} is not on this computer; get it: {}",
-            entry.name,
-            entry.download_command()
-        ),
-        Some((dir, None)) => format!(
-            "{} is not a voice folder ({}) or a name from `trit models`",
-            dir.display(),
-            MODEL_FILES.join(", ")
-        ),
-        None => format!(
-            "no voice found; get it: {}",
-            known(VOICE_REPO).map_or_else(String::new, Known::download_command)
-        ),
-    }
-}
-
-/// True when `dir` holds every file of `MODEL_FILES` (the weights as one
-/// file or as shards), one NVIDIA NeMo archive (`.nemo`) or GGUF file
-/// (`.gguf`) and no `config.json`, or a Fermion container (`model.fermion`).
-pub fn is_model(dir: &Path) -> bool {
-    let weights =
-        dir.join(cpu::tensors::WEIGHTS).is_file() || dir.join(cpu::tensors::SHARD_INDEX).is_file();
-    (dir.join("config.json").is_file() && weights) || models::Package::in_folder(dir)
 }

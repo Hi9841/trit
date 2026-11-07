@@ -4,19 +4,25 @@
 //! prompt ("Transcribe the following: ..."), and Qwen3 writes the text. The
 //! prompt follows transcribe.cpp's port of NeMo's `SALM`.
 
-use crate::audio::{self, mel::MelFrontend};
-use crate::cpu::{buf::Buf, gemm::Dense};
-use crate::models::config::Json;
+use crate::audio::mel::MelFrontend;
+use crate::config::Json;
+use crate::cpu::gemm::Dense;
+use crate::layers::linear;
 use crate::models::files::Files;
-use crate::models::layers::linear;
-use crate::models::parts::{causal_lm::CausalLm, fastconformer as conformer};
+use crate::models::parts::{
+    causal_lm::{CausalLm, TokenBudget},
+    fastconformer as conformer,
+};
+use crate::models::{speech_windows, Family};
 use crate::text::bpe::Bpe;
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 
 /// The model's limit per pass (its card: 40 s).
-const WINDOW_SAMPLES: usize = 40 * 16_000;
-const MIN_NEW_TOKENS: usize = 128;
-const TOKENS_PER_SECOND: usize = 8;
+const WINDOW_SAMPLES: usize = 40 * crate::SAMPLE_RATE as usize;
+const BUDGET: TokenBudget = TokenBudget {
+    least: 128,
+    per_second: 8,
+};
 
 pub struct CanaryQwen {
     frontend: MelFrontend,
@@ -31,8 +37,8 @@ pub struct CanaryQwen {
     stop: Vec<usize>,
 }
 
-impl CanaryQwen {
-    pub fn load(
+impl Family for CanaryQwen {
+    fn load(
         files: &Files,
         json: &Json,
         precision: Precision,
@@ -48,10 +54,7 @@ impl CanaryQwen {
         drop(t);
         encoder.warm_positions();
         let bpe = Bpe::parse(&files.read("tokenizer.json")?)?;
-        let id = |token: &str| {
-            bpe.id(token)
-                .ok_or_else(|| format!("the tokenizer has no {token}"))
-        };
+        let id = |token: &str| bpe.token(token);
         let (start, end) = (id("<|im_start|>")?, id("<|im_end|>")?);
         let mut head = vec![start];
         head.extend(bpe.encode_plain("user\nTranscribe the following: "));
@@ -72,34 +75,19 @@ impl CanaryQwen {
         })
     }
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    pub fn pieces(&self, samples: &[f32], _: &Options) -> Vec<(usize, usize, String)> {
-        let mut pieces = Vec::new();
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
-            if audio::is_silent(window) {
-                continue;
-            }
+    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             let (features, frames) = self.frontend.compute(window);
-            // The subsampling needs at least one output frame per stage.
-            if frames < 8 {
-                continue;
+            if frames < conformer::MIN_FRAMES {
+                return String::new();
             }
             let (encoded, t) = self.encoder.encode(&features, frames);
             let audio = self.projection.forward(&encoded, t);
-            let d = self.decoder.width();
-            let (head, tail) = (self.head.len(), self.tail.len());
-            let mut rows = Buf::scratch((head + t + tail) * d);
-            rows[..head * d].copy_from_slice(&self.decoder.embed(&self.head));
-            rows[head * d..(head + t) * d].copy_from_slice(&audio);
-            rows[(head + t) * d..].copy_from_slice(&self.decoder.embed(&self.tail));
-            let seconds = window.len() / crate::SAMPLE_RATE as usize;
-            let max_new = MIN_NEW_TOKENS.max(seconds * TOKENS_PER_SECOND);
-            let ids = self.decoder.generate_rows(rows, max_new, &self.stop);
-            let text = self.bpe.decode(&ids).trim().to_string();
-            if !text.is_empty() {
-                pieces.push((audio::offset(samples, window), window.len(), text));
-            }
-        }
-        pieces
+            let budget = BUDGET.tokens(window.len());
+            let ids = self
+                .decoder
+                .answer(&self.head, &audio, &self.tail, budget, &self.stop);
+            self.bpe.decode(&ids).trim().to_string()
+        })
     }
 }

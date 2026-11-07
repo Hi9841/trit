@@ -202,7 +202,7 @@ Trit is called through its Python binding with `language="en"`.
 | Weights | Read from `model.safetensors` as published; no conversion step | `src/cpu/tensors.rs` |
 | Frontends | NeMo log-mel (Parakeet, Canary), Whisper log-mel, raw audio (Moonshine) | `src/audio/` |
 | Ternary kernel | Redux: i8 activations, `vpdpbusd` on AVX-512 VNNI, `vpmaddubsw` on AVX2, scalar | `src/cpu/kernels.rs` |
-| Int8 kernel | W8A8 for layers 384 wide or more: VNNI 512, VNNI 256, AVX2, scalar | `src/cpu/int8.rs` |
+| Int8 kernel | W8A8 for layers 384 wide or more: VNNI 512, VNNI 256, AVX2, NEON, `sdot`, `smmla`, scalar | `src/cpu/int8.rs` |
 | Float kernels | f32 GEMM with FMA register tiles; f16 weights with F16C | `src/cpu/fgemm.rs`, `src/cpu/half.rs` |
 | Decoding | Beam 5 for Whisper and Moonshine (Transformers rules, all beams in one batch); greedy for Parakeet and Canary | `src/models/beam.rs` |
 | Threads | Own teams of spinning workers: one per physical core of one L3 domain (Parakeet, S1-mini), all physical cores (Whisper) | `src/cpu/team.rs` |
@@ -214,9 +214,10 @@ Trit is called through its Python binding with `language="en"`.
 
 1. **CPU only.** Trit has no GPU path. On a server with a GPU and batches of
    files, a GPU runtime gives more throughput.
-2. **x86 speed only.** The fast kernels need AVX2 or AVX-512. Other CPUs,
-   ARM included, run the scalar path: the same text, much slower. Only
-   x86-64 Windows has been measured.
+2. **Measured on x86-64 Windows.** The fast kernels need AVX2 or AVX-512 on
+   x86-64. arm64 runs NEON, and `sdot` and `smmla` when the CPU has them.
+   The scalar path gives the same text and is much slower. Only x86-64
+   Windows has been measured.
 3. **No streaming API.** Each call takes a whole clip. The TDT app cuts long
    recordings at pauses itself.
 4. **Whisper encodes a full 30 s window**, so a short clip costs as much as

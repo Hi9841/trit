@@ -6,9 +6,9 @@
 //! FunASR's (`encoders0`, `encoders`, `tp_encoders`).
 
 use crate::audio::kaldi_fbank::{FbankShape, KaldiFbank};
+use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::config::Json;
-use crate::models::layers::{add_into, attention, linear, Norm};
+use crate::layers::{add_into, attention, linear, Norm};
 
 /// FunASR's layer norm epsilon.
 const NORM_EPS: f32 = 1e-12;

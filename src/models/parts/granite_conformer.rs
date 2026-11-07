@@ -10,11 +10,10 @@
 //! `GraniteSpeechCTCEncoder`; tensor names are under `encoder.`.
 
 use crate::audio::dft::PowerSpectrum;
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, fgemm, gemm::Dense, team, tensors::Tensors};
-use crate::models::config::Json;
-use crate::models::layers::{add_into, linear, Norm};
+use crate::layers::{add_into, folded_batch_norm, linear, Norm};
 
-const BATCH_NORM_EPS: f32 = 1e-5;
 /// The log floor before the log10, as the reference's `clamp(min=1e-10)`.
 const LOG_FLOOR: f32 = 1e-10;
 
@@ -247,12 +246,8 @@ impl Block {
             bn("running_mean")?,
             bn("running_var")?,
         );
-        let bn_scale: Vec<f32> = (0..inner)
-            .map(|i| weight[i] / (var[i] + BATCH_NORM_EPS).sqrt())
-            .collect();
-        let bn_shift = (0..inner)
-            .map(|i| bias[i] - mean[i] * bn_scale[i])
-            .collect();
+        let (bn_scale, bn_shift) =
+            folded_batch_norm(&weight, &bias, &mean, &var, &vec![0.0; inner]);
         let dw = t.f32_len(&format!("{p}.conv.depthwise.weight"), inner * k)?;
         Ok(Self {
             norm_ff1: n("norm_ff1")?,

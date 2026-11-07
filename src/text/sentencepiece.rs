@@ -71,17 +71,8 @@ impl Tokenizer {
             .flatten()
             .enumerate()
         {
-            // Either ["a", "b"] or "a b".
-            let pair = match merge {
-                serde_json::Value::Array(parts) => parts
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .zip(parts.get(1).and_then(|b| b.as_str())),
-                serde_json::Value::String(joined) => joined.split_once(' '),
-                _ => None,
-            };
-            if let Some((a, b)) = pair {
-                merges.entry((a.to_string(), b.to_string())).or_insert(rank);
+            if let Some(pair) = super::parse_merge(merge) {
+                merges.entry(pair).or_insert(rank);
             }
         }
         Ok(Self {
@@ -177,22 +168,11 @@ impl Tokenizer {
                 .chain(word.chars())
                 .map(String::from)
                 .collect();
-            loop {
-                let best = symbols
-                    .windows(2)
-                    .enumerate()
-                    .filter_map(|(i, pair)| {
-                        self.merges
-                            .get(&(pair[0].clone(), pair[1].clone()))
-                            .map(|rank| (*rank, i))
-                    })
-                    .min();
-                let Some((_, at)) = best else {
-                    break;
-                };
-                let right = symbols.remove(at + 1);
-                symbols[at].push_str(&right);
-            }
+            super::merge_symbols(&mut symbols, |left, right| {
+                self.merges
+                    .get(&(left.to_string(), right.to_string()))
+                    .copied()
+            });
             for symbol in &symbols {
                 ids.push(*self.ids.get(symbol)?);
             }

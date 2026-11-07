@@ -6,17 +6,18 @@
 //! tokens, which the text drops. The structure follows FunASR's
 //! `SenseVoiceSmall` and transcribe.cpp's port; tensor names are FunASR's.
 
-use crate::audio::{self, kaldi_fbank::KaldiFbank};
+use crate::audio::kaldi_fbank::KaldiFbank;
+use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense};
-use crate::models::config::Json;
+use crate::layers::linear;
 use crate::models::files::Files;
-use crate::models::layers::linear;
 use crate::models::parts::sanm;
+use crate::models::{speech_windows, Family};
 use crate::text::sentencepiece::Tokenizer;
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 
 /// The model's limit per pass (its card: 30 s per direct call).
-const WINDOW_SAMPLES: usize = 30 * 16_000;
+const WINDOW_SAMPLES: usize = 30 * crate::SAMPLE_RATE as usize;
 
 struct Config {
     vocab: usize,
@@ -84,7 +85,24 @@ pub struct SenseVoice {
 }
 
 impl SenseVoice {
-    pub fn load(
+    /// CTC logits, `(4 + frames) x vocab`: the prompt rows, then the features.
+    fn logits(&self, features: &[f32], frames: usize, language: usize) -> Buf {
+        let c = &self.config;
+        let (input, t) = (self.encoder.shape.input, frames + 4);
+        let mut x = Buf::scratch(t * input);
+        for (i, row) in [language, c.event, c.emotion, c.with_itn]
+            .into_iter()
+            .enumerate()
+        {
+            x[i * input..(i + 1) * input].copy_from_slice(&self.prompts[row * input..][..input]);
+        }
+        x[4 * input..].copy_from_slice(features);
+        self.head.forward(&self.encoder.encode(x, t), t)
+    }
+}
+
+impl Family for SenseVoice {
+    fn load(
         files: &Files,
         json: &Json,
         precision: Precision,
@@ -109,38 +127,17 @@ impl SenseVoice {
         Ok(model)
     }
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    pub fn pieces(&self, samples: &[f32], options: &Options) -> Vec<(usize, usize, String)> {
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         let language = self.config.language(options.language.as_deref());
-        let mut pieces = Vec::new();
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             let (features, frames) = self.frontend.compute(window);
-            if frames == 0 || audio::is_silent(window) {
-                continue;
+            if frames == 0 {
+                return String::new();
             }
             let logits = self.logits(&features, frames, language);
             let c = &self.config;
             let (ids, _) = crate::models::parts::ctc::greedy(&logits, c.vocab, c.blank, &[]);
-            let text = self.tokenizer.decode(&ids).trim().to_string();
-            if !text.is_empty() {
-                pieces.push((audio::offset(samples, window), window.len(), text));
-            }
-        }
-        pieces
-    }
-
-    /// CTC logits, `(4 + frames) x vocab`: the prompt rows, then the features.
-    fn logits(&self, features: &[f32], frames: usize, language: usize) -> Buf {
-        let c = &self.config;
-        let (input, t) = (self.encoder.shape.input, frames + 4);
-        let mut x = Buf::scratch(t * input);
-        for (i, row) in [language, c.event, c.emotion, c.with_itn]
-            .into_iter()
-            .enumerate()
-        {
-            x[i * input..(i + 1) * input].copy_from_slice(&self.prompts[row * input..][..input]);
-        }
-        x[4 * input..].copy_from_slice(features);
-        self.head.forward(&self.encoder.encode(x, t), t)
+            self.tokenizer.decode(&ids).trim().to_string()
+        })
     }
 }

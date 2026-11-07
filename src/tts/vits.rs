@@ -5,10 +5,11 @@
 //! writes the waveform. Inference only: the posterior encoder of training
 //! is not loaded.
 
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, team, tensors::Tensors};
-use crate::models::config::Json;
-use crate::models::layers::{Gelu, Norm};
-use crate::models::parts::conv::{Conv1d, Depthwise, Upsample};
+use crate::layers::{Gelu, Norm};
+use crate::tts::conv::{Conv1d, Depthwise, Upsample};
+use crate::tts::noise::Noise;
 use crate::{Device, Precision};
 use std::cell::RefCell;
 use std::path::Path;
@@ -30,7 +31,6 @@ struct Config {
     vocab: usize,
 }
 
-/// How one text is spoken.
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     /// Durations are divided by it.
@@ -39,45 +39,6 @@ pub struct Settings {
     pub noise: f32,
     /// Scale of the duration noise.
     pub noise_duration: f32,
-}
-
-/// Standard normal values from a seed: SplitMix64, then Box-Muller. One
-/// seed always gives the same values, so one text gives the same audio.
-pub struct Noise {
-    state: u64,
-    spare: Option<f32>,
-}
-
-impl Noise {
-    pub fn new(seed: u64) -> Self {
-        Self {
-            state: seed,
-            spare: None,
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Uniform in (0, 1].
-    fn uniform(&mut self) -> f64 {
-        ((self.next_u64() >> 11) + 1) as f64 / (1u64 << 53) as f64
-    }
-
-    pub fn normal(&mut self) -> f32 {
-        if let Some(value) = self.spare.take() {
-            return value;
-        }
-        let radius = (-2.0 * self.uniform().ln()).sqrt();
-        let angle = std::f64::consts::TAU * self.uniform();
-        self.spare = Some((radius * angle.sin()) as f32);
-        (radius * angle.cos()) as f32
-    }
 }
 
 pub struct Vits {
@@ -162,14 +123,12 @@ impl Vits {
         })
     }
 
-    /// The waveform of token ids (from `Characters::encode`).
     pub fn speak(&self, ids: &[usize], settings: &Settings, noise: &mut Noise) -> Vec<f32> {
         let (d, flow) = (self.config.hidden, self.config.flow);
         let tokens = ids.len();
         if tokens == 0 {
             return Vec::new();
         }
-        // Text encoder.
         let scale = (d as f32).sqrt();
         let mut h = Buf::scratch(tokens * d);
         for (row, id) in h.chunks_exact_mut(d).zip(ids) {
@@ -194,7 +153,6 @@ impl Vits {
             .collect();
         let frames = repeats.iter().sum::<usize>().max(1);
 
-        // The prior of each frame, sampled, then the flow in reverse.
         let mut z = Buf::zeroed(frames * flow);
         let mut row_at = 0;
         for (token, repeat) in repeats.iter().enumerate() {
@@ -365,7 +323,6 @@ impl Separable {
         Ok(Self { layers, channels })
     }
 
-    /// `x` (plus `condition` first, when given) through every layer.
     fn forward(&self, x: &mut [f32], frames: usize, condition: Option<&[f32]>) {
         if let Some(condition) = condition {
             x.iter_mut().zip(condition).for_each(|(v, c)| *v += c);

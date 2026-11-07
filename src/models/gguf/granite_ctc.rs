@@ -46,17 +46,13 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "self_conditioning_layer": e("self_cond_layer")?,
             "subsample_layers": g.get("stt.granite5_ctc.encoder.subsample_layers"),
         },
-        "feature_extractor": {
-            "n_fft": fe("n_fft")?,
-            "win_length": fe("win_length")?,
-            "hop_length": fe("hop_length")?,
-            "num_mel_bins": fe("num_mels")?,
-            "stack_factor": fe("stack_factor")?,
-            "floor_db": g.get("stt.frontend.logmel_floor_db").as_f64().unwrap_or(8.0),
-            "deltas": true,
-            // 5.0 pads the audio to whole stacks of frames.
-            "frames": "whole_stacks",
-        },
+        "feature_extractor": super::blocks::granite_front(
+            g,
+            fe("stack_factor")?,
+            g.get("stt.frontend.logmel_floor_db").as_f64().unwrap_or(8.0),
+            true,
+            "whole_stacks",
+        )?,
     }))
 }
 

@@ -10,15 +10,19 @@
 //! the model alone.
 
 mod characters;
+mod conv;
 mod english;
 mod kokoro;
+mod lstm;
+mod noise;
 mod vits;
 
 use characters::Characters;
 pub use kokoro::is_kokoro;
 use kokoro::Kokoro;
+use noise::Noise;
 use std::path::Path;
-use vits::{Noise, Settings, Vits};
+use vits::{Settings, Vits};
 
 /// The Hugging Face repository of the default voice (Kokoro-82M).
 pub const VOICE_REPO: &str = "hexgrad/Kokoro-82M";
@@ -60,13 +64,26 @@ pub struct Voicing {
     /// joined by commas, which are averaged. `None` is `af_heart`.
     pub voice: Option<String>,
     /// Kokoro: the text is phonemes (Kokoro's alphabet, as misaki writes
-    /// it), not words. One line is one pass of at most 510 phonemes.
+    /// it), not words. One line is one pass, at most `Kokoro::max_phonemes`.
     pub phonemes: bool,
 }
 
 /// The Hugging Face repositories of the fallback for unknown words.
 const FALLBACK_US: &str = "PeterReid/graphemes_to_phonemes_en_us";
 const FALLBACK_GB: &str = "PeterReid/graphemes_to_phonemes_en_gb";
+/// Each accent and the repository of its fallback.
+pub const PHONEMIZER_FALLBACKS: [(&str, &str); 2] = [("us", FALLBACK_US), ("gb", FALLBACK_GB)];
+
+/// The accent of a Kokoro voice, from the first letters of its name.
+pub fn voice_accent(name: &str) -> &'static str {
+    match &name[..name.len().min(2)] {
+        "af" => "American female",
+        "am" => "American male",
+        "bf" => "British female",
+        "bm" => "British male",
+        _ => "not English (give phonemes)",
+    }
+}
 
 enum Model {
     Vits {
@@ -119,7 +136,6 @@ fn fallback_dir(voice: &Path, repo: &str) -> Option<std::path::PathBuf> {
         .find(|dir| crate::is_model(dir))
 }
 
-/// A loaded voice. Load once and keep it. `Voice` is `Send + Sync`.
 pub struct Voice {
     model: Model,
 }
@@ -160,11 +176,20 @@ impl Voice {
         Ok(Self { model })
     }
 
-    /// `kokoro` or `vits`.
     pub fn kind(&self) -> &'static str {
         match self.model {
             Model::Vits { .. } => "vits",
             Model::Kokoro(_) => "kokoro",
+        }
+    }
+
+    /// What to tell a caller when this voice reads none of a text.
+    pub fn reads_nothing_help(&self) -> &'static str {
+        match self.model {
+            Model::Vits { .. } => {
+                "MMS-TTS English reads the letters a to z, digits 0 to 6, space, apostrophe, and hyphen"
+            }
+            Model::Kokoro(_) => "Run `trit phonemes \"<text>\"` to see what Kokoro reads",
         }
     }
 
@@ -206,7 +231,9 @@ impl Voice {
                     return Ok(text.trim().to_string());
                 }
                 let name = kokoro_voice(&voice.model, voicing)?;
-                let chunks = voice.english(&name)?.chunks(text)?;
+                let chunks = voice
+                    .english(&name)?
+                    .chunks(text, voice.model.max_phonemes)?;
                 Ok(chunks
                     .into_iter()
                     .map(|c| c.phonemes)
@@ -234,7 +261,7 @@ impl Voice {
     }
 
     /// `speak_with`, part by part: `on_part` gets the samples of each part
-    /// (a sentence for VITS, a line or a 510-phoneme chunk for Kokoro) as
+    /// (a sentence for VITS, a line or one phoneme-limit chunk for Kokoro) as
     /// soon as it is made, the pause before it included. Return false from
     /// it to stop.
     pub fn speak_stream(
@@ -325,7 +352,7 @@ impl Voice {
                 } else {
                     voice
                         .english(&name)?
-                        .chunks(text)?
+                        .chunks(text, model.max_phonemes)?
                         .into_iter()
                         .map(|c| c.phonemes)
                         .collect()

@@ -75,7 +75,7 @@ char *trit_gpu_info(void);
  * goes idle (some seconds after the last transcript), not between calls. */
 void trit_release_memory(void);
 
-/* "parakeet_tdt", "parakeet_ctc", "canary", "whisper", or "moonshine". Static. */
+/* The `model_type` of the model, for example "parakeet_tdt". Static. */
 const char *trit_kind(const Trit *engine);
 
 /* Frees an engine. NULL is a no-op. */

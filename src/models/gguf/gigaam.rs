@@ -96,5 +96,5 @@ pub fn hf_name(name: &str) -> Option<Name> {
         return Some(Name::To(name.to_string()));
     }
     // GigaAM's conv-module norm is the layer norm transcribe.cpp names `ln`.
-    parakeet::hf_name(&name.replace(".conv.ln.", ".conv.bn.")).map(Name::To)
+    parakeet::rename(name, "", "conv.ln.")
 }

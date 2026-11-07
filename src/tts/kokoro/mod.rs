@@ -10,12 +10,12 @@ mod albert;
 mod blocks;
 mod generator;
 
+use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::config::Json;
-use crate::models::layers::{linear, Norm};
-use crate::models::parts::conv::Conv1d;
-use crate::models::parts::lstm::BiLstm;
-use crate::tts::vits::Noise;
+use crate::layers::{linear, Norm};
+use crate::tts::conv::Conv1d;
+use crate::tts::lstm::BiLstm;
+use crate::tts::noise::Noise;
 use crate::Precision;
 use albert::Albert;
 use blocks::{AdaInResBlock, AdaLayerNorm};
@@ -95,6 +95,7 @@ impl Kokoro {
                 }
             })
             .collect();
+        let sample_rate = 24_000;
         let albert = Albert::load(&t, &c, vocab_size)?;
         let block = |name: &str, (i, o): (usize, usize), up: bool| {
             AdaInResBlock::load(&t, name, (i, o, style), up)
@@ -122,12 +123,12 @@ impl Kokoro {
             f0_proj: Conv1d::load(&t, "predictor.F0_proj", (half, 1), (1, 1))?,
             n_proj: Conv1d::load(&t, "predictor.N_proj", (half, 1), (1, 1))?,
             text: TextEncoder::load(&t, &c, (vocab_size, hidden, layers))?,
-            decoder: Decoder::load(&t, &c, (hidden, style))?,
+            decoder: Decoder::load(&t, &c, (hidden, style), sample_rate)?,
             style,
             hidden,
             voices_dir: dir.join("voices"),
             packs: Mutex::new(HashMap::new()),
-            sample_rate: 24_000,
+            sample_rate,
         })
     }
 
@@ -196,7 +197,7 @@ impl Kokoro {
     }
 
     /// The speech of one phoneme string (at most `max_phonemes`), mono at
-    /// 24 kHz. `noise` scales the noise of the harmonic source (1 is the model's).
+    /// `sample_rate`. `noise` scales the noise of the harmonic source (1 is the model's).
     pub fn speak(
         &self,
         phonemes: &str,
@@ -256,7 +257,6 @@ impl Kokoro {
         let f0 = curve(&self.f0, &self.f0_proj);
         let energy = curve(&self.n, &self.n_proj);
 
-        // The text, frame by frame, then the decoder.
         let t_en = self.text.forward(&ids);
         let asr = expand(&t_en, hidden, &repeats);
         Ok(self

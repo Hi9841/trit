@@ -11,6 +11,7 @@
 //! only where the model itself starts a word, and a continuation is boosted
 //! only once `min_prefix` letters of the term are matched.
 
+use crate::layers::argmax;
 use crate::text::sentencepiece::Tokenizer;
 use std::collections::{HashMap, HashSet};
 
@@ -47,9 +48,7 @@ impl Default for BiasWeights {
 #[derive(Default)]
 struct Node {
     children: HashMap<usize, usize>,
-    /// Letters from the root to this node.
     letters: usize,
-    /// Tokens from the root to this node.
     depth: usize,
     /// A term ends here; the index into `replacements`.
     ends: Option<usize>,
@@ -66,10 +65,8 @@ pub struct Term {
     pub always: bool,
 }
 
-/// A term finished at the last emitted token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Completion {
-    /// Emitted tokens that belong to the term.
     pub len: usize,
     replacement: usize,
 }
@@ -78,7 +75,6 @@ pub struct Bias {
     nodes: Vec<Node>,
     replacements: Vec<(Option<Vec<usize>>, bool)>,
     startable: HashSet<usize>,
-    /// Tokens that begin a word.
     word_start: Vec<bool>,
     pub weights: BiasWeights,
 }
@@ -147,7 +143,6 @@ impl Bias {
         self.nodes[0].children.is_empty()
     }
 
-    /// Adds the bonuses to `logits` (token part only) for the next step.
     pub fn apply(&self, state: BiasState, logits: &mut [f32]) {
         let (best_token, best) =
             logits
@@ -326,14 +321,12 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// The next token after the bonuses.
     pub fn pick(&mut self, logits: &mut [f32]) -> usize {
         self.own = argmax(logits);
         self.bias.apply(self.matched, logits);
         argmax(logits)
     }
 
-    /// Records the token `pick` chose (end of text excluded).
     pub fn push(&mut self, token: usize) {
         // "rest" must not become "REST" inside "restart": a term is
         // rewritten only when the next word starts.
@@ -365,15 +358,4 @@ impl<'a> Run<'a> {
         }
         self.tokens
     }
-}
-
-/// Index of the largest value; the first one wins a tie.
-fn argmax(values: &[f32]) -> usize {
-    let mut best = 0;
-    for (i, v) in values.iter().enumerate() {
-        if *v > values[best] {
-            best = i;
-        }
-    }
-    best
 }

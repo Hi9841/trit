@@ -2,13 +2,15 @@
 //! transcribe.cpp's `scripts/convert-parakeet.py`): the config of the
 //! Hugging Face Parakeet checkpoint, and its tensor names.
 
-use super::Gguf;
+use super::{Gguf, Name};
+use crate::audio::mel;
+use crate::models::package::{encoder_block, EncShape};
 use serde_json::{json, Value};
 
 /// The config of the Hugging Face checkpoint of this model, after
 /// checking that it has the shape the FastConformer runs.
 pub fn config(g: &Gguf) -> Result<Value, String> {
-    let unsupported = |what: &str| format!("{}: {what}", g.path.display());
+    let unsupported = |what: &str| what.to_string();
     let head = g.get("stt.parakeet.head_kind").as_str().unwrap_or("tdt");
     let model_type = match head {
         "tdt" => "parakeet_tdt",
@@ -64,39 +66,42 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     }
     let mels = g.num("stt.frontend.num_mels")?;
     if text("stt.frontend.type") != "mel"
-        || g.num("stt.frontend.sample_rate")? != 16_000
-        || g.num("stt.frontend.n_fft")? != 512
-        || g.num("stt.frontend.win_length")? != 400
-        || g.num("stt.frontend.hop_length")? != 160
+        || g.num("stt.frontend.sample_rate")? != u64::from(crate::SAMPLE_RATE)
+        || g.num("stt.frontend.n_fft")? != mel::N_FFT as u64
+        || g.num("stt.frontend.win_length")? != mel::WIN_LENGTH as u64
+        || g.num("stt.frontend.hop_length")? != mel::HOP as u64
         || text("stt.frontend.window") != "hann"
         || !matches!(text("stt.frontend.normalize"), "per_feature" | "none")
-        || (float("stt.frontend.pre_emphasis") - 0.97).abs() > 1e-6
+        || (float("stt.frontend.pre_emphasis") - f64::from(mel::PREEMPHASIS)).abs() > 1e-6
     {
         return Err(unsupported("its audio features differ from Parakeet's"));
     }
     let blank = g.num("tokenizer.ggml.blank_token_id")?;
+    let mut encoder_config = encoder_block(EncShape {
+        hidden: enc("d_model")?,
+        intermediate: enc("d_ff")?,
+        heads: enc("n_heads")?,
+        layers: enc("n_layers")?,
+        mels,
+        conv_kernel: enc("conv_kernel")?,
+        subsample: enc("subsampling_factor")?,
+        sub_channels: enc("subsampling_channels")?,
+        scale_input: g
+            .get("stt.parakeet.encoder.xscaling")
+            .as_bool()
+            .unwrap_or(false),
+    });
+    encoder_config["attention_context"] =
+        json!([side("att_context_left"), side("att_context_right")]);
+    encoder_config["attention_style"] = json!(style);
+    encoder_config["conv_context"] = json!(conv_context);
+    // transcribe.cpp's rule: a chunked_limited model subsamples causally.
+    encoder_config["causal_downsampling"] = json!(style == "chunked_limited");
+    encoder_config["conv_norm_type"] = json!(conv_norm);
+    encoder_config["speaker_kernel_layers"] = speaker_kernel;
     let mut config = json!({
         "model_type": model_type,
-        "encoder_config": {
-            "hidden_size": enc("d_model")?,
-            "intermediate_size": enc("d_ff")?,
-            "num_attention_heads": enc("n_heads")?,
-            "num_hidden_layers": enc("n_layers")?,
-            "num_mel_bins": mels,
-            "conv_kernel_size": enc("conv_kernel")?,
-            "subsampling_factor": enc("subsampling_factor")?,
-            "subsampling_conv_channels": enc("subsampling_channels")?,
-            "subsampling_conv_kernel_size": 3,
-            "subsampling_conv_stride": 2,
-            "scale_input": g.get("stt.parakeet.encoder.xscaling").as_bool().unwrap_or(false),
-            "attention_context": [side("att_context_left"), side("att_context_right")],
-            "attention_style": style,
-            "conv_context": conv_context,
-            // transcribe.cpp's rule: a chunked_limited model subsamples causally.
-            "causal_downsampling": style == "chunked_limited",
-            "conv_norm_type": conv_norm,
-            "speaker_kernel_layers": speaker_kernel,
-        },
+        "encoder_config": encoder_config,
         "feature_normalize": text("stt.frontend.normalize"),
     });
     if !g.get("stt.parakeet.prompt.num_prompts").is_null() {
@@ -140,16 +145,27 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
 /// A transcribe.cpp tensor name as the Hugging Face Parakeet checkpoint
 /// names it (`scripts/convert-parakeet.py` names them from NeMo's), or
 /// `None` for a tensor Trit does not run.
-pub fn hf_name(name: &str) -> Option<String> {
+pub fn hf_name(name: &str) -> Option<Name> {
+    if name.starts_with("sortformer.") {
+        // A multitalker bundle's Sortformer diarizer: Trit runs one speaker.
+        return Some(Name::Skip);
+    }
+    rename(name, "", "conv.bn.")
+}
+
+/// `head` is `""` or `"model."` (Canary). `conv_norm` is the file's conv-norm
+/// token (`conv.bn.`, or GigaAM's `conv.ln.`); both become `conv.norm.`.
+pub(super) fn rename(name: &str, head: &str, conv_norm: &str) -> Option<Name> {
+    let to = |rest: String| Some(Name::To(format!("{head}{rest}")));
     if let Some(rest) = name.strip_prefix("enc.pre_encode.conv.") {
-        return Some(format!("encoder.subsampling.layers.{rest}"));
+        return to(format!("encoder.subsampling.layers.{rest}"));
     }
     if let Some(rest) = name.strip_prefix("enc.pre_encode.out.") {
-        return Some(format!("encoder.subsampling.linear.{rest}"));
+        return to(format!("encoder.subsampling.linear.{rest}"));
     }
     if let Some(rest) = name.strip_prefix("enc.blocks.") {
         let (layer, part) = rest.split_once('.')?;
-        const BLOCK: [(&str, &str); 18] = [
+        const BLOCK: [(&str, &str); 17] = [
             ("norm_ff1.", "norm_feed_forward1."),
             ("ff1.", "feed_forward1."),
             ("norm_attn.", "norm_self_att."),
@@ -164,19 +180,18 @@ pub fn hf_name(name: &str) -> Option<String> {
             ("conv.pointwise1.", "conv.pointwise_conv1."),
             ("conv.depthwise.", "conv.depthwise_conv."),
             ("conv.pointwise2.", "conv.pointwise_conv2."),
-            ("conv.bn.", "conv.norm."),
             ("norm_ff2.", "norm_feed_forward2."),
             ("ff2.", "feed_forward2."),
             ("norm_out.", "norm_out."),
         ];
-        let (from, to) = BLOCK.iter().find(|(from, _)| part.starts_with(from))?;
-        return Some(format!(
-            "encoder.layers.{layer}.{to}{}",
-            &part[from.len()..]
-        ));
+        let mapped = super::map_suffix(part, &BLOCK).or_else(|| {
+            let rest = part.strip_prefix(conv_norm)?;
+            Some(format!("conv.norm.{rest}"))
+        })?;
+        return to(format!("encoder.layers.{layer}.{mapped}"));
     }
     if name == "pred.embed.weight" {
-        return Some("decoder.embedding.weight".into());
+        return to("decoder.embedding.weight".into());
     }
     if let Some(rest) = name.strip_prefix("pred.lstm.") {
         let (layer, part) = rest.split_once('.')?;
@@ -187,21 +202,20 @@ pub fn hf_name(name: &str) -> Option<String> {
             "bias" => "bias_ih_l",
             _ => return None,
         };
-        return Some(format!("decoder.lstm.{hf}{layer}"));
+        return to(format!("decoder.lstm.{hf}{layer}"));
     }
-    for (from, to) in [
-        ("joint.enc.", "encoder_projector."),
-        ("joint.pred.", "decoder.decoder_projector."),
-        ("joint.out.", "joint.head."),
-        ("head.ctc.", "ctc_head."),
-        ("vad.", "vad_head."),
-        ("enc.spk_kernel.", "encoder.spk_kernel."),
-        ("enc.bg_spk_kernel.", "encoder.bg_spk_kernel."),
-        ("prompt.mlp.", "prompt_kernel."),
-    ] {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(format!("{to}{rest}"));
-        }
-    }
-    None
+    let mapped = super::map_suffix(
+        name,
+        &[
+            ("joint.enc.", "encoder_projector."),
+            ("joint.pred.", "decoder.decoder_projector."),
+            ("joint.out.", "joint.head."),
+            ("head.ctc.", "ctc_head."),
+            ("vad.", "vad_head."),
+            ("enc.spk_kernel.", "encoder.spk_kernel."),
+            ("enc.bg_spk_kernel.", "encoder.bg_spk_kernel."),
+            ("prompt.mlp.", "prompt_kernel."),
+        ],
+    )?;
+    to(mapped)
 }

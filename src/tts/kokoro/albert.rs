@@ -3,9 +3,9 @@
 //! weights all layers share, run `layers` times. Post-norm, epsilon 1e-12,
 //! the tanh GELU (`gelu_new`, ALBERT's default).
 
+use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, tensors::Tensors};
-use crate::models::config::Json;
-use crate::models::layers::{attention, linear, Gelu, Norm};
+use crate::layers::{attention, linear, Gelu, Norm};
 
 const EPS: f32 = 1e-12;
 

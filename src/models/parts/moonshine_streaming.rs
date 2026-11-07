@@ -7,9 +7,9 @@
 //! width. The structure follows Transformers' `MoonshineStreamingEncoder`
 //! as transcribe.cpp ports it; the norms are stored with their `+ 1`.
 
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::config::Json;
-use crate::models::layers::{add_into, conv_columns, linear, stacked, Gelu, Norm};
+use crate::layers::{add_into, conv_columns, linear, stacked, Gelu, Norm};
 
 /// The causal convs: kernel 5, stride 2, four zeros before.
 const KERNEL: usize = 5;

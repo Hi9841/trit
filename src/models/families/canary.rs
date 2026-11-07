@@ -8,16 +8,19 @@
 //! decoder width.
 
 use crate::audio::mel::MelFrontend;
+use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team};
-use crate::models::config::Json;
-use crate::models::files::Files;
-use crate::models::layers::{
+use crate::layers::{
     add_into, argmax, attention, attention_with, linear, stacked, HeadMajor, Norm,
 };
-use crate::models::parts::fastconformer::{Config as EncoderConfig, Parakeet as Encoder};
+use crate::models::files::Files;
+use crate::models::parts::fastconformer::{
+    Config as EncoderConfig, Parakeet as Encoder, MIN_FRAMES,
+};
 use crate::models::parts::logit_bias::{self as bias, Bias, BiasWeights};
+use crate::models::{windowed, Family};
 use crate::text::sentencepiece::Tokenizer;
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 use parking_lot::RwLock;
 
 /// Languages Canary 1B v2 reads and writes; a config's `languages` replaces them.
@@ -103,13 +106,191 @@ pub struct Canary {
     dictionary: RwLock<Option<Bias>>,
 }
 
-const WINDOW_SAMPLES: usize = 40 * 16_000;
+const WINDOW_SAMPLES: usize = 40 * crate::SAMPLE_RATE as usize;
 
 /// Self-attention keys and values per layer: the state of one beam.
 type Caches = (Vec<Vec<f32>>, Vec<Vec<f32>>);
 
 impl Canary {
-    pub fn load(
+    fn transcribe_window(&self, samples: &[f32], options: &Options) -> String {
+        let (features, frames) = self.frontend.compute(samples);
+        if frames < MIN_FRAMES {
+            return String::new();
+        }
+        let (encoded, t) = self.encoder.encode(&features, frames);
+        let encoded = match &self.projection {
+            Some(projection) => projection.forward(&encoded, t),
+            None => encoded,
+        };
+        let language = options
+            .language
+            .as_deref()
+            .filter(|code| self.config.languages.iter().any(|known| known == code))
+            .unwrap_or("en");
+        let lang = format!("<|{language}|>");
+        // The second language token is the language to write.
+        let target = match options.task {
+            crate::Task::Transcribe => lang.clone(),
+            crate::Task::Translate => "<|en|>".to_string(),
+        };
+        let task = match options.task {
+            crate::Task::Transcribe => "<|transcribe|>",
+            crate::Task::Translate => "<|translate|>",
+        };
+        let tokens: &[&str] = if self.config.short_prompt {
+            &["<|startoftranscript|>", &lang, task, &target, "<|pnc|>"]
+        } else {
+            &[
+                "<|startofcontext|>",
+                "<|startoftranscript|>",
+                "<|emo:undefined|>",
+                &lang,
+                &target,
+                "<|pnc|>",
+                "<|noitn|>",
+                "<|notimestamp|>",
+                "<|nodiarize|>",
+            ]
+        };
+        let prompt: Option<Vec<usize>> = tokens
+            .iter()
+            .map(|token| self.tokenizer.id(token))
+            .collect();
+        let Some(mut prompt) = prompt else {
+            return String::new();
+        };
+        if let Some(start) = self.config.start {
+            prompt.insert(0, start);
+        }
+        let ids = self.generate(
+            &encoded,
+            t,
+            &prompt,
+            options.beams(1),
+            self.dictionary.read().as_ref(),
+        );
+        self.tokenizer.decode(&ids).trim().to_string()
+    }
+
+    fn generate(
+        &self,
+        encoded: &[f32],
+        frames: usize,
+        prompt: &[usize],
+        beam: usize,
+        dictionary: Option<&Bias>,
+    ) -> Vec<usize> {
+        let c = &self.config;
+        let d = c.d;
+        let cross: Vec<HeadMajor> = self
+            .layers
+            .iter()
+            .map(|layer| {
+                let kv = layer.cross_kv.forward(encoded, frames);
+                HeadMajor::new(
+                    (&kv, 2 * d),
+                    (&kv[d..], 2 * d),
+                    frames,
+                    (d / c.heads, c.heads),
+                )
+            })
+            .collect();
+        let mut keys = vec![Vec::with_capacity(c.max_tokens * d); c.layers];
+        let mut values = vec![Vec::with_capacity(c.max_tokens * d); c.layers];
+        let mut logits = self.forward(prompt, 0, &cross, (&mut keys, &mut values));
+        // The dictionary works on greedy decoding; with one, decode greedy.
+        if beam > 1 && dictionary.is_none() {
+            // A beam's state: its caches; their length is its position.
+            let step = |states: &mut [Caches], tokens: &[usize]| {
+                states
+                    .iter_mut()
+                    .zip(tokens)
+                    .map(|((keys, values), &token)| {
+                        let position = keys[0].len() / d;
+                        self.forward(&[token], position, &cross, (keys, values))
+                    })
+                    .collect()
+            };
+            let limit = c.max_tokens.saturating_sub(prompt.len());
+            return crate::models::parts::beam::search(
+                (beam, crate::models::parts::beam::Rules::OpenAi),
+                ((keys, values), logits),
+                (limit, c.eos),
+                |_, _| {},
+                step,
+            )
+            .tokens;
+        }
+        let mut out = Vec::new();
+        let mut run = dictionary.map(bias::Run::new);
+        let mut position = prompt.len();
+        while position < c.max_tokens {
+            let token = match &mut run {
+                Some(run) => run.pick(&mut logits),
+                None => argmax(&logits),
+            };
+            if token == c.eos {
+                break;
+            }
+            match &mut run {
+                Some(run) => run.push(token),
+                None => out.push(token),
+            }
+            logits = self.forward(&[token], position, &cross, (&mut keys, &mut values));
+            position += 1;
+        }
+        run.map_or(out, bias::Run::finish)
+    }
+
+    fn forward(
+        &self,
+        tokens: &[usize],
+        first: usize,
+        cross: &[HeadMajor],
+        (keys, values): (&mut [Vec<f32>], &mut [Vec<f32>]),
+    ) -> Buf {
+        let c = &self.config;
+        let (d, m) = (c.d, tokens.len());
+        let mut x = Buf::scratch(m * d);
+        for (r, (row, &token)) in x.chunks_exact_mut(d).zip(tokens).enumerate() {
+            self.embed.row(token, row);
+            add_into(row, &self.positions[(first + r) * d..][..d]);
+        }
+        let mut x = self.embed_norm.apply(&x, d);
+        for (l, layer) in self.layers.iter().enumerate() {
+            let normed = layer.norm_self.apply(&x, d);
+            let qkv = layer.self_qkv.forward(&normed, m);
+            for row in qkv.chunks_exact(3 * d) {
+                keys[l].extend_from_slice(&row[d..2 * d]);
+                values[l].extend_from_slice(&row[2 * d..]);
+            }
+            let att = attention(
+                (&qkv, 3 * d),
+                (&keys[l], d),
+                (&values[l], d),
+                (m, first + m),
+                (d, c.heads, c.heads),
+                true,
+            );
+            add_into(&mut x, &layer.self_out.forward(&att, m));
+            let normed = layer.norm_cross.apply(&x, d);
+            let q = layer.cross_q.forward(&normed, m);
+            let att = attention_with((&q, d), &cross[l], m, (d, c.heads), false);
+            add_into(&mut x, &layer.cross_out.forward(&att, m));
+            let normed = layer.norm_mlp.apply(&x, d);
+            let mut hidden = layer.fc1.forward(&normed, m);
+            team::chunks_mut(&mut hidden, c.ffn, |_, row| {
+                row.iter_mut().for_each(|v| *v = v.max(0.0))
+            });
+            add_into(&mut x, &layer.fc2.forward(&hidden, m));
+        }
+        let last = self.norm.apply(&x[(m - 1) * d..], d);
+        self.head.forward(&last, 1)
+    }
+}
+
+impl Family for Canary {
+    fn load(
         files: &Files,
         config: &Json,
         precision: Precision,
@@ -178,7 +359,7 @@ impl Canary {
 
     /// Terms to favor while decoding; with terms set, decoding is greedy (the
     /// bonuses follow one sequence). See `parakeet::bias`.
-    pub fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
+    fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
         let (bias, skipped) = bias::build(&self.tokenizer, terms, weights);
         *self.dictionary.write() = bias;
         skipped
@@ -189,196 +370,10 @@ impl Canary {
     /// the same language, or in English for `Task::Translate`.
     /// Recordings longer than 40 s (the longest Canary was trained on) go
     /// through in windows cut at quiet points.
-    pub fn pieces(&self, samples: &[f32], options: &Options) -> Vec<(usize, usize, String)> {
-        crate::audio::windows(samples, WINDOW_SAMPLES)
-            .into_iter()
-            .map(|window| {
-                let text = self.transcribe_window(window, options);
-                (crate::audio::offset(samples, window), window.len(), text)
-            })
-            .filter(|(_, _, text)| !text.is_empty())
-            .collect()
-    }
-
-    fn transcribe_window(&self, samples: &[f32], options: &Options) -> String {
-        let (features, frames) = self.frontend.compute(samples);
-        if frames < 8 {
-            return String::new();
-        }
-        let (encoded, t) = self.encoder.encode(&features, frames);
-        let encoded = match &self.projection {
-            Some(projection) => projection.forward(&encoded, t),
-            None => encoded,
-        };
-        let language = options
-            .language
-            .as_deref()
-            .filter(|code| self.config.languages.iter().any(|known| known == code))
-            .unwrap_or("en");
-        let lang = format!("<|{language}|>");
-        // The second language token is the language to write.
-        let target = match options.task {
-            crate::Task::Transcribe => lang.clone(),
-            crate::Task::Translate => "<|en|>".to_string(),
-        };
-        let task = match options.task {
-            crate::Task::Transcribe => "<|transcribe|>",
-            crate::Task::Translate => "<|translate|>",
-        };
-        let tokens: &[&str] = if self.config.short_prompt {
-            &["<|startoftranscript|>", &lang, task, &target, "<|pnc|>"]
-        } else {
-            &[
-                "<|startofcontext|>",
-                "<|startoftranscript|>",
-                "<|emo:undefined|>",
-                &lang,
-                &target,
-                "<|pnc|>",
-                "<|noitn|>",
-                "<|notimestamp|>",
-                "<|nodiarize|>",
-            ]
-        };
-        let prompt: Option<Vec<usize>> = tokens
-            .iter()
-            .map(|token| self.tokenizer.id(token))
-            .collect();
-        let Some(mut prompt) = prompt else {
-            return String::new();
-        };
-        if let Some(start) = self.config.start {
-            prompt.insert(0, start);
-        }
-        let ids = self.generate(
-            &encoded,
-            t,
-            &prompt,
-            options.beams(1),
-            self.dictionary.read().as_ref(),
-        );
-        self.tokenizer.decode(&ids).trim().to_string()
-    }
-
-    /// Greedy continuation of `prompt` until end of text.
-    fn generate(
-        &self,
-        encoded: &[f32],
-        frames: usize,
-        prompt: &[usize],
-        beam: usize,
-        dictionary: Option<&Bias>,
-    ) -> Vec<usize> {
-        let c = &self.config;
-        let d = c.d;
-        // Cross-attention keys and values, laid out per head once.
-        let cross: Vec<HeadMajor> = self
-            .layers
-            .iter()
-            .map(|layer| {
-                let kv = layer.cross_kv.forward(encoded, frames);
-                HeadMajor::new(
-                    (&kv, 2 * d),
-                    (&kv[d..], 2 * d),
-                    frames,
-                    (d / c.heads, c.heads),
-                )
-            })
-            .collect();
-        // Room for every token, so the caches never move while they grow.
-        let mut keys = vec![Vec::with_capacity(c.max_tokens * d); c.layers];
-        let mut values = vec![Vec::with_capacity(c.max_tokens * d); c.layers];
-        let mut logits = self.forward(prompt, 0, &cross, (&mut keys, &mut values));
-        // The dictionary works on greedy decoding; with one, decode greedy.
-        if beam > 1 && dictionary.is_none() {
-            // A beam's state: its caches; their length is its position.
-            // One beam at a time: Canary is not in a beam-search hot path.
-            let step = |states: &mut [Caches], tokens: &[usize]| {
-                states
-                    .iter_mut()
-                    .zip(tokens)
-                    .map(|((keys, values), &token)| {
-                        let position = keys[0].len() / d;
-                        self.forward(&[token], position, &cross, (keys, values))
-                    })
-                    .collect()
-            };
-            let limit = c.max_tokens.saturating_sub(prompt.len());
-            return crate::models::parts::beam::search(
-                (beam, crate::models::parts::beam::Rules::OpenAi),
-                ((keys, values), logits),
-                (limit, c.eos),
-                |_, _| {},
-                step,
-            )
-            .tokens;
-        }
-        let mut out = Vec::new();
-        let mut run = dictionary.map(bias::Run::new);
-        let mut position = prompt.len();
-        while position < c.max_tokens {
-            let token = match &mut run {
-                Some(run) => run.pick(&mut logits),
-                None => argmax(&logits),
-            };
-            if token == c.eos {
-                break;
-            }
-            match &mut run {
-                Some(run) => run.push(token),
-                None => out.push(token),
-            }
-            logits = self.forward(&[token], position, &cross, (&mut keys, &mut values));
-            position += 1;
-        }
-        run.map_or(out, bias::Run::finish)
-    }
-
-    /// Runs `tokens` at positions `first..` and returns the logits after the last.
-    fn forward(
-        &self,
-        tokens: &[usize],
-        first: usize,
-        cross: &[HeadMajor],
-        (keys, values): (&mut [Vec<f32>], &mut [Vec<f32>]),
-    ) -> Buf {
-        let c = &self.config;
-        let (d, m) = (c.d, tokens.len());
-        let mut x = Buf::scratch(m * d);
-        for (r, (row, &token)) in x.chunks_exact_mut(d).zip(tokens).enumerate() {
-            self.embed.row(token, row);
-            add_into(row, &self.positions[(first + r) * d..][..d]);
-        }
-        let mut x = self.embed_norm.apply(&x, d);
-        for (l, layer) in self.layers.iter().enumerate() {
-            let normed = layer.norm_self.apply(&x, d);
-            let qkv = layer.self_qkv.forward(&normed, m);
-            for row in qkv.chunks_exact(3 * d) {
-                keys[l].extend_from_slice(&row[d..2 * d]);
-                values[l].extend_from_slice(&row[2 * d..]);
-            }
-            let att = attention(
-                (&qkv, 3 * d),
-                (&keys[l], d),
-                (&values[l], d),
-                (m, first + m),
-                (d, c.heads, c.heads),
-                true,
-            );
-            add_into(&mut x, &layer.self_out.forward(&att, m));
-            let normed = layer.norm_cross.apply(&x, d);
-            let q = layer.cross_q.forward(&normed, m);
-            let att = attention_with((&q, d), &cross[l], m, (d, c.heads), false);
-            add_into(&mut x, &layer.cross_out.forward(&att, m));
-            let normed = layer.norm_mlp.apply(&x, d);
-            let mut hidden = layer.fc1.forward(&normed, m);
-            team::chunks_mut(&mut hidden, c.ffn, |_, row| {
-                row.iter_mut().for_each(|v| *v = v.max(0.0))
-            });
-            add_into(&mut x, &layer.fc2.forward(&hidden, m));
-        }
-        let last = self.norm.apply(&x[(m - 1) * d..], d);
-        self.head.forward(&last, 1)
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        windowed(samples, WINDOW_SAMPLES, |window| {
+            self.transcribe_window(window, options)
+        })
     }
 }
 

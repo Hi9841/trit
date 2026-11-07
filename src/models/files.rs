@@ -6,24 +6,23 @@
 //! names either way, so one loader serves both.
 
 use crate::cpu::tensors::Tensors;
-use crate::models::Package;
+use crate::models::package::{self, Package};
 use crate::{Device, Precision};
 use std::path::{Path, PathBuf};
 
 pub enum Files {
     Folder(PathBuf),
-    Package(PathBuf, Package),
+    Package(PathBuf, Box<dyn Package>),
 }
 
 impl Files {
     pub fn open(dir: &Path) -> Result<Self, String> {
-        Ok(match Package::find(dir)? {
+        Ok(match package::find(dir)? {
             Some(package) => Self::Package(dir.to_path_buf(), package),
             None => Self::Folder(dir.to_path_buf()),
         })
     }
 
-    /// Whether the model has file `name`.
     pub fn has(&self, name: &str) -> bool {
         match self {
             Self::Folder(dir) => dir.join(name).is_file(),
@@ -31,7 +30,6 @@ impl Files {
         }
     }
 
-    /// The text of file `name`.
     pub fn read(&self, name: &str) -> Result<String, String> {
         match self {
             Self::Folder(dir) => std::fs::read_to_string(dir.join(name))
@@ -41,7 +39,6 @@ impl Files {
         }
     }
 
-    /// File `name` as JSON.
     pub fn json(&self, name: &str) -> Result<serde_json::Value, String> {
         serde_json::from_str(&self.read(name)?).map_err(|e| format!("{name} is not JSON: {e}"))
     }

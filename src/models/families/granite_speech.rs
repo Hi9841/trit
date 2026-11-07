@@ -7,20 +7,21 @@
 //! ASSISTANT:", or the Granite 4 chat roles of the plus release). The
 //! structure follows transcribe.cpp's port of `GraniteSpeechForConditionalGeneration`.
 
-use crate::audio;
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, tensors::Tensors};
-use crate::models::config::Json;
+use crate::layers::{add_into, attention, linear, Norm};
 use crate::models::files::Files;
-use crate::models::layers::{add_into, attention, linear, Norm};
-use crate::models::parts::causal_lm::CausalLm;
+use crate::models::parts::causal_lm::{CausalLm, TokenBudget};
 use crate::models::parts::granite_conformer::{Config, Encoder, Frontend};
+use crate::models::{speech_windows, Family};
 use crate::text::bpe::Bpe;
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 
-/// Longest window per pass.
-const WINDOW_SAMPLES: usize = 30 * 16_000;
-const MIN_NEW_TOKENS: usize = 128;
-const TOKENS_PER_SECOND: usize = 8;
+const WINDOW_SAMPLES: usize = 30 * crate::SAMPLE_RATE as usize;
+const BUDGET: TokenBudget = TokenBudget {
+    least: 128,
+    per_second: 8,
+};
 
 struct QFormerLayer {
     self_q: Dense,
@@ -49,7 +50,6 @@ struct QFormer {
     projection: Dense,
     d: usize,
     heads: usize,
-    /// Encoder frames per window.
     window: usize,
 }
 
@@ -188,8 +188,8 @@ pub struct GraniteSpeech {
     stop: Vec<usize>,
 }
 
-impl GraniteSpeech {
-    pub fn load(
+impl Family for GraniteSpeech {
+    fn load(
         files: &Files,
         json: &Json,
         precision: Precision,
@@ -204,10 +204,7 @@ impl GraniteSpeech {
         let projector = QFormer::load(&t, json, width, decoder.width())?;
         drop(t);
         let bpe = Bpe::parse(&files.read("tokenizer.json")?)?;
-        let id = |token: &str| {
-            bpe.id(token)
-                .ok_or_else(|| format!("the tokenizer has no {token}"))
-        };
+        let id = |token: &str| bpe.token(token);
         let instruction = json.str("instruction").unwrap_or_default();
         let (head, tail) = match json.str("chat") {
             Some("roles") => {
@@ -251,35 +248,21 @@ impl GraniteSpeech {
         })
     }
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    pub fn pieces(&self, samples: &[f32], _: &Options) -> Vec<(usize, usize, String)> {
-        let mut pieces = Vec::new();
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
-            if audio::is_silent(window) {
-                continue;
-            }
+    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             let (features, frames) = self.frontend.compute(window);
             if frames == 0 {
-                continue;
+                return String::new();
             }
             let (encoded, t) = self.encoder.encode(&features, frames);
-            let (audio, n) = self
+            let (audio, _) = self
                 .projector
                 .forward(&encoded, t, self.encoder.config.width());
-            let d = self.decoder.width();
-            let (head, tail) = (self.head.len(), self.tail.len());
-            let mut rows = Buf::scratch((head + n + tail) * d);
-            rows[..head * d].copy_from_slice(&self.decoder.embed(&self.head));
-            rows[head * d..(head + n) * d].copy_from_slice(&audio);
-            rows[(head + n) * d..].copy_from_slice(&self.decoder.embed(&self.tail));
-            let seconds = window.len() / crate::SAMPLE_RATE as usize;
-            let max_new = MIN_NEW_TOKENS.max(seconds * TOKENS_PER_SECOND);
-            let ids = self.decoder.generate_rows(rows, max_new, &self.stop);
-            let text = self.bpe.decode(&ids).trim().to_string();
-            if !text.is_empty() {
-                pieces.push((audio::offset(samples, window), window.len(), text));
-            }
-        }
-        pieces
+            let budget = BUDGET.tokens(window.len());
+            let ids = self
+                .decoder
+                .answer(&self.head, &audio, &self.tail, budget, &self.stop);
+            self.bpe.decode(&ids).trim().to_string()
+        })
     }
 }

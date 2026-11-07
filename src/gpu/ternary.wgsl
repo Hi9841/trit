@@ -3,8 +3,6 @@
 // Sixteen codes sit in one u32, low bits first. Scales are f32,
 // one per 128 inputs, row-major [out][k / 128].
 
-const TILE: u32 = 16u;
-
 struct Params {
     m: u32,
     n: u32,
@@ -19,8 +17,8 @@ struct Params {
 @group(0) @binding(4) var<storage, read> bias: array<f32>;
 @group(0) @binding(5) var<uniform> p: Params;
 
-var<workgroup> xs: array<f32, 256>;
-var<workgroup> ws: array<f32, 256>;
+var<workgroup> xs: array<f32, TILE * TILE>;
+var<workgroup> ws: array<f32, TILE * TILE>;
 
 fn load_w(row: u32, col: u32) -> f32 {
     let words = p.k >> 4u;
@@ -30,7 +28,7 @@ fn load_w(row: u32, col: u32) -> f32 {
     return scale * (f32(code) - 1.0);
 }
 
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(TILE, TILE, 1)
 fn gemm(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(workgroup_id) wid: vec3<u32>,
@@ -64,10 +62,10 @@ fn gemm(
         workgroupBarrier();
     }
     if (row < p.m && col < p.n) {
-        if ((p.flags & 1u) != 0u) {
+        if ((p.flags & FLAG_BIAS) != 0u) {
             acc = acc + bias[col];
         }
-        if ((p.flags & 2u) != 0u) {
+        if ((p.flags & FLAG_RELU) != 0u) {
             acc = max(acc, 0.0);
         }
         y[row * p.n + col] = acc;

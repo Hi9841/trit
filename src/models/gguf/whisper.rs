@@ -14,11 +14,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     if w("decoder.d_model")? != d {
         return Err("the encoder and decoder differ in width; Trit runs one width".into());
     }
-    if text("stt.frontend.normalize") != "whisper_logmel"
-        || g.num("stt.frontend.n_fft")? != 400
-        || g.num("stt.frontend.hop_length")? != 160
-        || g.num("stt.frontend.sample_rate")? != 16_000
-    {
+    if text("stt.frontend.normalize") != "whisper_logmel" || !super::blocks::whisper_mel(g)? {
         return Err("its audio features differ from Whisper's".into());
     }
     for (key, want) in [
@@ -87,10 +83,8 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("dec.pos_emb.", "model.decoder.embed_positions."),
         ("dec.final_norm.", "model.decoder.layer_norm."),
     ];
-    for (from, to) in TOP {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(Name::To(format!("{to}{rest}")));
-        }
+    if let Some(mapped) = super::map_suffix(name, &TOP) {
+        return Some(Name::To(mapped));
     }
     let (side, rest) = if let Some(rest) = name.strip_prefix("enc.blocks.") {
         ("encoder", rest)
@@ -98,7 +92,7 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("decoder", name.strip_prefix("dec.blocks.")?)
     };
     let (layer, part) = rest.split_once('.')?;
-    const BLOCK: [(&str, &str); 16] = [
+    const BLOCK: [(&str, &str); 18] = [
         ("norm_attn.", "self_attn_layer_norm."),
         ("norm_self.", "self_attn_layer_norm."),
         ("attn.q.", "self_attn.q_proj."),
@@ -115,14 +109,9 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("cross_attn.v.", "encoder_attn.v_proj."),
         ("cross_attn.out.", "encoder_attn.out_proj."),
         ("norm_ffn.", "final_layer_norm."),
+        ("ffn.fc1.", "fc1."),
+        ("ffn.fc2.", "fc2."),
     ];
-    let (from, to) = BLOCK
-        .iter()
-        .copied()
-        .chain([("ffn.fc1.", "fc1."), ("ffn.fc2.", "fc2.")])
-        .find(|(from, _)| part.starts_with(from))?;
-    Some(Name::To(format!(
-        "model.{side}.layers.{layer}.{to}{}",
-        &part[from.len()..]
-    )))
+    let mapped = super::map_suffix(part, &BLOCK)?;
+    Some(Name::To(format!("model.{side}.layers.{layer}.{mapped}")))
 }

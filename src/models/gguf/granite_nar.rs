@@ -5,6 +5,7 @@
 //! the names of `parts::granite_conformer`, the projector `nar_projector.`,
 //! the language model the Granite names under `language_model`.
 
+use super::blocks::{llm_block, LlmShape};
 use super::{granite_speech, qwen3_asr, Gguf, Name};
 use serde_json::{json, Value};
 
@@ -20,6 +21,26 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     if text("stt.frontend.type") != "mel" || text("stt.frontend.normalize") != "per_utterance" {
         return Err("its audio features differ from Granite Speech's".into());
     }
+    let mut llm = llm_block(LlmShape {
+        model_type: "granite",
+        hidden: q("hidden")?,
+        intermediate: q("intermediate")?,
+        layers: q("n_layers")?,
+        heads: q("n_heads")?,
+        kv_heads: q("n_kv_heads")?,
+        head_dim: q("head_dim")?,
+        vocab: q("vocab_size")?,
+        rms_norm_eps: qf("rms_norm_eps"),
+        rope_theta: qf("rope_theta"),
+        tie: g
+            .get("stt.granite_nar.text.tie_word_embeddings")
+            .as_bool()
+            .unwrap_or(true),
+    });
+    llm["embedding_multiplier"] = json!(qf("embedding_multiplier"));
+    llm["attention_multiplier"] = json!(qf("attention_multiplier"));
+    llm["residual_multiplier"] = json!(qf("residual_multiplier"));
+    llm["logits_scaling"] = json!(qf("logits_scaling"));
     let layers = e("n_layers")?;
     // `layer_indices` count hidden states from the input projection: block
     // `i - 1`; a negative one counts from the end.
@@ -71,33 +92,8 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "llm_dim": p("llm_dim")?,
             "layer_norm_eps": g.get("stt.granite_nar.projector.layernorm_eps").as_f64(),
         },
-        "llm_config": {
-            "model_type": "granite",
-            "hidden_size": q("hidden")?,
-            "intermediate_size": q("intermediate")?,
-            "num_hidden_layers": q("n_layers")?,
-            "num_attention_heads": q("n_heads")?,
-            "num_key_value_heads": q("n_kv_heads")?,
-            "head_dim": q("head_dim")?,
-            "vocab_size": q("vocab_size")?,
-            "rms_norm_eps": qf("rms_norm_eps"),
-            "rope_theta": qf("rope_theta"),
-            "tie_word_embeddings": g.get("stt.granite_nar.text.tie_word_embeddings").as_bool().unwrap_or(true),
-            "embedding_multiplier": qf("embedding_multiplier"),
-            "attention_multiplier": qf("attention_multiplier"),
-            "residual_multiplier": qf("residual_multiplier"),
-            "logits_scaling": qf("logits_scaling"),
-        },
-        "feature_extractor": {
-            "n_fft": g.num("stt.frontend.n_fft")?,
-            "win_length": g.num("stt.frontend.win_length")?,
-            "hop_length": g.num("stt.frontend.hop_length")?,
-            "num_mel_bins": g.num("stt.frontend.num_mels")?,
-            "stack_factor": 2,
-            "floor_db": 8.0,
-            "deltas": false,
-            "frames": "even",
-        },
+        "llm_config": llm,
+        "feature_extractor": super::granite_speech::front(g)?,
     }))
 }
 
@@ -107,24 +103,33 @@ pub fn hf_name(name: &str) -> Option<Name> {
         return Some(Name::To(format!("nar_projector.{rest}")));
     }
     if name.starts_with("dec.") {
-        return qwen3_asr::language_model_name(name, "language_model.model");
+        return qwen3_asr::language_model_name(name, "language_model.");
     }
-    // The block names of the AR release, which this file spells with `_`.
-    let name = [
-        ("ff1_up.", "ff1.up."),
-        ("ff1_down.", "ff1.down."),
-        ("ff2_up.", "ff2.up."),
-        ("ff2_down.", "ff2.down."),
-        ("attn_q.", "attn.q."),
-        ("attn_kv.", "attn.kv."),
-        ("attn_out.", "attn.out."),
-        ("attn_rel_pos_emb.", "attn.rel_pos_emb."),
-        ("conv_pointwise1.", "conv.pointwise1."),
-        ("conv_depthwise.", "conv.depthwise."),
-        ("conv_bn.", "conv.bn."),
-        ("conv_pointwise2.", "conv.pointwise2."),
-    ]
-    .iter()
-    .fold(name.to_string(), |name, (from, to)| name.replace(from, to));
-    granite_speech::hf_name(&name)
+    if let Some(rest) = name.strip_prefix("enc.") {
+        // The AR release spells these with dots. This file spells them with `_`.
+        let rest = super::replace_all(
+            rest,
+            &[
+                ("ff1_up.", "ff1.linear1."),
+                ("ff1_down.", "ff1.linear2."),
+                ("ff2_up.", "ff2.linear1."),
+                ("ff2_down.", "ff2.linear2."),
+                ("attn_q.", "attn.q."),
+                ("attn_kv.", "attn.kv."),
+                ("attn_out.", "attn.out."),
+                ("attn_rel_pos_emb.", "attn.rel_pos_emb."),
+                ("conv_pointwise1.", "conv.pointwise1."),
+                ("conv_depthwise.", "conv.depthwise."),
+                ("conv_bn.", "conv.bn."),
+                ("conv_pointwise2.", "conv.pointwise2."),
+                (".norm_post.", ".norm_out."),
+                (".ff1.up.", ".ff1.linear1."),
+                (".ff1.down.", ".ff1.linear2."),
+                (".ff2.up.", ".ff2.linear1."),
+                (".ff2.down.", ".ff2.linear2."),
+            ],
+        );
+        return Some(Name::To(format!("encoder.{rest}")));
+    }
+    granite_speech::hf_name(name)
 }

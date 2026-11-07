@@ -85,10 +85,8 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("enc.out_norm.", "encoder.out_norm."),
         ("ctc.proj.", "ctc_head."),
     ];
-    for (from, to) in TOP {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(Name::To(format!("{to}{rest}")));
-        }
+    if let Some(mapped) = super::map_suffix(name, &TOP) {
+        return Some(Name::To(mapped));
     }
     let (layer, part) = name.strip_prefix("enc.blocks.")?.split_once('.')?;
     const BLOCK: [(&str, &str); 17] = [
@@ -110,9 +108,6 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("ff2_down.", "feed_forward2.linear2."),
         ("norm_post.", "norm_out."),
     ];
-    let (from, to) = BLOCK.iter().find(|(from, _)| part.starts_with(from))?;
-    Some(Name::To(format!(
-        "encoder.layers.{layer}.{to}{}",
-        &part[from.len()..]
-    )))
+    let mapped = super::map_suffix(part, &BLOCK)?;
+    Some(Name::To(format!("encoder.layers.{layer}.{mapped}")))
 }

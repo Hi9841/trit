@@ -17,8 +17,6 @@ pub struct TableMel {
     ceiling: f32,
 }
 
-/// The shape of the front end: transform size, hop, window length, and the
-/// clamp before the log.
 pub struct TableShape {
     pub n_fft: usize,
     pub hop: usize,

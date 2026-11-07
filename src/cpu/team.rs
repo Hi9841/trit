@@ -63,9 +63,7 @@ struct Shared {
     job: AtomicPtr<Job>,
     /// See `claim_word`.
     claim: AtomicU64,
-    /// Tasks of the current job that have returned.
     done: AtomicUsize,
-    /// A task of the current job panicked.
     panicked: AtomicBool,
     parked: AtomicUsize,
     lock: Mutex<()>,
@@ -299,8 +297,8 @@ fn work(s: &Shared) {
 
 /// The teams a process may start, one per spread of `cpu::Spread`. A
 /// process that runs Parakeet and Whisper gets both; each parks when idle.
-pub const TEAMS: usize = 2;
-static TEAM: [OnceLock<Team>; TEAMS] = [OnceLock::new(), OnceLock::new()];
+pub const TEAMS: usize = super::Spread::TEAMS;
+static TEAM: [OnceLock<Team>; TEAMS] = [const { OnceLock::new() }; TEAMS];
 
 /// Starts team `slot` with the threads (the caller included), the affinity
 /// mask (0: none), and the masks it can move to that `size` gives. Later
@@ -692,12 +690,10 @@ fn team() -> &'static Team {
     })
 }
 
-/// Threads that work on each step, the caller included.
 pub fn threads() -> usize {
     team().workers + 1
 }
 
-/// `run(task)` for every task in `0..tasks`, spread over the team.
 pub fn for_each(tasks: usize, run: impl Fn(usize) + Sync) {
     // A step inside a task (on a worker or the caller) runs inline.
     if INSIDE.get() {
@@ -734,7 +730,6 @@ impl<T> SendPtr<T> {
     }
 }
 
-/// `run(index, chunk)` for consecutive chunks of `chunk` elements.
 pub fn chunks_mut<T: Send>(data: &mut [T], chunk: usize, run: impl Fn(usize, &mut [T]) + Sync) {
     let (len, ptr) = (data.len(), SendPtr::new(data));
     let chunk = chunk.max(1);
@@ -747,7 +742,6 @@ pub fn chunks_mut<T: Send>(data: &mut [T], chunk: usize, run: impl Fn(usize, &mu
     });
 }
 
-/// `run(task)` for every task, results in task order.
 pub fn map<T: Send>(tasks: usize, run: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let mut slots: Vec<Option<T>> = (0..tasks).map(|_| None).collect();
     chunks_mut(&mut slots, 1, |index, slot| slot[0] = Some(run(index)));

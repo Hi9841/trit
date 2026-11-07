@@ -4,16 +4,14 @@
 
 pub mod model;
 
-use crate::audio::{
-    self,
-    whisper_mel::{WhisperMel, WINDOW_SAMPLES},
-};
+use crate::audio::whisper_mel::{WhisperMel, WINDOW_SAMPLES};
+use crate::config::Json;
 use crate::cpu::buf::Buf;
-use crate::models::config::Json;
+use crate::layers::argmax;
 use crate::models::files::Files;
-use crate::models::layers::argmax;
+use crate::models::{speech_windows, Family};
 use crate::text::bpe::Bpe;
-use crate::{Device, Options, Precision, Task};
+use crate::{BiasWeights, Device, Options, Precision, Segment, Task};
 use parking_lot::RwLock;
 
 /// OpenAI Whisper's rule for a window of silence or noise: when the model
@@ -50,7 +48,66 @@ struct Tokens {
 }
 
 impl Whisper {
-    pub fn load(
+    /// Tokens until end of text, the token limit, or a loop: greedy (or
+    /// `beam` beams) at temperature 0, else sampled with a fixed seed, so a
+    /// result repeats.
+    fn generate(
+        &self,
+        session: &mut model::Session,
+        mut logits: Buf,
+        temperature: f32,
+        beam: usize,
+    ) -> Decoded {
+        let t = &self.tokens;
+        let limit = self.model.config.max_tokens;
+        if beam > 1 && temperature == 0.0 {
+            let best = crate::models::parts::beam::search(
+                (beam, BEAM_RULES),
+                (session.clone(), logits),
+                (limit.saturating_sub(session.position), t.eos),
+                |logits, tokens| self.mask(logits, tokens.is_empty()),
+                |sessions, tokens| self.model.step_beams(sessions, tokens),
+            );
+            let text = self.bpe.decode(&best.tokens);
+            return Decoded {
+                compression: compression_ratio(&text),
+                log_probability: best.log_probability,
+                text,
+            };
+        }
+        let mut ids = Vec::new();
+        let mut total = 0.0f32;
+        let mut random = Random(SEED);
+        while session.position < limit {
+            self.mask(&mut logits, ids.is_empty());
+            let next = if temperature > 0.0 {
+                random.sample(&logits, temperature)
+            } else {
+                argmax(&logits)
+            };
+            total += log_softmax(&logits, next);
+            if next == t.eos {
+                break;
+            }
+            ids.push(next);
+            if let Some(keep) = looping(&ids) {
+                ids.truncate(keep);
+                break;
+            }
+            logits = self.model.step(session, next);
+        }
+        let count = (ids.len() + 1) as f32;
+        let text = self.bpe.decode(&ids);
+        Decoded {
+            compression: compression_ratio(&text),
+            log_probability: total / count,
+            text,
+        }
+    }
+}
+
+impl Family for Whisper {
+    fn load(
         files: &Files,
         config: &Json,
         precision: Precision,
@@ -78,7 +135,7 @@ impl Whisper {
     /// Terms to favor, as a prompt of earlier text ("Kubernetes, PostgreSQL"):
     /// Whisper tends to spell words as its context does. Every term can be
     /// spelled, so none is skipped.
-    pub fn set_dictionary(&self, terms: &[String]) -> Vec<String> {
+    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
         let terms: Vec<&str> = terms
             .iter()
             .map(|t| t.trim())
@@ -96,8 +153,7 @@ impl Whisper {
         Vec::new()
     }
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    pub fn pieces(&self, samples: &[f32], options: &Options) -> Vec<(usize, usize, String)> {
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         let previous = self.previous.read();
         let task = match options.task {
             Task::Transcribe => self.tokens.transcribe,
@@ -110,11 +166,7 @@ impl Whisper {
                 .find(|(c, _)| c.eq_ignore_ascii_case(code.trim()))
                 .map(|(_, id)| *id)
         });
-        let mut pieces = Vec::new();
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
-            if audio::is_silent(window) {
-                continue;
-            }
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             let encoded = self.model.encode(&self.mel.compute(window));
             let mut session = self.model.session(&encoded);
             let logits = self.model.step(&mut session, self.tokens.sot);
@@ -171,78 +223,14 @@ impl Whisper {
                     break;
                 }
             }
-            let Some(decoded) = best else { continue };
+            let Some(decoded) = best else {
+                return String::new();
+            };
             if no_speech > NO_SPEECH_PROBABILITY && decoded.log_probability < LOW_LOG_PROBABILITY {
-                continue;
+                return String::new();
             }
-            let piece = decoded.text;
-            let piece = piece.trim();
-            if !piece.is_empty() {
-                pieces.push((
-                    audio::offset(samples, window),
-                    window.len(),
-                    piece.to_string(),
-                ));
-            }
-        }
-        pieces
-    }
-
-    /// Tokens until end of text, the token limit, or a loop: greedy (or
-    /// `beam` beams) at temperature 0, else sampled with a fixed seed, so a
-    /// result repeats.
-    fn generate(
-        &self,
-        session: &mut model::Session,
-        mut logits: Buf,
-        temperature: f32,
-        beam: usize,
-    ) -> Decoded {
-        let t = &self.tokens;
-        let limit = self.model.config.max_tokens;
-        if beam > 1 && temperature == 0.0 {
-            let best = crate::models::parts::beam::search(
-                (beam, BEAM_RULES),
-                (session.clone(), logits),
-                (limit.saturating_sub(session.position), t.eos),
-                |logits, tokens| self.mask(logits, tokens.is_empty()),
-                |sessions, tokens| self.model.step_beams(sessions, tokens),
-            );
-            let text = self.bpe.decode(&best.tokens);
-            return Decoded {
-                compression: compression_ratio(&text),
-                log_probability: best.log_probability,
-                text,
-            };
-        }
-        let mut ids = Vec::new();
-        let mut total = 0.0f32;
-        let mut random = Random(SEED);
-        while session.position < limit {
-            self.mask(&mut logits, ids.is_empty());
-            let next = if temperature > 0.0 {
-                random.sample(&logits, temperature)
-            } else {
-                argmax(&logits)
-            };
-            total += log_softmax(&logits, next);
-            if next == t.eos {
-                break;
-            }
-            ids.push(next);
-            if let Some(keep) = looping(&ids) {
-                ids.truncate(keep);
-                break;
-            }
-            logits = self.model.step(session, next);
-        }
-        let count = (ids.len() + 1) as f32;
-        let text = self.bpe.decode(&ids);
-        Decoded {
-            compression: compression_ratio(&text),
-            log_probability: total / count,
-            text,
-        }
+            decoded.text.trim().to_string()
+        })
     }
 }
 
@@ -319,7 +307,6 @@ impl Tokens {
     }
 }
 
-/// One decode of a window.
 struct Decoded {
     text: String,
     /// Mean log probability per token, end of text included (as OpenAI counts it).

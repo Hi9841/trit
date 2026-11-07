@@ -13,9 +13,9 @@
 //! config from the NeMo config (`nemo::hf_config`), the tokenizer from its
 //! `labels`, which are the base model's pieces in order.
 
+use crate::config::Json;
 use crate::cpu::fermion::{self, Record};
 use crate::cpu::tensors::Tensors;
-use crate::models::config::Json;
 use crate::{Device, Precision};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,10 @@ const CONTAINER: &str = "model.fermion";
 const FORMAT: &str = "fermion-five-value-parakeet-v1";
 
 /// The container of a model folder, when it has one.
+///
+/// Phonon ships `model.fermion` next to `config.json`. NeMo and GGUF skip a
+/// folder that has `config.json`. This check does not, or a Phonon folder
+/// would look like a plain folder.
 pub fn find(dir: &Path) -> Option<PathBuf> {
     let path = dir.join(CONTAINER);
     path.is_file().then_some(path)
@@ -71,7 +75,7 @@ impl Container {
                 .iter()
                 .map(|d| d.as_u64().map(|d| d as usize).ok_or_else(bad))
                 .collect::<Result<_, _>>()?;
-            if kind != "fp16" && !fermion::KINDS.contains(&kind) {
+            if fermion::dtype(kind).is_none() {
                 return Err(format!(
                     "{}: record kind {kind} is not read",
                     path.display()
@@ -115,23 +119,6 @@ impl Container {
         })
     }
 
-    pub fn tensors(&self, precision: Precision, device: Device) -> Result<Tensors, String> {
-        Tensors::open_fermion(&self.path, &self.records, precision, device)
-    }
-
-    pub fn provides(&self, name: &str) -> bool {
-        matches!(name, "config.json" | "tokenizer.json")
-    }
-
-    /// The Hugging Face `config.json` or `tokenizer.json` of the model.
-    pub fn file(&self, name: &str) -> Result<String, String> {
-        match name {
-            "config.json" => Ok(self.config()?.to_text()),
-            "tokenizer.json" => self.tokenizer_json(),
-            _ => Err(format!("{} has no {name}", self.path.display())),
-        }
-    }
-
     fn config(&self) -> Result<Json, String> {
         let config = crate::models::nemo::hf_config(&self.nemo, &self.path)?;
         if !config.get("durations").is_array() {
@@ -167,5 +154,23 @@ impl Container {
             .collect();
         crate::text::sentencepiece::tokenizer_json(&pieces, &scores, &kinds)
             .map_err(|e| format!("{}: {e}", self.path.display()))
+    }
+}
+
+impl super::package::Package for Container {
+    fn provides(&self, name: &str) -> bool {
+        matches!(name, "config.json" | "tokenizer.json")
+    }
+
+    fn file(&self, name: &str) -> Result<String, String> {
+        match name {
+            "config.json" => Ok(self.config()?.to_text()),
+            "tokenizer.json" => self.tokenizer_json(),
+            _ => Err(format!("{} has no {name}", self.path.display())),
+        }
+    }
+
+    fn tensors(&self, precision: Precision, device: Device) -> Result<Tensors, String> {
+        Tensors::open_fermion(&self.path, &self.records, precision, device)
     }
 }

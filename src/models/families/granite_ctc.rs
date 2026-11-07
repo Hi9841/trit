@@ -4,15 +4,15 @@
 //! BPE tokens. The structure follows transcribe.cpp's port of IBM's
 //! `GraniteSpeechCTCEncoder`.
 
-use crate::audio;
-use crate::models::config::Json;
+use crate::config::Json;
 use crate::models::files::Files;
 use crate::models::parts::granite_conformer::{Config, Encoder, Frontend};
+use crate::models::{speech_windows, Family};
 use crate::text::{bpe::Bpe, sentencepiece::Tokenizer};
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 
 /// Longest window per pass. Attention is local, so this only bounds memory.
-const WINDOW_SAMPLES: usize = 60 * 16_000;
+const WINDOW_SAMPLES: usize = 60 * crate::SAMPLE_RATE as usize;
 
 pub struct GraniteCtc {
     frontend: Frontend,
@@ -44,8 +44,8 @@ impl Text {
     }
 }
 
-impl GraniteCtc {
-    pub fn load(
+impl Family for GraniteCtc {
+    fn load(
         files: &Files,
         json: &Json,
         precision: Precision,
@@ -66,27 +66,18 @@ impl GraniteCtc {
         })
     }
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    pub fn pieces(&self, samples: &[f32], _: &Options) -> Vec<(usize, usize, String)> {
-        let mut pieces = Vec::new();
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
-            if audio::is_silent(window) {
-                continue;
-            }
+    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             let (features, frames) = self.frontend.compute(window);
             // Each subsampling block needs a frame to halve.
             if frames >> self.encoder.config.subsample.len() == 0 {
-                continue;
+                return String::new();
             }
             let (x, t) = self.encoder.encode(&features, frames);
             let vocab = self.encoder.config.ctc_dim;
             let logits = self.encoder.ctc_logits(&x, t);
             let (ids, _) = crate::models::parts::ctc::greedy(&logits, vocab, self.blank, &[]);
-            let text = self.text.decode(&ids).trim().to_string();
-            if !text.is_empty() {
-                pieces.push((audio::offset(samples, window), window.len(), text));
-            }
-        }
-        pieces
+            self.text.decode(&ids).trim().to_string()
+        })
     }
 }

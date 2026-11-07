@@ -48,7 +48,6 @@ impl Isa {
         }
     }
 
-    /// Rows per packed block.
     pub(super) fn rows(self) -> usize {
         match self {
             Isa::Scalar => 1,
@@ -63,37 +62,7 @@ impl Isa {
 
     /// The fastest path this CPU runs. `TRIT_ISA=scalar|avx2|neon` forces a slower one.
     pub fn detect() -> Self {
-        let forced = std::env::var("TRIT_ISA").unwrap_or_default();
-        #[cfg(target_arch = "x86_64")]
-        {
-            let vnni = is_x86_feature_detected!("avx512f")
-                && is_x86_feature_detected!("avx512bw")
-                && is_x86_feature_detected!("avx512vnni");
-            let avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
-            match forced.as_str() {
-                "scalar" => return Isa::Scalar,
-                "avx2" if avx2 => return Isa::Avx2,
-                _ => {}
-            }
-            if vnni {
-                return Isa::Avx512Vnni;
-            }
-            if avx2 {
-                return Isa::Avx2;
-            }
-        }
-        #[cfg(target_arch = "aarch64")]
-        return match forced.as_str() {
-            "scalar" => Isa::Scalar,
-            "neon" => Isa::Neon,
-            _ if std::arch::is_aarch64_feature_detected!("dotprod") => Isa::NeonDot,
-            _ => Isa::Neon,
-        };
-        #[cfg(not(target_arch = "aarch64"))]
-        {
-            let _ = forced;
-            Isa::Scalar
-        }
+        super::isa::isa_choice().ternary
     }
 }
 
@@ -163,7 +132,6 @@ impl Ternary {
         row: impl Fn(usize, &mut [u8]),
     ) -> Self {
         let rows = isa.rows();
-        // The SIMD tiles need whole blocks; other shapes run the scalar path.
         let isa = if k.is_multiple_of(GROUP) && n.is_multiple_of(2 * rows) {
             isa
         } else {
@@ -213,7 +181,6 @@ impl Ternary {
         }
     }
 
-    /// The GPU copy, when `on_gpu` uploaded one.
     #[cfg(feature = "gpu")]
     pub(crate) fn gpu_layer(&self) -> Option<&crate::gpu::Layer> {
         self.gpu.as_deref()
@@ -290,7 +257,6 @@ impl Ternary {
         let q = Quantized::new(self.isa, x, m, self.k);
         let ptr = OutPtr(out.as_mut_ptr());
         let rows = self.isa.rows();
-        // Two blocks per task: the SIMD tiles cover 2 * rows outputs.
         let tasks = self.n / (2 * rows).max(1);
         let tasks = if self.isa == Isa::Scalar {
             self.n

@@ -126,9 +126,9 @@ impl Q8 {
                 .zip(s.iter_mut())
             {
                 let max = span.iter().fold(0.0f32, |m, w| m.max(w.abs()));
-                *scale = if max > 0.0 { max / 127.0 } else { 1.0 };
+                *scale = super::int8::group_scale(max);
                 for (o, w) in out.iter_mut().zip(span) {
-                    *o = (w / *scale).round_ties_even().clamp(-127.0, 127.0) as i8;
+                    *o = super::int8::quantize_code(*w, *scale);
                 }
             }
         });
@@ -166,7 +166,6 @@ impl Q8 {
 }
 
 multiversion! {
-    /// One row: `out = value * scale` per group of `Q8_GROUP`.
     fn widen_q8(values: &[i8], scales: &[f32], out: &mut [f32]) {
         for ((group, out), scale) in values.chunks(Q8_GROUP).zip(out.chunks_mut(Q8_GROUP)).zip(scales) {
             for (o, v) in out.iter_mut().zip(group) {
@@ -442,7 +441,6 @@ impl Dense {
         })
     }
 
-    /// The GPU copy, when `on_gpu` uploaded one.
     #[cfg(feature = "gpu")]
     pub(crate) fn gpu_layer(&self) -> Option<&crate::gpu::Layer> {
         self.gpu.as_deref()
@@ -479,7 +477,6 @@ impl Dense {
         self.forward_then(x, rows, false)
     }
 
-    /// `forward`, then `max(0, v)` on every output.
     pub fn forward_relu(&self, x: &[f32], rows: usize) -> Buf {
         self.forward_then(x, rows, true)
     }
@@ -555,7 +552,6 @@ const INT8_MIN_WIDTH: usize = 384;
 /// math): a decoder reads the whole output projection for every token.
 const INT8_TABLE_WIDTH: usize = 1024;
 
-/// How a model stores its dense layers and token tables.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Precision {
     /// Int8 where it keeps the accuracy (layers 384 wide and more), f16

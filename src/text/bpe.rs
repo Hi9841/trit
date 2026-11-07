@@ -29,17 +29,16 @@ enum Split {
 }
 
 impl Bpe {
-    /// The tokenizer of a model: `tokenizer.json`, or the older
-    /// `vocab.json`, `merges.txt`, and `tokenizer_config.json` (Qwen3-ASR).
-    pub fn from_files(files: &crate::models::files::Files) -> Result<Self, String> {
-        if files.has("tokenizer.json") {
-            return Self::parse(&files.read("tokenizer.json")?);
-        }
-        let read = |name: &str| files.read(name);
-        let vocab: serde_json::Value = serde_json::from_str(&read("vocab.json")?)
-            .map_err(|e| format!("vocab.json is not JSON: {e}"))?;
-        let merges = read("merges.txt")?;
-        let config: serde_json::Value = serde_json::from_str(&read("tokenizer_config.json")?)
+    /// The older Qwen3-ASR tokenizer: `vocab.json`, `merges.txt`, and
+    /// `tokenizer_config.json`, as text.
+    pub fn from_legacy(
+        vocab_json: &str,
+        merges_txt: &str,
+        tokenizer_config: &str,
+    ) -> Result<Self, String> {
+        let vocab: serde_json::Value =
+            serde_json::from_str(vocab_json).map_err(|e| format!("vocab.json is not JSON: {e}"))?;
+        let config: serde_json::Value = serde_json::from_str(tokenizer_config)
             .map_err(|e| format!("tokenizer_config.json is not JSON: {e}"))?;
         let added = config["added_tokens_decoder"]
             .as_object()
@@ -54,7 +53,7 @@ impl Bpe {
                 ))
             })
             .collect();
-        let merges = merges
+        let merges = merges_txt
             .lines()
             .filter(|line| !line.starts_with("#version"))
             .filter_map(|line| line.split_once(' '))
@@ -93,22 +92,11 @@ impl Bpe {
                 Some((id, content, added["special"].as_bool().unwrap_or(true)))
             })
             .collect();
-        // Either ["a", "b"] or "a b".
         let merges = json["model"]["merges"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|merge| match merge {
-                serde_json::Value::Array(parts) => parts
-                    .first()
-                    .and_then(|a| a.as_str())
-                    .zip(parts.get(1).and_then(|b| b.as_str()))
-                    .map(|(a, b)| (a.to_string(), b.to_string())),
-                serde_json::Value::String(text) => text
-                    .split_once(' ')
-                    .map(|(a, b)| (a.to_string(), b.to_string())),
-                _ => None,
-            });
+            .filter_map(super::parse_merge);
         let qwen = json["pre_tokenizer"]
             .to_string()
             .contains(r"[^\\r\\n\\p{L}\\p{N}]?\\p{L}+");
@@ -168,6 +156,12 @@ impl Bpe {
     }
 
     /// The id of a token as written in the vocabulary, for example `<|en|>`.
+    /// `id`, for a token the model cannot run without.
+    pub fn token(&self, token: &str) -> Result<usize, String> {
+        self.id(token)
+            .ok_or_else(|| format!("the tokenizer has no {token}"))
+    }
+
     pub fn id(&self, token: &str) -> Option<usize> {
         self.ids.get(token).copied()
     }
@@ -232,22 +226,11 @@ impl Bpe {
             .bytes()
             .map(|b| to_char[b as usize].to_string())
             .collect();
-        loop {
-            let best = symbols
-                .windows(2)
-                .enumerate()
-                .filter_map(|(i, pair)| {
-                    self.merges
-                        .get(&(pair[0].clone(), pair[1].clone()))
-                        .map(|rank| (*rank, i))
-                })
-                .min();
-            let Some((_, at)) = best else {
-                break;
-            };
-            let right = symbols.remove(at + 1);
-            symbols[at].push_str(&right);
-        }
+        super::merge_symbols(&mut symbols, |left, right| {
+            self.merges
+                .get(&(left.to_string(), right.to_string()))
+                .copied()
+        });
         for symbol in symbols {
             if let Some(id) = self.ids.get(&symbol) {
                 ids.push(*id);

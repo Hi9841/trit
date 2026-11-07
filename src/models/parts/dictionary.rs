@@ -54,17 +54,14 @@ pub struct Dictionary {
 }
 
 struct Term {
-    /// The term as the user wrote it.
     tokens: Vec<usize>,
     /// Spellings to score the sound with: as written, and lowercase, which
     /// the model writes more often ("trit runtime" for "Trit Runtime").
     spellings: Vec<Vec<usize>>,
     key: Vec<char>,
-    /// The words as the user wrote them.
     words: Vec<String>,
 }
 
-/// Words heard that a term may replace.
 pub struct Candidate {
     /// Token indices of the words heard.
     pub span: Range<usize>,
@@ -244,7 +241,6 @@ impl Dictionary {
         kept
     }
 
-    /// Every piece the terms are spelled with.
     pub fn pieces(&self) -> std::collections::HashSet<usize> {
         self.terms
             .iter()
@@ -252,7 +248,6 @@ impl Dictionary {
             .collect()
     }
 
-    /// The tokens of a candidate's term as the user wrote it.
     pub fn written(&self, candidate: &Candidate) -> &[usize] {
         &self.terms[candidate.term].tokens
     }
@@ -264,7 +259,6 @@ impl Dictionary {
         LIMIT_BASE + LIMIT_PER_LETTER * letters - LIMIT_PER_DISTANCE * candidate.distance
     }
 
-    /// The spellings of a candidate's term to score the sound with.
     pub fn spellings(&self, candidate: &Candidate) -> &[Vec<usize>] {
         &self.terms[candidate.term].spellings
     }
@@ -352,7 +346,6 @@ impl Dictionary {
     }
 }
 
-/// Lowercase letters and digits of `text`.
 fn key(text: &str) -> Vec<char> {
     text.chars()
         .filter(|c| c.is_alphanumeric())

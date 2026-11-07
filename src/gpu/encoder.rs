@@ -8,10 +8,8 @@ use parking_lot::Mutex;
 use std::num::NonZeroU64;
 
 const STRIDE: usize = 256;
-/// Output tile of the tiled product. The workgroup is 16 by 16 threads.
-const TILE: u32 = 32;
-/// Output tile of the f16 product from Phase 2.
-const SMALL: u32 = 16;
+/// Output tile of the tiled product. The workgroup is `super::TILE` by `super::TILE`.
+const WIDE: u32 = 32;
 const LANE: u32 = 256;
 /// Timestamp slots for one profiled encode. 24 layers use about 630.
 const STAMPS: u32 = 1024;
@@ -80,6 +78,12 @@ pub(crate) struct Cfg {
     pub input_scale: f32,
     /// Smallest reach the growth rule keeps. This is `POSITION_REACH`.
     pub min_reach: u32,
+    /// Feed-forward residual weight. `Block::forward` multiplies by this after the add.
+    pub ff_w1: f32,
+    /// Attention and conv residual weight. The same value under `gpu_shape`.
+    pub conv_w1: f32,
+    /// Epsilon of every encoder layer norm.
+    pub norm_eps: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +93,6 @@ pub(crate) enum MatKind {
     Ternary,
 }
 
-/// One uploaded product. The buffers are the `gpu::Layer` buffers.
 pub(crate) struct Mat {
     kind: MatKind,
     n: u32,
@@ -122,7 +125,6 @@ impl Mat {
     }
 }
 
-/// Host weights for one conformer layer, plus the products already on the device.
 pub(crate) struct LayerUpload {
     /// Layer norms in order: ff1, attention, conv, ff2, out. Each pair is weight, bias.
     pub norms: Vec<(Vec<f32>, Vec<f32>)>,
@@ -349,7 +351,6 @@ impl Encoder {
         })
     }
 
-    /// Run the conformer. `sine(reach)` is the sinusoid table for that reach.
     pub(crate) fn encode(
         &self,
         x: &[f32],
@@ -517,7 +518,6 @@ impl Inner {
         Ok(())
     }
 
-    /// Project the sinusoid through `relative_k` and split the heads.
     fn project(&mut self, reach: u32, sine: &[f32]) -> Result<(), String> {
         let rows = reach
             .checked_mul(2)
@@ -627,7 +627,7 @@ impl Inner {
             &Quad {
                 a: t,
                 b: d,
-                c: 0,
+                c: self.cfg.norm_eps.to_bits(),
                 d: 0,
             },
         );
@@ -656,7 +656,7 @@ impl Inner {
             S_HALF,
             &ScaleParams {
                 n: t.saturating_mul(d),
-                scale: 0.5,
+                scale: self.cfg.ff_w1,
                 pad0: 0,
                 pad1: 0,
             },
@@ -666,7 +666,7 @@ impl Inner {
             S_ONE,
             &ScaleParams {
                 n: t.saturating_mul(d),
-                scale: 1.0,
+                scale: self.cfg.conv_w1,
                 pad0: 0,
                 pad1: 0,
             },
@@ -1046,8 +1046,8 @@ impl Inner {
         let groups = [
             t,
             self.cfg.heads.saturating_mul(t),
-            t.div_ceil(SMALL),
-            wide.div_ceil(SMALL),
+            t.div_ceil(super::TILE),
+            wide.div_ceil(super::TILE),
             (t.saturating_mul(self.cfg.f)).div_ceil(LANE),
         ];
         if groups.iter().any(|group| *group > limit) {
@@ -1058,6 +1058,7 @@ impl Inner {
         Ok(())
     }
 
+    /// One conformer block, in the order of `Block::forward`.
     fn record(
         &self,
         pass: &mut wgpu::ComputePass<'_>,
@@ -1140,7 +1141,6 @@ impl Inner {
     }
 }
 
-/// One compute-pass timestamp per dispatch, used only when profiling.
 struct Marks<'a> {
     queries: Option<&'a wgpu::QuerySet>,
     slot: u32,
@@ -1224,7 +1224,7 @@ fn bind_product(
 fn tile_of(pipes: &Pipes, kind: MatKind) -> u32 {
     match kind {
         MatKind::F32 => pipes.f32_tile,
-        MatKind::F16 => SMALL,
+        MatKind::F16 => super::TILE,
         MatKind::Ternary => pipes.ternary_tile,
     }
 }
@@ -1254,7 +1254,7 @@ fn dispatch_ln(
 fn dispatch_gemm(pass: &mut wgpu::ComputePass<'_>, pipes: &Pipes, gemm: &GemmBind, t: u32) {
     let (pipe, tile) = match gemm.pipe {
         0 => (&pipes.gemm_f32, gemm.tile),
-        1 => (&pipes.gemm_f16, SMALL),
+        1 => (&pipes.gemm_f16, super::TILE),
         _ => (&pipes.ternary, gemm.tile),
     };
     pass.set_pipeline(pipe);
@@ -1413,10 +1413,10 @@ fn build_pipes(gpu: &Gpu) -> Result<Pipes, String> {
         "gemm",
         "tiled-f32",
     ) {
-        Ok(pipe) => (pipe, TILE),
+        Ok(pipe) => (pipe, WIDE),
         Err(error) => {
             eprintln!("trit: tiled f32 shader failed ({error}). The 16-wide product is used.");
-            (gemm_f32_small.clone(), SMALL)
+            (gemm_f32_small.clone(), super::TILE)
         }
     };
     let (ternary, ternary_tile) = match shader(
@@ -1425,10 +1425,10 @@ fn build_pipes(gpu: &Gpu) -> Result<Pipes, String> {
         "gemm",
         "tiled-ternary",
     ) {
-        Ok(pipe) => (pipe, TILE),
+        Ok(pipe) => (pipe, WIDE),
         Err(error) => {
             eprintln!("trit: tiled ternary shader failed ({error}). The 16-wide product is used.");
-            (ternary_small.clone(), SMALL)
+            (ternary_small.clone(), super::TILE)
         }
     };
     Ok(Pipes {

@@ -2,6 +2,7 @@
 
 #[macro_use]
 mod simd;
+mod isa;
 
 pub mod activation;
 pub mod buf;
@@ -26,16 +27,16 @@ mod torch_file;
 pub fn cpu_path() -> &'static str {
     static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
+        let choice = isa::isa_choice();
         format!(
             "ternary {}, int8 {}, float {}",
-            kernels::Isa::detect().name(),
+            choice.ternary.name(),
             int8::path_name(),
-            fgemm::level().name()
+            choice.float_level.name()
         )
     })
 }
 
-/// How far the worker team spreads over the CPU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Spread {
     /// The physical cores of one L3 domain, pinned. Best for models whose
@@ -47,13 +48,25 @@ pub enum Spread {
     AllCores,
 }
 
+impl Spread {
+    /// Teams a process may start.
+    pub const TEAMS: usize = 2;
+
+    pub const fn slot(self) -> usize {
+        match self {
+            Self::OneCache => 0,
+            Self::AllCores => 1,
+        }
+    }
+}
+
 /// Starts the worker team of `spread` once (later calls do nothing) and
 /// runs the calling thread's steps on it until the guard drops. Each spread
 /// has its own team, so models of both kinds in one process each run on
 /// theirs. A second thread on a core shares its vector units and only adds
 /// contention, so a team has one thread per core.
 pub fn enter(spread: Spread) -> team::Entered {
-    let slot = spread as usize;
+    let slot = spread.slot();
     team::start(slot, || {
         let (threads, domain) = engine_threads(spread);
         (threads, domain, equal_domains(domain))

@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use trit::{
     BiasWeights, Cleaner, Device, LoadOptions, Options, Precision, Task, Trit, Voice, Voicing,
 };
@@ -86,6 +86,49 @@ unsafe fn samples_arg<'a>(samples: *const f32, count: usize) -> Result<&'a [f32]
     Ok(std::slice::from_raw_parts(samples, count))
 }
 
+/// # Safety
+/// `path` is NULL or a NUL-terminated string.
+unsafe fn path_arg<'a>(path: *const c_char, name: &str) -> Result<Option<&'a Path>, String> {
+    if path.is_null() {
+        return Ok(None);
+    }
+    text_arg(path, name).map(|path| Some(Path::new(path)))
+}
+
+/// # Safety
+/// `options` is NULL or a NUL-terminated string.
+unsafe fn json_object(
+    options: *const c_char,
+    example: &str,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
+    if options.is_null() {
+        return Ok(None);
+    }
+    let text = text_arg(options, "options")?.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("options is not JSON: {e}"))?;
+    match value {
+        serde_json::Value::Object(object) => Ok(Some(object)),
+        _ => Err(format!("options is not a JSON object; example: {example}")),
+    }
+}
+
+/// `text` as a C string that lives as long as the library.
+fn static_text(text: &'static str) -> *const c_char {
+    static TEXTS: Mutex<Vec<(&str, CString)>> = Mutex::new(Vec::new());
+    let mut texts = TEXTS.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some((_, known)) = texts.iter().find(|(known, _)| *known == text) {
+        return known.as_ptr();
+    }
+    let owned = CString::new(text).unwrap_or_default();
+    let pointer = owned.as_ptr();
+    texts.push((text, owned));
+    pointer
+}
+
 fn owned_text(text: String) -> *mut c_char {
     CString::new(text.replace('\0', " "))
         .unwrap_or_default()
@@ -146,11 +189,7 @@ pub unsafe extern "C" fn trit_load_ex(
     device: *const c_char,
 ) -> *mut Trit {
     guard(std::ptr::null_mut(), || {
-        let explicit = if model_dir.is_null() {
-            None
-        } else {
-            Some(Path::new(text_arg(model_dir, "model_dir")?))
-        };
+        let explicit = path_arg(model_dir, "model_dir")?;
         let options = load_options(precision, device)?;
         let dir = trit::find_model(explicit).ok_or_else(|| trit::missing_model(explicit))?;
         let engine = Trit::load_with(&dir, &options)?;
@@ -164,15 +203,7 @@ pub unsafe extern "C" fn trit_load_ex(
 /// Free the text with `trit_free_text`.
 #[no_mangle]
 pub extern "C" fn trit_gpu_info() -> *mut c_char {
-    guard(std::ptr::null_mut(), || {
-        let path = trit::gpu_path();
-        // An adapter ends with ", f16" or ", f32". Any other text is the reason.
-        if path.ends_with(", f16") || path.ends_with(", f32") {
-            Ok(owned_text(path))
-        } else {
-            Err(path)
-        }
-    })
+    guard(std::ptr::null_mut(), || trit::gpu_adapter().map(owned_text))
 }
 
 /// # Safety
@@ -181,21 +212,14 @@ unsafe fn load_options(
     precision: *const c_char,
     device: *const c_char,
 ) -> Result<LoadOptions, String> {
-    let precision = if precision.is_null() {
-        Precision::Auto
-    } else {
-        Precision::parse(text_arg(precision, "precision")?)?
-    };
-    let device = if device.is_null() {
-        Device::Cpu
-    } else {
-        Device::parse(text_arg(device, "device")?)?
-    };
-    Ok(LoadOptions {
-        precision,
-        device,
-        cache: false,
-    })
+    let mut options = LoadOptions::default();
+    if !precision.is_null() {
+        options.precision = Precision::parse(text_arg(precision, "precision")?)?;
+    }
+    if !device.is_null() {
+        options.device = Device::parse(text_arg(device, "device")?)?;
+    }
+    Ok(options)
 }
 
 /// Returns the memory freed by earlier calls to the system. Call it when
@@ -217,27 +241,16 @@ pub unsafe extern "C" fn trit_free(engine: *mut Trit) {
     }
 }
 
-/// The model family: "parakeet_tdt", "parakeet_ctc", "canary", "whisper",
-/// or "moonshine"; NULL for a NULL engine. Static; do not free.
+/// The `model_type` of the model, one of `trit models`' families; NULL for
+/// a NULL engine. Static; do not free.
 ///
 /// # Safety
 /// `engine` is NULL or a pointer from `trit_load` that was not freed.
 #[no_mangle]
 pub unsafe extern "C" fn trit_kind(engine: *const Trit) -> *const c_char {
-    let Some(engine) = engine.as_ref() else {
-        return std::ptr::null();
-    };
-    static KINDS: OnceLock<Vec<(&'static str, CString)>> = OnceLock::new();
-    let kinds = KINDS.get_or_init(|| {
-        trit::MODEL_TYPES
-            .iter()
-            .map(|k| (*k, CString::new(*k).unwrap_or_default()))
-            .collect()
-    });
-    kinds
-        .iter()
-        .find(|(k, _)| *k == engine.kind())
-        .map_or(std::ptr::null(), |(_, c)| c.as_ptr())
+    engine
+        .as_ref()
+        .map_or(std::ptr::null(), |engine| static_text(engine.kind()))
 }
 
 /// Options from a language code; NULL or "" lets the model detect it.
@@ -245,9 +258,8 @@ unsafe fn options(language: *const c_char) -> Result<Options, String> {
     if language.is_null() {
         return Ok(Options::default());
     }
-    let code = text_arg(language, "language")?.trim().to_lowercase();
     Ok(Options {
-        language: (!code.is_empty()).then_some(code),
+        language: trit::language_code(text_arg(language, "language")?),
         ..Options::default()
     })
 }
@@ -322,27 +334,16 @@ const OPTION_KEYS: &str = "language, task, beam, fallback, timestamps";
 unsafe fn json_options(options: *const c_char) -> Result<(Options, bool), String> {
     let mut parsed = Options::default();
     let mut timestamps = false;
-    if options.is_null() {
+    let Some(object) = json_object(options, "{\"language\": \"en\"}")? else {
         return Ok((parsed, timestamps));
-    }
-    let text = text_arg(options, "options")?.trim();
-    if text.is_empty() {
-        return Ok((parsed, timestamps));
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("options is not JSON: {e}"))?;
-    let object = value
-        .as_object()
-        .ok_or("options is not a JSON object; example: {\"language\": \"en\"}")?;
-    for (key, value) in object {
+    };
+    for (key, value) in &object {
         let wrong = || format!("options.{key} cannot be {value}");
         match key.as_str() {
             "language" => {
                 parsed.language = match value {
                     serde_json::Value::Null => None,
-                    serde_json::Value::String(code) => {
-                        Some(code.trim().to_lowercase()).filter(|code| !code.is_empty())
-                    }
+                    serde_json::Value::String(code) => trit::language_code(code),
                     _ => return Err(wrong()),
                 }
             }
@@ -373,20 +374,10 @@ unsafe fn json_options(options: *const c_char) -> Result<(Options, bool), String
 /// result of `trit transcribe --format json`. With timestamps, the text is
 /// the segments joined.
 fn json_result(engine: &Trit, samples: &[f32], options: &Options, timestamps: bool) -> String {
-    let (text, segments) = if timestamps {
-        let segments = engine.segments(samples, options);
-        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
-        (texts.join(" "), segments)
-    } else {
-        (engine.transcribe_with(samples, options), Vec::new())
-    };
+    let (text, segments) = engine.transcript(samples, options, timestamps);
     serde_json::json!({
         "text": text,
-        "segments": segments.iter().map(|s| serde_json::json!({
-            "start": hundredths(s.start),
-            "end": hundredths(s.end),
-            "text": s.text,
-        })).collect::<Vec<_>>(),
+        "segments": segments.iter().map(trit::Segment::json).collect::<Vec<_>>(),
     })
     .to_string()
 }
@@ -506,17 +497,9 @@ pub unsafe extern "C" fn trit_cleaner_load_ex(
 ) -> *mut Cleaner {
     guard(std::ptr::null_mut(), || {
         let options = load_options(precision, device)?;
-        let explicit = if model_dir.is_null() {
-            None
-        } else {
-            Some(Path::new(text_arg(model_dir, "model_dir")?))
-        };
-        let dir = trit::find_cleanup_model(explicit).ok_or_else(|| {
-            format!(
-                "no cleanup model found; get it: hf download {} --local-dir models/s1-mini",
-                trit::CLEANUP_REPO
-            )
-        })?;
+        let explicit = path_arg(model_dir, "model_dir")?;
+        let dir = trit::find_cleanup_model(explicit)
+            .ok_or_else(|| trit::missing_cleanup_model(explicit))?;
         let cleaner = Cleaner::load_with(&dir, &options)?;
         trit::release_memory();
         Ok(Box::into_raw(Box::new(cleaner)))
@@ -556,31 +539,25 @@ pub unsafe extern "C" fn trit_clean(
             .as_ref()
             .ok_or("cleaner is NULL; call trit_cleaner_load first")?;
         let text = text_arg(text, "text")?;
-        let pick =
-            |value: *const c_char, name: &str, valid: &[&str]| -> Result<Option<String>, String> {
-                if value.is_null() {
-                    return Ok(None);
-                }
-                let value = text_arg(value, name)?;
-                if valid.contains(&value) {
-                    Ok(Some(value.to_string()))
-                } else {
-                    Err(format!(
-                        "unknown {name} `{value}`; valid: {}",
-                        valid.join(", ")
-                    ))
-                }
-            };
-        let mut style = trit::Style::default();
-        if let Some(v) = pick(styling, "styling", &trit::Styling::NAMES)? {
-            style.styling = trit::Styling::parse(&v).unwrap_or_default();
-        }
-        if let Some(v) = pick(structure, "structure", &trit::Structure::NAMES)? {
-            style.structure = trit::Structure::parse(&v).unwrap_or_default();
-        }
-        if let Some(v) = pick(context, "context", &trit::Context::NAMES)? {
-            style.context = trit::Context::parse(&v).unwrap_or_default();
-        }
+        let name = |value: *const c_char, setting: &str| -> Result<Option<&str>, String> {
+            match value.is_null() {
+                true => Ok(None),
+                false => text_arg(value, setting).map(Some),
+            }
+        };
+        let style = trit::Style::named(
+            name(styling, "styling")?,
+            name(structure, "structure")?,
+            name(context, "context")?,
+        )
+        .map_err(|unknown| {
+            format!(
+                "unknown {} `{}`; valid: {}",
+                unknown.setting,
+                unknown.value,
+                unknown.valid.join(", ")
+            )
+        })?;
         Ok(owned_text(cleaner.clean(text, &style)))
     })
 }
@@ -595,11 +572,7 @@ pub unsafe extern "C" fn trit_clean(
 #[no_mangle]
 pub unsafe extern "C" fn trit_voice_load(model_dir: *const c_char) -> *mut Voice {
     guard(std::ptr::null_mut(), || {
-        let explicit = if model_dir.is_null() {
-            None
-        } else {
-            Some(Path::new(text_arg(model_dir, "model_dir")?))
-        };
+        let explicit = path_arg(model_dir, "model_dir")?;
         let dir = trit::find_voice(explicit).ok_or_else(|| trit::missing_voice(explicit))?;
         let voice = Voice::load(&dir)?;
         trit::release_memory();
@@ -644,19 +617,10 @@ const VOICE_KEYS: &str = "speed, noise, noise_duration, seed, voice, phonemes";
 /// `options` is NULL or a NUL-terminated string.
 unsafe fn json_voicing(options: *const c_char) -> Result<Voicing, String> {
     let mut voicing = Voicing::default();
-    if options.is_null() {
+    let Some(object) = json_object(options, "{\"speed\": 1.1}")? else {
         return Ok(voicing);
-    }
-    let text = text_arg(options, "options")?.trim();
-    if text.is_empty() {
-        return Ok(voicing);
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("options is not JSON: {e}"))?;
-    let object = value
-        .as_object()
-        .ok_or("options is not a JSON object; example: {\"speed\": 1.1}")?;
-    for (key, value) in object {
+    };
+    for (key, value) in &object {
         let wrong = || format!("options.{key} cannot be {value}");
         let number = || value.as_f64().map(|v| v as f32).ok_or_else(wrong);
         match key.as_str() {
@@ -786,11 +750,9 @@ pub unsafe extern "C" fn trit_voice_list(voice: *const Voice) -> *mut c_char {
 /// `voice` is NULL or a pointer from `trit_voice_load` that was not freed.
 #[no_mangle]
 pub unsafe extern "C" fn trit_voice_kind(voice: *const Voice) -> *const c_char {
-    match voice.as_ref().map(Voice::kind) {
-        Some("kokoro") => c"kokoro".as_ptr(),
-        Some(_) => c"vits".as_ptr(),
-        None => std::ptr::null(),
-    }
+    voice
+        .as_ref()
+        .map_or(std::ptr::null(), |voice| static_text(voice.kind()))
 }
 
 /// The phonemes a Kokoro voice speaks for `text`, one line per pass, with
@@ -827,9 +789,4 @@ pub unsafe extern "C" fn trit_free_samples(samples: *mut f32, count: usize) {
             samples, count,
         )));
     }
-}
-
-/// Seconds to 0.01 s, so JSON shows 3.28 and not the f32 as f64 (3.2799999713897705).
-fn hundredths(seconds: f32) -> f64 {
-    (f64::from(seconds) * 100.0).round() / 100.0
 }

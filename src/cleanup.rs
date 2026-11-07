@@ -57,6 +57,44 @@ pub struct Style {
     pub context: Context,
 }
 
+/// A setting of `Style` with a name that is not one of its names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownName {
+    /// `styling`, `structure`, or `context`.
+    pub setting: &'static str,
+    pub value: String,
+    pub valid: &'static [&'static str],
+}
+
+impl Style {
+    /// The style of these names. `None` keeps the default of that setting.
+    pub fn named(
+        styling: Option<&str>,
+        structure: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<Self, UnknownName> {
+        fn pick<T: Default>(
+            setting: &'static str,
+            value: Option<&str>,
+            valid: &'static [&'static str],
+            parse: fn(&str) -> Option<T>,
+        ) -> Result<T, UnknownName> {
+            value.map_or(Ok(T::default()), |value| {
+                parse(value).ok_or_else(|| UnknownName {
+                    setting,
+                    value: value.to_string(),
+                    valid,
+                })
+            })
+        }
+        Ok(Self {
+            styling: pick("styling", styling, &Styling::NAMES, Styling::parse)?,
+            structure: pick("structure", structure, &Structure::NAMES, Structure::parse)?,
+            context: pick("context", context, &Context::NAMES, Context::parse)?,
+        })
+    }
+}
+
 impl Styling {
     pub const NAMES: [&str; 4] = ["casual", "semi-casual", "semi-formal", "formal"];
 
@@ -111,7 +149,6 @@ impl Context {
 /// about 1000 tokens; a part this size leaves room for the output budget.
 const PART_TOKENS: usize = 800;
 
-/// The start of every prompt: the system turn and the opening of the user turn.
 fn system_prefix() -> String {
     format!("<|im_start|>system\n{SYSTEM}<|im_end|>\n<|im_start|>user\n")
 }
@@ -119,7 +156,6 @@ fn system_prefix() -> String {
 /// A loaded cleanup model. Load once and keep it.
 pub struct Cleaner {
     model: CausalLm,
-    /// The system prompt, run once at load: every call starts with it.
     system: Prefix,
     bpe: Bpe,
     stop: Vec<usize>,
@@ -137,7 +173,6 @@ impl Cleaner {
         Self::load_with(dir, &crate::LoadOptions::default())
     }
 
-    /// `load`, with a choice of precision and device.
     pub fn load_with(dir: &Path, options: &crate::LoadOptions) -> Result<Self, String> {
         crate::cpu::store::in_turn(|| Self::load_now(dir, options))
     }

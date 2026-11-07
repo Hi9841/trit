@@ -4,8 +4,10 @@
 //! language model's output head is its token table (tied), as in the
 //! checkpoint. Trit computes the mel filterbank and window itself.
 
+use super::blocks::{llm_block, LlmShape};
 use super::{Gguf, Name};
 use crate::models::families::qwen3_asr::LANGUAGE_NAMES;
+use crate::models::parts::causal_lm::CausalLm;
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
@@ -17,11 +19,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     {
         return Err("its language model differs from Qwen3-ASR's (SiLU, tied head)".into());
     }
-    if text("stt.frontend.type") != "mel"
-        || g.num("stt.frontend.n_fft")? != 400
-        || g.num("stt.frontend.hop_length")? != 160
-        || g.num("stt.frontend.sample_rate")? != 16_000
-    {
+    if text("stt.frontend.type") != "mel" || !super::blocks::whisper_mel(g)? {
         return Err("its audio features differ from Whisper's".into());
     }
     // The prompt names a language in English ("English"); the file gives codes.
@@ -58,19 +56,19 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
                 "n_window_infer": q("encoder.n_window_infer")?,
                 "activation_function": text("stt.qwen3_asr.encoder.activation"),
             },
-            "text_config": {
-                "model_type": "qwen3",
-                "hidden_size": q("decoder.hidden_size")?,
-                "intermediate_size": q("decoder.intermediate_size")?,
-                "num_hidden_layers": q("decoder.n_layers")?,
-                "num_attention_heads": q("decoder.n_heads")?,
-                "num_key_value_heads": q("decoder.n_kv_heads")?,
-                "head_dim": q("decoder.head_dim")?,
-                "vocab_size": q("decoder.vocab_size")?,
-                "rms_norm_eps": float("decoder.rms_norm_eps"),
-                "rope_theta": float("decoder.rope_theta"),
-                "tie_word_embeddings": true,
-            },
+            "text_config": llm_block(LlmShape {
+                model_type: "qwen3",
+                hidden: q("decoder.hidden_size")?,
+                intermediate: q("decoder.intermediate_size")?,
+                layers: q("decoder.n_layers")?,
+                heads: q("decoder.n_heads")?,
+                kv_heads: q("decoder.n_kv_heads")?,
+                head_dim: q("decoder.head_dim")?,
+                vocab: q("decoder.vocab_size")?,
+                rms_norm_eps: float("decoder.rms_norm_eps"),
+                rope_theta: float("decoder.rope_theta"),
+                tie: true,
+            }),
         },
     }))
 }
@@ -81,7 +79,7 @@ pub fn hf_name(name: &str) -> Option<Name> {
         return Some(Name::Skip);
     }
     if name.starts_with("dec.") {
-        return language_model_name(name, "thinker.model");
+        return language_model_name(name, "thinker.");
     }
     const TOP: [(&str, &str); 7] = [
         ("enc.conv.0.", "thinker.audio_tower.conv2d1."),
@@ -92,10 +90,8 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("enc.proj1.", "thinker.audio_tower.proj1."),
         ("enc.proj2.", "thinker.audio_tower.proj2."),
     ];
-    for (from, to) in TOP {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(Name::To(format!("{to}{rest}")));
-        }
+    if let Some(mapped) = super::map_suffix(name, &TOP) {
+        return Some(Name::To(mapped));
     }
     const ENCODER: [(&str, &str); 8] = [
         ("norm_attn.", "self_attn_layer_norm."),
@@ -108,24 +104,24 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("ffn.fc2.", "fc2."),
     ];
     let (layer, part) = name.strip_prefix("enc.blocks.")?.split_once('.')?;
-    let (from, to) = ENCODER.iter().find(|(from, _)| part.starts_with(from))?;
+    let mapped = super::map_suffix(part, &ENCODER)?;
     Some(Name::To(format!(
-        "thinker.audio_tower.layers.{layer}.{to}{}",
-        &part[from.len()..]
+        "thinker.audio_tower.layers.{layer}.{mapped}"
     )))
 }
 
-/// A transcribe.cpp Qwen3 language model name (`dec.*`, as Qwen3-ASR and
-/// Canary-Qwen files name it) under the Hugging Face `model` path, such as
-/// `thinker.model` or `llm.model`.
-pub fn language_model_name(name: &str, model: &str) -> Option<Name> {
-    for (from, to) in [
-        ("dec.token_embd.", "embed_tokens."),
-        ("dec.output_norm.", "norm."),
-    ] {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(Name::To(format!("{model}.{to}{rest}")));
-        }
+/// A transcribe.cpp Qwen3 language-model name (`dec.*`) under `prefix`
+/// (`llm.`, `language_model.`, or `thinker.`). `CausalLm::model_tensor` adds
+/// the `model.` segment.
+pub fn language_model_name(name: &str, prefix: &str) -> Option<Name> {
+    if let Some(mapped) = super::map_suffix(
+        name,
+        &[
+            ("dec.token_embd.", "embed_tokens."),
+            ("dec.output_norm.", "norm."),
+        ],
+    ) {
+        return Some(Name::To(CausalLm::model_tensor(prefix, &mapped)));
     }
     const DECODER: [(&str, &str); 11] = [
         ("norm_attn.", "input_layernorm."),
@@ -145,9 +141,9 @@ pub fn language_model_name(name: &str, model: &str) -> Option<Name> {
         .strip_prefix("dec.blocks.")
         .or_else(|| name.strip_prefix("dec.layers."))?
         .split_once('.')?;
-    let (from, to) = DECODER.iter().find(|(from, _)| part.starts_with(from))?;
-    Some(Name::To(format!(
-        "{model}.layers.{layer}.{to}{}",
-        &part[from.len()..]
+    let mapped = super::map_suffix(part, &DECODER)?;
+    Some(Name::To(CausalLm::model_tensor(
+        prefix,
+        &format!("layers.{layer}.{mapped}"),
     )))
 }

@@ -4,24 +4,23 @@
 
 use crate::cpu::team;
 
-const N_FFT: usize = 512;
-const WIN_LENGTH: usize = 400;
-const HOP: usize = 160;
+pub const N_FFT: usize = 512;
+pub const WIN_LENGTH: usize = 400;
+pub const HOP: usize = 160;
 const SAMPLE_RATE: f64 = 16_000.0;
-const PREEMPHASIS: f32 = 0.97;
+pub const PREEMPHASIS: f32 = 0.97;
 const LOG_GUARD: f32 = 5.960_464_5e-8; // 2^-24
 const NORM_EPSILON: f32 = 1e-5;
 const BINS: usize = N_FFT / 2 + 1;
-/// Frames per parallel task: a 2 s take still spreads over the team.
+/// a 2 s take still spreads over the team.
 const FRAMES_PER_TASK: usize = 16;
 
 pub struct MelFrontend {
     /// Per mel bin, the first FFT bin and the weights of its nonzero span.
     filters: Vec<(usize, Vec<f32>)>,
-    /// Hann window of WIN_LENGTH, centered inside N_FFT.
     window: Vec<f64>,
     fft: Fft,
-    /// Per-bin normalization over the take; off for a model fed raw log-mel.
+    /// off for a model fed raw log-mel.
     normalize: bool,
 }
 
@@ -41,7 +40,6 @@ impl MelFrontend {
         }
     }
 
-    /// With (the default) or without the per-bin normalization.
     pub fn normalized(self, normalize: bool) -> Self {
         Self { normalize, ..self }
     }
@@ -62,7 +60,6 @@ impl MelFrontend {
 
         let mels = self.filters.len();
         let mut out = vec![0.0f32; frames * mels];
-        // Frames are independent, so each task runs its own.
         team::chunks_mut(&mut out, FRAMES_PER_TASK * mels, |task, rows| {
             let (mut re, mut im) = ([0.0f64; N_FFT], [0.0f64; N_FFT]);
             let mut power = [0.0f32; BINS];
@@ -93,9 +90,7 @@ impl MelFrontend {
     }
 }
 
-/// Mean and sample standard deviation per mel bin over all frames. The
-/// statistics run per bin and the scaling per frame, both on the team; each
-/// value still takes the same steps in the same order.
+/// each value still takes the same steps in the same order.
 fn normalize(features: &mut [f32], frames: usize, mels: usize) {
     let stats = team::map(mels, |mel| {
         let mean = (0..frames)
@@ -166,8 +161,7 @@ pub fn slaney_filters(mels: usize, n_fft: usize) -> Vec<f32> {
     filters
 }
 
-/// The nonzero span of each `BINS`-wide filter row. A filter covers a few
-/// bins, so the product skips the zeros; the sum stays the same, in the same order.
+/// the sum stays the same, in the same order.
 fn spans(filters: &[f32]) -> Vec<(usize, Vec<f32>)> {
     filters
         .as_chunks::<BINS>()
@@ -181,7 +175,6 @@ fn spans(filters: &[f32]) -> Vec<(usize, Vec<f32>)> {
         .collect()
 }
 
-/// Iterative radix-2 complex FFT for one power-of-two size.
 struct Fft {
     size: usize,
     cos: Vec<f64>,

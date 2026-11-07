@@ -5,7 +5,9 @@
 //! Canary's names, the language model the Hugging Face Qwen3 names under
 //! `llm.model`.
 
+use super::blocks::{llm_block, LlmShape};
 use super::{canary, qwen3_asr, Gguf, Name};
+use crate::models::package::{encoder_block, EncShape};
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
@@ -31,32 +33,30 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         "pad_token_id": 0,
         "audio_locator_id": g.num("stt.canary_qwen.perception.audio_locator_id")?,
         "projection_size": g.num("stt.canary_qwen.perception.output_dim")?,
-        "encoder_config": {
-            "hidden_size": e("d_model")?,
-            "intermediate_size": e("d_ff")?,
-            "num_attention_heads": e("n_heads")?,
-            "num_hidden_layers": e("n_layers")?,
-            "num_mel_bins": g.num("stt.frontend.num_mels")?,
-            "conv_kernel_size": e("conv_kernel")?,
-            "subsampling_factor": e("subsampling_factor")?,
-            "subsampling_conv_channels": e("subsampling_channels")?,
-            "subsampling_conv_kernel_size": 3,
-            "subsampling_conv_stride": 2,
-            "scale_input": false,
-        },
-        "llm_config": {
-            "model_type": "qwen3",
-            "hidden_size": q("hidden_size")?,
-            "intermediate_size": q("intermediate_size")?,
-            "num_hidden_layers": q("n_layers")?,
-            "num_attention_heads": q("n_heads")?,
-            "num_key_value_heads": q("n_kv_heads")?,
-            "head_dim": q("head_dim")?,
-            "vocab_size": vocab,
-            "rms_norm_eps": float("rms_norm_eps"),
-            "rope_theta": float("rope_theta"),
-            "tie_word_embeddings": true,
-        },
+        "encoder_config": encoder_block(EncShape {
+            hidden: e("d_model")?,
+            intermediate: e("d_ff")?,
+            heads: e("n_heads")?,
+            layers: e("n_layers")?,
+            mels: g.num("stt.frontend.num_mels")?,
+            conv_kernel: e("conv_kernel")?,
+            subsample: e("subsampling_factor")?,
+            sub_channels: e("subsampling_channels")?,
+            scale_input: false,
+        }),
+        "llm_config": llm_block(LlmShape {
+            model_type: "qwen3",
+            hidden: q("hidden_size")?,
+            intermediate: q("intermediate_size")?,
+            layers: q("n_layers")?,
+            heads: q("n_heads")?,
+            kv_heads: q("n_kv_heads")?,
+            head_dim: q("head_dim")?,
+            vocab,
+            rms_norm_eps: float("rms_norm_eps"),
+            rope_theta: float("rope_theta"),
+            tie: true,
+        }),
     }))
 }
 
@@ -67,7 +67,7 @@ pub fn hf_name(name: &str) -> Option<Name> {
         return Some(Name::Skip);
     }
     if name.starts_with("dec.") {
-        return qwen3_asr::language_model_name(name, "llm.model");
+        return qwen3_asr::language_model_name(name, "llm.");
     }
     canary::hf_name(name)
 }

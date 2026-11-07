@@ -113,7 +113,8 @@ ENGINES = {
 
 
 # Trit at every precision. "auto" (the engine name without a suffix) is the
-# default: int8 for layers 1024 wide and more, f16 below.
+# default: int8 for layers 384 wide and more, and for token tables 1024 wide
+# and more. Narrower layers stay f16.
 TRIT = {
     # model: (`trit models` name, what auto gives)
     "parakeet-redux": (None, "ternary + f16"),
@@ -430,7 +431,6 @@ def load_hf_moonshine(repo, beam=1):
     return run
 
 
-# The bench.
 
 def read_clip(path: Path):
     with wave.open(str(path)) as w:

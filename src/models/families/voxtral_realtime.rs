@@ -8,17 +8,17 @@
 //! The structure follows transcribe.cpp's port of
 //! `VoxtralRealtimeForConditionalGeneration`.
 
-use crate::audio::{self, dft::PowerSpectrum};
+use crate::audio::dft::PowerSpectrum;
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, fgemm, gemm::Dense, team, tensors::Tensors};
-use crate::models::config::Json;
+use crate::layers::{add_into, conv_columns, linear, RmsNorm, Rotary};
 use crate::models::files::Files;
-use crate::models::layers::{add_into, conv_columns, linear, RmsNorm, Rotary};
 use crate::models::parts::causal_lm::CausalLm;
+use crate::models::{speech_windows, Family};
 use crate::text::bpe::Bpe;
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 
-/// Longest window per pass.
-const WINDOW_SAMPLES: usize = 60 * 16_000;
+const WINDOW_SAMPLES: usize = 60 * crate::SAMPLE_RATE as usize;
 /// Mistral's best offline delay, in 80 ms tokens (transcribe.cpp's offline default).
 const OFFLINE_DELAY: usize = 30;
 /// Tokens of silence before the audio (tekken's `streaming_n_left_pad_tokens`).
@@ -26,7 +26,6 @@ const LEFT_PAD: usize = 32;
 /// Tokens of silence after it beyond the delay and BOS (`OFFLINE_STREAMING_BUFFER_TOKENS`).
 const BUFFER: usize = 10;
 const LOG_FLOOR: f32 = 1e-10;
-/// Queries per attention product in the encoder.
 const QUERY_BLOCK: usize = 256;
 
 /// Log-mel features with a fixed peak: a centered STFT with the file's
@@ -223,8 +222,6 @@ impl Encoder {
             };
             let (q, k) = (gather(0), gather(attn));
             let v = gather(2 * attn);
-            // Queries in blocks; each block's keys are the frames any of its
-            // queries reaches.
             for first_q in (0..t).step_by(QUERY_BLOCK) {
                 let n = QUERY_BLOCK.min(t - first_q);
                 let first_k = (first_q + 1).saturating_sub(self.window);
@@ -285,8 +282,8 @@ pub struct VoxtralRealtime {
     pad: usize,
 }
 
-impl VoxtralRealtime {
-    pub fn load(
+impl Family for VoxtralRealtime {
+    fn load(
         files: &Files,
         json: &Json,
         precision: Precision,
@@ -342,16 +339,11 @@ impl VoxtralRealtime {
         })
     }
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    pub fn pieces(&self, samples: &[f32], _: &Options) -> Vec<(usize, usize, String)> {
-        let mut pieces = Vec::new();
+    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
         let per = self.samples_per_token;
         let mut prompt = vec![self.bos];
         prompt.resize(1 + LEFT_PAD + OFFLINE_DELAY, self.pad);
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
-            if audio::is_silent(window) {
-                continue;
-            }
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             // Mistral's offline layout: silence, the audio up to whole
             // tokens, silence for the delay, BOS, and a buffer.
             let left = LEFT_PAD * per;
@@ -363,7 +355,7 @@ impl VoxtralRealtime {
             padded[left..left + window.len()].copy_from_slice(window);
             let (mel, frames) = self.frontend.compute(&padded);
             if frames < 2 {
-                continue;
+                return String::new();
             }
             let (encoded, t) = self.encoder.encode(&mel, frames, self.frontend.mels);
             let rows = t / self.join;
@@ -373,11 +365,7 @@ impl VoxtralRealtime {
             activation::gelu(&mut h);
             let audio = self.linear2.forward(&h, rows);
             let ids = self.decoder.generate_additive(&prompt, &audio, &[self.eos]);
-            let text = self.bpe.decode(&ids).trim().to_string();
-            if !text.is_empty() {
-                pieces.push((audio::offset(samples, window), window.len(), text));
-            }
-        }
-        pieces
+            self.bpe.decode(&ids).trim().to_string()
+        })
     }
 }

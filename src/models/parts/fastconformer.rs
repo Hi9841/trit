@@ -4,6 +4,7 @@
 
 use super::dictionary::Dictionary;
 use super::transducer::Transducer;
+use crate::config::Json;
 use crate::cpu::activation;
 use crate::cpu::buf::Buf;
 use crate::cpu::fgemm;
@@ -12,13 +13,10 @@ use crate::cpu::kernels::Ternary;
 use crate::cpu::store::Store;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
-use crate::models::config::Json;
-use crate::models::layers::{conv_columns, Norm, Rotary};
+use crate::layers::{conv_columns, folded_batch_norm, Norm, Rotary};
 use crate::Cancel;
 use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, Weak};
-
-const BATCH_NORM_EPS: f32 = 1e-5;
 
 thread_local! {
     /// One attention task's queries (two biases), scores, position scores,
@@ -33,8 +31,6 @@ const ATTENTION_ROWS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// The `model_type` read: `parakeet_tdt`, `gigaam_ctc`, ...
-    pub kind: &'static str,
     pub hidden: usize,
     pub ff: usize,
     pub heads: usize,
@@ -54,7 +50,6 @@ pub struct Config {
     pub head: HeadKind,
     /// Before every `encoder.` tensor name: `model.` in Canary files.
     pub prefix: &'static str,
-    /// Which keys a query attends to.
     pub attention: Attention,
     /// Frames before and after a frame that the depthwise conv reads:
     /// `(kernel - 1) / 2` each, or `(kernel - 1, 0)` for a causal conv.
@@ -72,9 +67,7 @@ pub struct Config {
     /// Per-bin normalization of the log-mel features over the take
     /// (`per_feature`), or none (the raw log-mel of a streaming model).
     pub normalize_features: bool,
-    /// How attention sees positions.
     pub position: Position,
-    /// The convs before the blocks.
     pub subsampler: SubsamplerKind,
     /// The predictor's first input is zeros (GigaAM), not the embedding of
     /// the blank (NeMo, where that row is zero anyway).
@@ -90,7 +83,6 @@ pub struct Config {
     pub out_norm: bool,
 }
 
-/// How attention sees positions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Position {
     /// Transformer-XL relative positions (NeMo): `relative_k_proj`, `bias_u`, `bias_v`.
@@ -103,7 +95,6 @@ pub enum Position {
     Rotary { base: f32 },
 }
 
-/// The convs before the blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubsamplerKind {
     /// NeMo's `dw_striding`: a 2-D conv and two depthwise-separable 2-D
@@ -237,7 +228,9 @@ impl Attention {
     }
 }
 
-/// What follows the encoder.
+/// The fewest mel frames the subsampling takes: one output frame per stage.
+pub const MIN_FRAMES: usize = 8;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadKind {
     /// TDT decoder and joint network (`parakeet_tdt`): the joint network
@@ -254,15 +247,12 @@ pub enum HeadKind {
 
 impl Config {
     pub fn parse(json: &Json) -> Result<Self, String> {
-        let (kind, head) = match json.str("model_type") {
-            Some("parakeet_ctc") => ("parakeet_ctc", HeadKind::Ctc),
-            Some("gigaam_ctc") => ("gigaam_ctc", HeadKind::Ctc),
-            Some("medasr") => ("medasr", HeadKind::Ctc),
-            Some("parakeet_rnnt") => ("parakeet_rnnt", HeadKind::Rnnt),
-            Some("gigaam_rnnt") => ("gigaam_rnnt", HeadKind::Rnnt),
-            Some("canary") => ("canary", HeadKind::Encoder),
-            Some("canary_qwen") => ("canary_qwen", HeadKind::Encoder),
-            _ => ("parakeet_tdt", HeadKind::Transducer),
+        let head = match json.str("model_type") {
+            Some("parakeet_tdt") => HeadKind::Transducer,
+            Some("parakeet_rnnt" | "gigaam_rnnt") => HeadKind::Rnnt,
+            Some("parakeet_ctc" | "gigaam_ctc" | "medasr") => HeadKind::Ctc,
+            Some("canary" | "canary_qwen") => HeadKind::Encoder,
+            other => return Err(format!("config.json: no encoder for `{other:?}`")),
         };
         let enc = |key: &str| json.num(&format!("encoder_config.{key}"));
         // Only the shapes this engine implements are accepted.
@@ -290,7 +280,6 @@ impl Config {
         // Only the transducers have the decoder fields; a CTC blank is the pad token.
         let decoder = |key: &str| if transducer { json.num(key) } else { Ok(0) };
         let config = Self {
-            kind,
             hidden,
             ff: enc("intermediate_size")?,
             heads: enc("num_attention_heads")?,
@@ -505,7 +494,6 @@ fn dense_in(t: &Tensors, name: &str, out: usize, inp: usize, gpu: bool) -> Resul
     }
 }
 
-/// The convs before the blocks, of either kind.
 enum Subsampler {
     Conv2d(Subsampling),
     Conv1d(Conv1dSubsampling),
@@ -855,7 +843,6 @@ fn depthwise(
 }
 
 multiversion! {
-    /// Output row `oh` of `depthwise`.
     fn depthwise_row(
         x: &[f32],
         shape: (usize, usize, usize, usize),
@@ -920,13 +907,7 @@ impl Block {
             ConvNormKind::Batch => {
                 let mean = t.f32_len(&format!("{p}.conv.norm.running_mean"), d)?;
                 let var = t.f32_len(&format!("{p}.conv.norm.running_var"), d)?;
-                let scale: Vec<f32> = (0..d)
-                    .map(|i| weight[i] / (var[i] + BATCH_NORM_EPS).sqrt())
-                    .collect();
-                // A depthwise conv bias `b` adds `b * scale` after the batch norm.
-                let shift = (0..d)
-                    .map(|i| bias[i] + (dw_bias[i] - mean[i]) * scale[i])
-                    .collect();
+                let (scale, shift) = folded_batch_norm(&weight, &bias, &mean, &var, &dw_bias);
                 ConvNorm::Batch { scale, shift }
             }
             ConvNormKind::Layer => ConvNorm::Layer {
@@ -998,6 +979,7 @@ impl Block {
         down.forward(&hidden, frames)
     }
 
+    /// One block. The GPU encoder runs the same steps in `Encoder::record`.
     fn forward(&self, x: &mut Buf, frames: usize, c: &Config) {
         let (ff_w0, ff_w1) = c.ff_residual;
         let (conv_w0, conv_w1) = c.conv_residual;
@@ -1142,7 +1124,7 @@ impl Block {
         });
         let qk = self.qkv.forward(&rotated, t);
         let values = v.forward(x, t);
-        let out = crate::models::layers::attention(
+        let out = crate::layers::attention(
             (&qk, 2 * d),
             (&qk[d..], 2 * d),
             (&values, d),
@@ -1161,7 +1143,7 @@ impl Block {
         team::chunks_mut(&mut qkv, 3 * d, |i, row| {
             rotary.apply(&mut row[..2 * d], (1, 2 * d), (2 * heads, d / heads), i)
         });
-        let out = crate::models::layers::attention(
+        let out = crate::layers::attention(
             (&qkv, 3 * d),
             (&qkv[d..], 3 * d),
             (&qkv[2 * d..], 3 * d),
@@ -1172,7 +1154,6 @@ impl Block {
         self.o.forward(&out, t)
     }
 
-    /// Pointwise conv with GLU, depthwise conv over time, batch norm, SiLU, pointwise conv.
     fn convolution(&self, x: &[f32], t: usize, c: &Config) -> Buf {
         let d = c.hidden;
         let kernel = c.conv_kernel;
@@ -1197,8 +1178,7 @@ impl Block {
 }
 
 multiversion! {
-    /// Frame `i` of the conv module's depthwise conv over time, then its
-    /// norm. `out` starts at zero.
+    /// `out` starts at zero.
     fn time_conv_row(block: &Block, gated: &[f32], t_kernel: (usize, usize, usize), i: usize, out: &mut [f32]) {
         // `pad`: the frames before frame i that tap 0 reads (`conv_context.0`).
         let (t, kernel, pad) = t_kernel;
@@ -1232,7 +1212,6 @@ multiversion! {
     }
 }
 
-/// What attention adds for positions.
 enum Positions {
     Relative {
         rel_k: Linear,
@@ -1247,7 +1226,7 @@ enum Positions {
     Rotary { rotary: Rotary },
 }
 
-/// `x *= w`; nothing for 1, so a Conformer's sums keep their order.
+/// Nothing for 1, so a Conformer's sums keep their order.
 fn scale(x: &mut [f32], w: f32) {
     if w != 1.0 {
         team::chunks_mut(x, 4096, |_, values| values.iter_mut().for_each(|v| *v *= w));
@@ -1530,12 +1509,8 @@ impl VadHead {
         let mut h = self.proj.forward(x, t);
         activation::silu(&mut h);
         let hidden = self.proj.out_features;
-        let cols = crate::models::layers::conv_columns(
-            &h,
-            (t, hidden),
-            (Self::KERNEL, 1, Self::KERNEL / 2),
-            t,
-        );
+        let cols =
+            crate::layers::conv_columns(&h, (t, hidden), (Self::KERNEL, 1, Self::KERNEL / 2), t);
         let mut h = self.ctx.forward(&cols, t);
         activation::silu(&mut h);
         let logits = self.out.forward(&h, t);
@@ -1565,7 +1540,6 @@ impl VadHead {
     }
 }
 
-/// What turns encoder frames into tokens.
 enum Head {
     /// Transducer (TDT, or RNNT without durations): LSTM prediction
     /// network and joint network.
@@ -1743,6 +1717,9 @@ fn gpu_encoder(
                 .map_err(|_| "conv kernel does not fit".to_string())?,
             input_scale: c.input_scale,
             min_reach: POSITION_REACH as u32,
+            ff_w1: c.ff_residual.1,
+            conv_w1: c.conv_residual.1,
+            norm_eps: c.norm_eps,
         },
         layers,
         &sine,
@@ -1774,6 +1751,8 @@ impl Parakeet {
     }
 
     fn encode_subsampled(&self, mut x: Buf, t: usize, cancel: Option<&Cancel>) -> (Buf, usize) {
+        // A GPU result returns before the speaker kernel, cancel, and out_norm below.
+        // `Encoder::record` does not run those steps. `gpu_shape` keeps them off.
         #[cfg(feature = "gpu")]
         if let Some(encoder) = &self.gpu_encoder {
             if t >= GPU_MIN_FRAMES && crate::gpu::usable() {

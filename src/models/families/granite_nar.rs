@@ -8,18 +8,18 @@
 //! position, repeats and end-of-text dropped, is the text. The structure
 //! follows transcribe.cpp's port of `NLENARDecoder`.
 
-use crate::audio;
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::config::Json;
+use crate::layers::{add_into, attention, linear, Gelu, Norm};
 use crate::models::files::Files;
-use crate::models::layers::{add_into, attention, linear, Gelu, Norm};
 use crate::models::parts::causal_lm::CausalLm;
 use crate::models::parts::granite_conformer::{Config, Encoder, Frontend};
+use crate::models::{speech_windows, Family};
 use crate::text::bpe::Bpe;
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 
 /// Longest window per pass (the editor reads all of it at once).
-const WINDOW_SAMPLES: usize = 60 * 16_000;
+const WINDOW_SAMPLES: usize = 60 * crate::SAMPLE_RATE as usize;
 
 struct ProjectorLayer {
     norm_attn: Norm,
@@ -186,7 +186,40 @@ pub struct GraniteNar {
 }
 
 impl GraniteNar {
-    pub fn load(
+    /// The first hypothesis: per window of `pool` frames, the BPE head on
+    /// the frames weighted by `1 - p(blank)`, repeats and blanks dropped. A
+    /// window the CTC hears as all blank is a blank.
+    fn hypothesis(&self, last: &[f32], blank: &[f32], t: usize) -> Vec<usize> {
+        let d = self.encoder.config.d;
+        let mut ids = Vec::new();
+        let mut previous = None;
+        for first in (0..t).step_by(self.pool) {
+            let frames = first..(first + self.pool).min(t);
+            let weights: Vec<f32> = frames.clone().map(|f| 1.0 - blank[f]).collect();
+            let mass: f32 = weights.iter().sum();
+            let id = if mass <= 1e-9 {
+                self.bpe_blank
+            } else {
+                let mut pooled = vec![0.0f32; d];
+                for (f, w) in frames.zip(&weights) {
+                    for (p, v) in pooled.iter_mut().zip(&last[f * d..(f + 1) * d]) {
+                        *p += w / mass * v;
+                    }
+                }
+                crate::layers::argmax(&self.bpe_head.forward(&pooled, 1))
+            };
+            if id != self.bpe_blank && Some(id) != previous {
+                // A blank at id 0 shifts the ids by one (a head one wider than the vocabulary).
+                ids.push(if self.bpe_blank == 0 { id - 1 } else { id });
+            }
+            previous = Some(id);
+        }
+        ids
+    }
+}
+
+impl Family for GraniteNar {
+    fn load(
         files: &Files,
         json: &Json,
         precision: Precision,
@@ -216,53 +249,17 @@ impl GraniteNar {
         })
     }
 
-    /// The first hypothesis: per window of `pool` frames, the BPE head on
-    /// the frames weighted by `1 - p(blank)`, repeats and blanks dropped. A
-    /// window the CTC hears as all blank is a blank.
-    fn hypothesis(&self, last: &[f32], blank: &[f32], t: usize) -> Vec<usize> {
-        let d = self.encoder.config.d;
-        let mut ids = Vec::new();
-        let mut previous = None;
-        for first in (0..t).step_by(self.pool) {
-            let frames = first..(first + self.pool).min(t);
-            let weights: Vec<f32> = frames.clone().map(|f| 1.0 - blank[f]).collect();
-            let mass: f32 = weights.iter().sum();
-            let id = if mass <= 1e-9 {
-                self.bpe_blank
-            } else {
-                let mut pooled = vec![0.0f32; d];
-                for (f, w) in frames.zip(&weights) {
-                    for (p, v) in pooled.iter_mut().zip(&last[f * d..(f + 1) * d]) {
-                        *p += w / mass * v;
-                    }
-                }
-                crate::models::layers::argmax(&self.bpe_head.forward(&pooled, 1))
-            };
-            if id != self.bpe_blank && Some(id) != previous {
-                // A blank at id 0 shifts the ids by one (a head one wider than the vocabulary).
-                ids.push(if self.bpe_blank == 0 { id - 1 } else { id });
-            }
-            previous = Some(id);
-        }
-        ids
-    }
-
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    pub fn pieces(&self, samples: &[f32], _: &Options) -> Vec<(usize, usize, String)> {
-        let mut pieces = Vec::new();
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
-            if audio::is_silent(window) {
-                continue;
-            }
+    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             let (features, frames) = self.frontend.compute(window);
             if frames == 0 {
-                continue;
+                return String::new();
             }
             let encoded = self.encoder.encode_all(&features, frames);
             let t = encoded.t;
             let hypothesis = self.hypothesis(&encoded.last, &encoded.blank, t);
             if hypothesis.is_empty() {
-                continue;
+                return String::new();
             }
             // End-of-text between and around the tokens, at least 8 positions.
             let n = hypothesis.len();
@@ -285,11 +282,7 @@ impl GraniteNar {
                 }
                 previous = Some(id);
             }
-            let text = self.bpe.decode(&ids).trim().to_string();
-            if !text.is_empty() {
-                pieces.push((audio::offset(samples, window), window.len(), text));
-            }
-        }
-        pieces
+            self.bpe.decode(&ids).trim().to_string()
+        })
     }
 }

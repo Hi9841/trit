@@ -50,7 +50,6 @@ pub struct Store<T: Plain> {
 enum Inner<T> {
     Owned(Vec<T>),
     Mapped {
-        /// Keeps the view alive.
         _map: Arc<Mapping>,
         ptr: *const T,
         len: usize,
@@ -74,7 +73,6 @@ impl<T: Plain> std::fmt::Debug for Store<T> {
 }
 
 impl<T: Plain> Store<T> {
-    /// A buffer that stays on the heap (one that grows after the load).
     pub fn owned(values: Vec<T>) -> Self {
         Self {
             inner: Inner::Owned(values),
@@ -187,7 +185,6 @@ enum Cache {
     Write(Writer),
 }
 
-/// Appends buffers to a new cache file; `finish` writes the index.
 struct Writer {
     file: std::io::BufWriter<File>,
     at: u64,
@@ -274,7 +271,6 @@ fn read_index(map: &Mapping) -> Option<HashMap<u64, Vec<(usize, usize)>>> {
     Some(index)
 }
 
-/// Progress of the load in progress: bytes read from the weight files.
 struct Progress {
     report: Arc<dyn Fn(f32) + Send + Sync>,
     /// The fraction of the whole load that this pass covers: (start, width).
@@ -287,14 +283,12 @@ struct Progress {
 
 static PROGRESS: Mutex<Option<Arc<Progress>>> = Mutex::new(None);
 
-/// A weight file of `bytes` opens for the load in progress.
 pub(crate) fn will_read(bytes: u64) {
     if let Some(progress) = PROGRESS.lock().as_ref() {
         progress.total.fetch_add(bytes, Ordering::Relaxed);
     }
 }
 
-/// `bytes` of a weight file were read.
 pub(crate) fn did_read(bytes: u64) {
     let Some(progress) = PROGRESS.lock().clone() else {
         return;
@@ -342,7 +336,6 @@ pub(crate) fn in_turn<R>(load: impl FnOnce() -> R) -> R {
     load()
 }
 
-/// A `Read` cache of the file at `path`, when it is one.
 fn reader(path: &Path) -> Option<Cache> {
     let map = Arc::new(Mapping::open(path).ok()?);
     let index = read_index(&map)?;
@@ -457,7 +450,6 @@ pub(crate) fn file_name(precision: &str) -> String {
     )
 }
 
-/// A read-only view of a whole file.
 struct Mapping {
     ptr: *const u8,
     len: usize,

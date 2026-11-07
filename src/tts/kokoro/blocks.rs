@@ -5,8 +5,8 @@
 //! (`frames x channels`).
 
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::layers::linear;
-use crate::models::parts::conv::{Conv1d, DepthwiseUpsample};
+use crate::layers::linear;
+use crate::tts::conv::{Conv1d, DepthwiseUpsample};
 
 /// Epsilon of the instance and layer norms (PyTorch's default).
 const EPS: f64 = 1e-5;
@@ -109,7 +109,6 @@ impl AdaLayerNorm {
     }
 }
 
-/// `max(v, 0.2 v)` on every value.
 fn leaky(x: &mut [f32]) {
     team::chunks_mut(x, 8192, |_, part| {
         part.iter_mut().for_each(|v| *v = v.max(*v * SLOPE));

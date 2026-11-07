@@ -7,7 +7,6 @@
 
 use super::tensors::f16_to_f32;
 
-/// A ggml block type that this module expands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockType {
     Q4_0,
@@ -19,48 +18,88 @@ pub enum BlockType {
     Q6K,
 }
 
-impl BlockType {
-    /// The type of a ggml type id, and its dtype name in `Tensors`.
-    pub fn from_ggml(id: u32) -> Option<(Self, &'static str)> {
-        Some(match id {
-            2 => (Self::Q4_0, "Q4_0"),
-            3 => (Self::Q4_1, "Q4_1"),
-            6 => (Self::Q5_0, "Q5_0"),
-            7 => (Self::Q5_1, "Q5_1"),
-            12 => (Self::Q4K, "Q4_K"),
-            13 => (Self::Q5K, "Q5_K"),
-            14 => (Self::Q6K, "Q6_K"),
-            _ => return None,
-        })
-    }
+/// One ggml type id: its dtype name, values per block, and bytes per block.
+/// F32, F16, BF16, and Q8_0 have no [`BlockType`] (`Q8_0` expands on its own path).
+struct GgmlType {
+    id: u32,
+    name: &'static str,
+    values: usize,
+    bytes: usize,
+    block: Option<BlockType>,
+}
 
+/// Bytes of one ggml Q8_0 block: an f16 scale and 32 int8 codes.
+pub const Q8_0_BYTES: usize = 34;
+
+const fn kind(
+    id: u32,
+    name: &'static str,
+    values: usize,
+    bytes: usize,
+    block: Option<BlockType>,
+) -> GgmlType {
+    GgmlType {
+        id,
+        name,
+        values,
+        bytes,
+        block,
+    }
+}
+
+/// Ids in the order the GGUF reader lists them.
+const TYPES: &[GgmlType] = &[
+    kind(0, "F32", 1, 4, None),
+    kind(1, "F16", 1, 2, None),
+    kind(30, "BF16", 1, 2, None),
+    kind(8, "Q8_0", 32, Q8_0_BYTES, None),
+    kind(2, "Q4_0", 32, 18, Some(BlockType::Q4_0)),
+    kind(3, "Q4_1", 32, 20, Some(BlockType::Q4_1)),
+    kind(6, "Q5_0", 32, 22, Some(BlockType::Q5_0)),
+    kind(7, "Q5_1", 32, 24, Some(BlockType::Q5_1)),
+    kind(12, "Q4_K", 256, 144, Some(BlockType::Q4K)),
+    kind(13, "Q5_K", 256, 176, Some(BlockType::Q5K)),
+    kind(14, "Q6_K", 256, 210, Some(BlockType::Q6K)),
+];
+
+/// The dtype name of ggml type `id`, and the bytes of `count` values: `None`
+/// when `count` overflows or is not a whole number of blocks. `None` for an
+/// unknown id.
+pub fn layout(id: u32, count: u64) -> Option<(&'static str, Option<u64>)> {
+    let kind = TYPES.iter().find(|kind| kind.id == id)?;
+    let (values, bytes) = (kind.values as u64, kind.bytes as u64);
+    if !count.is_multiple_of(values) {
+        return None;
+    }
+    Some((kind.name, (count / values).checked_mul(bytes)))
+}
+
+/// `F32, F16, BF16, Q8_0, ... and Q6_K`, the list the GGUF reader prints.
+pub fn type_list() -> String {
+    let names: Vec<&str> = TYPES.iter().map(|kind| kind.name).collect();
+    let Some((last, head)) = names.split_last() else {
+        return String::new();
+    };
+    format!("{}, and {last}", head.join(", "))
+}
+
+impl BlockType {
     pub fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "Q4_0" => Self::Q4_0,
-            "Q4_1" => Self::Q4_1,
-            "Q5_0" => Self::Q5_0,
-            "Q5_1" => Self::Q5_1,
-            "Q4_K" => Self::Q4K,
-            "Q5_K" => Self::Q5K,
-            "Q6_K" => Self::Q6K,
-            _ => return None,
-        })
+        TYPES
+            .iter()
+            .find(|kind| kind.name == name)
+            .and_then(|kind| kind.block)
     }
 
     /// Values per block, and bytes per block.
     pub fn block(self) -> (usize, usize) {
-        match self {
-            Self::Q4_0 => (32, 18),
-            Self::Q4_1 => (32, 20),
-            Self::Q5_0 => (32, 22),
-            Self::Q5_1 => (32, 24),
-            Self::Q4K => (256, 144),
-            Self::Q5K => (256, 176),
-            Self::Q6K => (256, 210),
-        }
+        let kind = TYPES
+            .iter()
+            .find(|kind| kind.block == Some(self))
+            .expect("every block type is in TYPES");
+        (kind.values, kind.bytes)
     }
 
-    /// The values of `bytes` (whole blocks of this type).
     pub fn expand(self, bytes: &[u8]) -> Vec<f32> {
         let (values, size) = self.block();
         let mut out = vec![0.0f32; bytes.len() / size * values];

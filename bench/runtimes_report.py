@@ -73,7 +73,6 @@ def load(path: Path) -> list[dict]:
             complete = {s["set"] for s in result["sets"]} >= set(SETS)
             tested = result["engine"] in ENGINES and ENGINES[result["engine"]][0] in TEST_MODELS
             if tested and complete and ENGINES[result["engine"]][3] == "cpu":
-                # The sets in one order, so the rounds line up set by set.
                 result["sets"] = [next(s for s in result["sets"] if s["set"] == name) for name in SETS]
                 lines.append(result)
     latest = {}

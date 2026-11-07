@@ -191,7 +191,7 @@ class Trit:
 
     @property
     def kind(self) -> str:
-        """"parakeet_tdt", "parakeet_ctc", "canary", "whisper", or "moonshine"."""
+        """The `model_type` of the model, for example "parakeet_tdt"."""
         return _lib.trit_kind(self._live()).decode()
 
     def transcribe(self, samples, language: str | None = None, beam: int = 0,

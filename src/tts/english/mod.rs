@@ -36,8 +36,6 @@ const PUNCT_TAGS: [&str; 11] = [
     ".", ",", "-LRB-", "-RRB-", "``", "\"\"", "''", ":", "$", "#", "NFP",
 ];
 const CURRENCY_SYMBOLS: &str = "$£€";
-/// Phonemes per pass of Kokoro (its context less the two pads).
-pub const MAX_PHONEMES: usize = 510;
 
 fn tagger() -> Result<&'static Tagger, String> {
     static TAGGER: OnceLock<Result<Tagger, String>> = OnceLock::new();
@@ -52,7 +50,7 @@ pub struct English {
     fallback: Option<Fallback>,
 }
 
-/// One pass of the model: its phonemes (at most `MAX_PHONEMES`).
+/// One pass of the model: its phonemes, at most the limit `chunks` was given.
 #[derive(Clone, Debug)]
 pub struct Chunk {
     pub phonemes: String,
@@ -70,9 +68,9 @@ impl English {
     }
 
     /// The text in passes, as Kokoro's pipeline cuts it: at line breaks,
-    /// then at 510 phonemes, at the last sentence end, else clause end,
+    /// then at `limit` phonemes, at the last sentence end, else clause end,
     /// else comma that keeps a pass under the limit.
-    pub fn chunks(&self, text: &str) -> Result<Vec<Chunk>, String> {
+    pub fn chunks(&self, text: &str, limit: usize) -> Result<Vec<Chunk>, String> {
         let mut out = Vec::new();
         for line in text
             .trim()
@@ -81,7 +79,7 @@ impl English {
             .filter(|l| !l.is_empty())
         {
             let tokens = self.tokens(line)?;
-            out.extend(split(tokens));
+            out.extend(split(tokens, limit));
         }
         Ok(out)
     }
@@ -739,7 +737,7 @@ fn to_ps(tokens: &[Token]) -> String {
 }
 
 /// `KPipeline.waterfall_last`: where to cut `tokens` so the rest fits.
-fn waterfall_last(tokens: &[Token], next_count: usize) -> usize {
+fn waterfall_last(tokens: &[Token], next_count: usize, limit: usize) -> usize {
     for marks in ["!.?…", ":;", ",—"] {
         let Some(z) = tokens.iter().rposition(|t| {
             let ps = t.phonemes.as_deref().unwrap_or("");
@@ -751,15 +749,15 @@ fn waterfall_last(tokens: &[Token], next_count: usize) -> usize {
         if z < tokens.len() && matches!(tokens[z].phonemes.as_deref(), Some(")") | Some("”")) {
             z += 1;
         }
-        if next_count.saturating_sub(to_ps(&tokens[..z]).chars().count()) <= MAX_PHONEMES {
+        if next_count.saturating_sub(to_ps(&tokens[..z]).chars().count()) <= limit {
             return z;
         }
     }
     tokens.len()
 }
 
-/// `KPipeline.en_tokenize`: the tokens in passes of at most 510 phonemes.
-fn split(tokens: Vec<Token>) -> Vec<Chunk> {
+/// `KPipeline.en_tokenize`: the tokens in passes of at most `limit` phonemes.
+fn split(tokens: Vec<Token>, limit: usize) -> Vec<Chunk> {
     let mut out = Vec::new();
     let mut held: Vec<Token> = Vec::new();
     let mut count = 0usize;
@@ -773,8 +771,8 @@ fn split(tokens: Vec<Token>) -> Vec<Chunk> {
             if t.whitespace.is_empty() { "" } else { " " }
         );
         let next_count = count + next.trim_end().chars().count();
-        if next_count > MAX_PHONEMES {
-            let z = waterfall_last(&held, next_count);
+        if next_count > limit {
+            let z = waterfall_last(&held, next_count, limit);
             out.push(Chunk {
                 phonemes: to_ps(&held[..z]),
             });
@@ -795,8 +793,8 @@ fn split(tokens: Vec<Token>) -> Vec<Chunk> {
     out.into_iter()
         .filter(|c| !c.phonemes.is_empty())
         .map(|mut c| {
-            if c.phonemes.chars().count() > MAX_PHONEMES {
-                c.phonemes = c.phonemes.chars().take(MAX_PHONEMES).collect();
+            if c.phonemes.chars().count() > limit {
+                c.phonemes = c.phonemes.chars().take(limit).collect();
             }
             c
         })

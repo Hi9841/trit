@@ -11,8 +11,10 @@
 //! Hugging Face folder. Check, 2026-11-02: nvidia/parakeet-unified-en-0.6b
 //! gives the same text as its converted folder on 502 of 502 clips.
 
+use crate::audio::mel;
+use crate::config::Json;
 use crate::cpu::tensors::Tensors;
-use crate::models::config::Json;
+use crate::models::package::{encoder_block, EncShape};
 use crate::{Device, Precision};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -29,13 +31,7 @@ pub fn find(dir: &Path) -> Option<PathBuf> {
     if dir.join("config.json").is_file() {
         return None;
     }
-    let mut archives = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "nemo"));
-    let first = archives.next()?;
-    // Two archives: no way to tell which one the caller means.
-    archives.next().is_none().then_some(first)
+    super::package::only_file(dir, "nemo")
 }
 
 pub struct Archive {
@@ -78,26 +74,6 @@ impl Archive {
         Ok(config)
     }
 
-    /// The weights, under the names `convert_nemo_to_hf.py` gives them.
-    pub fn tensors(&self, precision: Precision, device: Device) -> Result<Tensors, String> {
-        let range = self.member("model_weights.ckpt")?;
-        Tensors::open_torch_in(&self.path, range, hf_name, precision, device)
-    }
-
-    /// The files a Hugging Face folder of this model holds.
-    pub fn provides(&self, name: &str) -> bool {
-        matches!(name, "config.json" | "tokenizer.json")
-    }
-
-    /// `config.json`, or `tokenizer.json` from the SentencePiece model.
-    pub fn file(&self, name: &str) -> Result<String, String> {
-        match name {
-            "config.json" => Ok(self.config()?.to_text()),
-            "tokenizer.json" => self.tokenizer_json(),
-            _ => Err(format!("{} has no {name}", self.path.display())),
-        }
-    }
-
     /// The SentencePiece model that `tokenizer.model_path` names.
     fn tokenizer_json(&self) -> Result<String, String> {
         let name = self.yaml["tokenizer"]["model_path"]
@@ -126,6 +102,26 @@ impl Archive {
     fn text(&self, name: &str) -> Result<String, String> {
         String::from_utf8(self.read(self.member(name)?)?)
             .map_err(|_| format!("{name} in {} is not UTF-8", self.path.display()))
+    }
+}
+
+impl super::package::Package for Archive {
+    fn provides(&self, name: &str) -> bool {
+        matches!(name, "config.json" | "tokenizer.json")
+    }
+
+    /// `config.json`, or `tokenizer.json` from the SentencePiece model.
+    fn file(&self, name: &str) -> Result<String, String> {
+        match name {
+            "config.json" => Ok(self.config()?.to_text()),
+            "tokenizer.json" => self.tokenizer_json(),
+            _ => Err(format!("{} has no {name}", self.path.display())),
+        }
+    }
+
+    fn tensors(&self, precision: Precision, device: Device) -> Result<Tensors, String> {
+        let range = self.member("model_weights.ckpt")?;
+        Tensors::open_torch_in(&self.path, range, hf_name, precision, device)
     }
 }
 
@@ -170,32 +166,27 @@ pub fn hf_config(y: &Value, path: &Path) -> Result<Json, String> {
         ));
     }
     let pre = &y["preprocessor"];
-    let float = |v: &Value, default: f64| v.as_f64().unwrap_or(default);
-    if num(&pre["sample_rate"], "preprocessor.sample_rate")? != 16_000
-        || num(&pre["n_fft"], "preprocessor.n_fft")? != 512
-        || (float(&pre["window_size"], 0.0) - 0.025).abs() > 1e-9
-        || (float(&pre["window_stride"], 0.0) - 0.01).abs() > 1e-9
-        || !matches!(text(&pre["window"]).as_str(), "" | "hann")
-        || text(&pre["normalize"]) != "per_feature"
-        || (float(&pre["preemph"], 0.97) - 0.97).abs() > 1e-9
-        || pre["features"] != encoder["feat_in"]
-    {
+    if !parakeet_mel(pre)? || pre["features"] != encoder["feat_in"] {
         return Err(unsupported("its audio features differ from Parakeet's"));
     }
     let hidden = num(&encoder["d_model"], "encoder.d_model")?;
-    let encoder_config = json!({
-        "hidden_size": hidden,
-        "intermediate_size": hidden * num(&encoder["ff_expansion_factor"], "encoder.ff_expansion_factor")?,
-        "num_attention_heads": num(&encoder["n_heads"], "encoder.n_heads")?,
-        "num_hidden_layers": num(&encoder["n_layers"], "encoder.n_layers")?,
-        "num_mel_bins": num(&encoder["feat_in"], "encoder.feat_in")?,
-        "conv_kernel_size": num(&encoder["conv_kernel_size"], "encoder.conv_kernel_size")?,
-        "subsampling_factor": num(&encoder["subsampling_factor"], "encoder.subsampling_factor")?,
-        "subsampling_conv_channels": num(&encoder["subsampling_conv_channels"], "encoder.subsampling_conv_channels")?,
-        // NeMo's dw_striding stack: 3x3 kernels, stride 2.
-        "subsampling_conv_kernel_size": 3,
-        "subsampling_conv_stride": 2,
-        "scale_input": encoder["xscaling"].as_bool().unwrap_or(true),
+    let encoder_config = encoder_block(EncShape {
+        hidden,
+        intermediate: hidden
+            * num(
+                &encoder["ff_expansion_factor"],
+                "encoder.ff_expansion_factor",
+            )?,
+        heads: num(&encoder["n_heads"], "encoder.n_heads")?,
+        layers: num(&encoder["n_layers"], "encoder.n_layers")?,
+        mels: num(&encoder["feat_in"], "encoder.feat_in")?,
+        conv_kernel: num(&encoder["conv_kernel_size"], "encoder.conv_kernel_size")?,
+        subsample: num(&encoder["subsampling_factor"], "encoder.subsampling_factor")?,
+        sub_channels: num(
+            &encoder["subsampling_conv_channels"],
+            "encoder.subsampling_conv_channels",
+        )?,
+        scale_input: encoder["xscaling"].as_bool().unwrap_or(true),
     });
     let decoder = &y["decoder"];
     if !text(&decoder["_target_"]).ends_with("RNNTDecoder")
@@ -490,4 +481,24 @@ fn scalar(text: &str) -> Result<Value, String> {
             }
         }
     })
+}
+
+/// Whether `pre`, a NeMo `preprocessor`, is the mel of `audio::mel`. NeMo
+/// states the window in seconds.
+fn parakeet_mel(pre: &Value) -> Result<bool, String> {
+    let num = |key: &str| {
+        pre[key]
+            .as_u64()
+            .ok_or_else(|| format!("model_config.yaml has no preprocessor.{key}"))
+    };
+    let rate = f64::from(crate::SAMPLE_RATE);
+    let float = |key: &str| pre[key].as_f64().unwrap_or(0.0);
+    let text = |key: &str| pre[key].as_str().unwrap_or("");
+    Ok(num("sample_rate")? == u64::from(crate::SAMPLE_RATE)
+        && num("n_fft")? == mel::N_FFT as u64
+        && (float("window_size") - mel::WIN_LENGTH as f64 / rate).abs() <= 1e-9
+        && (float("window_stride") - mel::HOP as f64 / rate).abs() <= 1e-9
+        && matches!(text("window"), "" | "hann")
+        && text("normalize") == "per_feature"
+        && (pre["preemph"].as_f64().unwrap_or(0.97) - 0.97).abs() <= 1e-9)
 }

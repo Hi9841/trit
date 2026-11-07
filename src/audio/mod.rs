@@ -38,10 +38,9 @@ pub fn offset(all: &[f32], part: &[f32]) -> usize {
     (part.as_ptr() as usize - all.as_ptr() as usize) / std::mem::size_of::<f32>()
 }
 
-/// Samples every frontend can read: NaN and infinity become 0, and values
-/// past `PEAK` become `PEAK`. One bad sample from a driver or a resampler
+/// One bad sample from a driver or a resampler
 /// otherwise turns the features of its whole window into NaN, and the take
-/// into no text. Every sample in range (any real recording) is borrowed.
+/// into no text.
 pub fn sanitized(samples: &[f32]) -> Cow<'_, [f32]> {
     // Far above any PCM scale (32-bit full scale is 2.1e9), far below the
     // level where a power spectrum overflows f32 (about 1e16).

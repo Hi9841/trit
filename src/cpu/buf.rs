@@ -39,7 +39,6 @@ impl Buf {
     pub fn scratch(len: usize) -> Self {
         let reused = {
             let mut pool = POOL.lock();
-            // Smallest pooled buffer that fits.
             let best = pool
                 .iter()
                 .enumerate()
@@ -57,7 +56,6 @@ impl Buf {
 }
 
 impl Buf {
-    /// The values as a vector that leaves the pool.
     pub fn into_vec(mut self) -> Vec<f32> {
         let mut values = std::mem::take(&mut self.data);
         values.truncate(self.len);
@@ -65,7 +63,6 @@ impl Buf {
     }
 }
 
-/// Frees every pooled buffer.
 pub fn clear_pool() {
     POOL.lock().clear();
 }

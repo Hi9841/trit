@@ -18,7 +18,7 @@ impl Stft {
         let bins = n_fft / 2 + 1;
         let tau = std::f64::consts::TAU;
         let window = (0..n_fft)
-            .map(|n| 0.5 - 0.5 * (tau * n as f64 / n_fft as f64).cos())
+            .map(|n| super::dft::periodic_hann(n, n_fft))
             .collect();
         let mut cos = Vec::with_capacity(bins * n_fft);
         let mut sin = Vec::with_capacity(bins * n_fft);
@@ -54,13 +54,10 @@ impl Stft {
         self.n_fft / 2 + 1
     }
 
-    /// Frames of `samples`: `1 + samples / hop`.
     pub fn frames(&self, samples: usize) -> usize {
         1 + samples / self.hop
     }
 
-    /// The magnitude and phase of each frame: row `t` holds the magnitudes
-    /// of every bin, then their phases (`atan2(im, re)`).
     pub fn forward(&self, signal: &[f32]) -> Vec<f32> {
         let (n_fft, bins) = (self.n_fft, self.bins());
         let half = n_fft / 2;
@@ -101,10 +98,8 @@ impl Stft {
         out
     }
 
-    /// The signal of `frames` frames of `magnitude` and `phase` (each
-    /// `frames x bins`, read by `at(t, k)`): an inverse real DFT per frame,
-    /// windowed, overlapped and added, divided by the summed squared window,
-    /// with the center padding cut. `hop * (frames - 1)` samples.
+    /// `magnitude` and `phase` (each
+    /// `frames x bins`, read by `at(t, k)`). `hop * (frames - 1)` samples.
     pub fn inverse(
         &self,
         frames: usize,

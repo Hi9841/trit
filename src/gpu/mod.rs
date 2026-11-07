@@ -45,12 +45,10 @@ thread_local! {
     static HOST_PRODUCTS: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Keep dense and ternary products on the CPU while this is set.
 pub(crate) fn use_host_products(host: bool) {
     HOST_PRODUCTS.with(|flag| flag.set(host));
 }
 
-/// The caller asked for the CPU product.
 pub(crate) fn host_products() -> bool {
     HOST_PRODUCTS.with(|flag| flag.get())
 }
@@ -60,7 +58,6 @@ pub(crate) fn usable() -> bool {
     FAILURES.load(Ordering::Relaxed) < MAX_FAILURES
 }
 
-/// A GPU call failed, and this call uses the CPU.
 pub(crate) fn failed(error: &str) {
     log_fallback(error);
     if FAILURES.fetch_add(1, Ordering::Relaxed) + 1 == MAX_FAILURES {
@@ -68,7 +65,6 @@ pub(crate) fn failed(error: &str) {
     }
 }
 
-/// A GPU call gave its result.
 pub(crate) fn worked() {
     if FAILURES.load(Ordering::Relaxed) != 0 && usable() {
         FAILURES.store(0, Ordering::Relaxed);
@@ -151,7 +147,6 @@ enum Kind {
 }
 
 impl Gpu {
-    /// The device, created on the first call.
     pub fn get() -> Result<&'static Gpu, String> {
         match GPU.get_or_init(Self::open) {
             Ok(gpu) => Ok(gpu),
@@ -169,7 +164,6 @@ impl Gpu {
         self.shader_f16
     }
 
-    /// Per-dispatch timestamps are available for this process.
     pub(crate) fn timestamps(&self) -> bool {
         self.timestamps
     }
@@ -364,7 +358,6 @@ impl Gpu {
         Ok(buffer)
     }
 
-    /// Runs the queued writes and frees their staging buffers.
     fn flush_writes(&self) {
         self.staged.store(0, Ordering::Relaxed);
         self.queue.submit([]);
@@ -620,14 +613,13 @@ pub(crate) enum Weights<'a> {
     },
 }
 
-/// Gives pooled GPU buffers back. Does nothing before the first GPU load.
+/// Does nothing before the first GPU load.
 pub fn trim() {
     if let Some(Ok(gpu)) = GPU.get() {
         gpu.trim();
     }
 }
 
-/// Bytes of weight buffers uploaded since the device was created.
 pub fn weight_bytes() -> u64 {
     GPU.get()
         .and_then(|gpu| gpu.as_ref().ok())
@@ -731,6 +723,7 @@ pub(crate) fn pipeline(
     label: &str,
 ) -> Result<wgpu::ComputePipeline, String> {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let source = shader_source(source);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
         source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -751,6 +744,24 @@ pub(crate) fn pipeline(
     match pollster::block_on(scope.pop()) {
         Some(error) => Err(format!("{label} shader: {error}")),
         None => Ok(pipeline),
+    }
+}
+
+/// `TILE`, `FLAG_BIAS`, and `FLAG_RELU` for every product shader.
+/// An `enable` line stays first: WGSL rejects a declaration before it.
+fn shader_source(body: &str) -> String {
+    let prelude = format!(
+        "const TILE: u32 = {TILE}u;\nconst FLAG_BIAS: u32 = {FLAG_BIAS}u;\nconst FLAG_RELU: u32 = {FLAG_RELU}u;\n"
+    );
+    if let Some(rest) = body.strip_prefix("enable ") {
+        let end = rest
+            .find('\n')
+            .map(|index| index + "enable ".len() + 1)
+            .unwrap_or(body.len());
+        let (head, tail) = body.split_at(end);
+        format!("{head}{prelude}{tail}")
+    } else {
+        format!("{prelude}{body}")
     }
 }
 

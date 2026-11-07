@@ -6,20 +6,23 @@
 //! `<s>[INST][BEGIN_AUDIO][AUDIO]...[/INST]lang:en[TRANSCRIBE]`. The structure
 //! follows transcribe.cpp's port of `VoxtralForConditionalGeneration`.
 
-use crate::audio::{self, whisper_mel::WhisperMel};
-use crate::cpu::{activation, buf::Buf, gemm::Dense};
-use crate::models::config::Json;
-use crate::models::families::whisper::model::{Encoder, EncoderShape};
+use crate::audio::whisper_mel::WhisperMel;
+use crate::config::Json;
+use crate::cpu::{activation, gemm::Dense};
+use crate::layers::linear;
 use crate::models::files::Files;
-use crate::models::layers::linear;
-use crate::models::parts::causal_lm::CausalLm;
+use crate::models::parts::audio_encoder::{Encoder, EncoderShape};
+use crate::models::parts::causal_lm::{CausalLm, TokenBudget};
+use crate::models::{speech_windows, Family};
 use crate::text::bpe::Bpe;
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 
 /// One encoder window: 30 s.
 const WINDOW_SAMPLES: usize = crate::audio::whisper_mel::WINDOW_SAMPLES;
-const MIN_NEW_TOKENS: usize = 128;
-const TOKENS_PER_SECOND: usize = 8;
+const BUDGET: TokenBudget = TokenBudget {
+    least: 128,
+    per_second: 8,
+};
 
 pub struct Voxtral {
     mel: WhisperMel,
@@ -35,7 +38,6 @@ pub struct Voxtral {
     tokens: Tokens,
 }
 
-/// The request's control tokens.
 struct Tokens {
     bos: usize,
     eos: usize,
@@ -45,22 +47,14 @@ struct Tokens {
     transcribe: usize,
 }
 
-impl Voxtral {
-    pub fn load(
+impl Family for Voxtral {
+    fn load(
         files: &Files,
         json: &Json,
         precision: Precision,
         device: Device,
     ) -> Result<Self, String> {
-        let e = |key: &str| json.num(&format!("encoder_config.{key}"));
-        let shape = EncoderShape {
-            d: e("hidden_size")?,
-            layers: e("num_hidden_layers")?,
-            heads: e("num_attention_heads")?,
-            ffn: e("intermediate_size")?,
-            mels: e("num_mel_bins")?,
-            positions: e("max_source_positions")?,
-        };
+        let shape = EncoderShape::parse(json)?;
         let (d_encoder, mels) = (shape.d, shape.mels);
         let join = json.num("projector_config.downsample_factor")?;
         if json.num("projector_config.input_dim")? != join * d_encoder {
@@ -79,10 +73,7 @@ impl Voxtral {
         let linear2 = linear(&t, "multi_modal_projector.linear_2", width, width)?;
         drop(t);
         let bpe = Bpe::parse(&files.read("tokenizer.json")?)?;
-        let id = |token: &str| {
-            bpe.id(token)
-                .ok_or_else(|| format!("the tokenizer has no {token}"))
-        };
+        let id = |token: &str| bpe.token(token);
         let tokens = Tokens {
             bos: json.num("bos_token_id")?,
             eos: json.num("eos_token_id")?,
@@ -112,10 +103,9 @@ impl Voxtral {
         })
     }
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
     /// A language the model lists goes into the request (`lang:fr`); none
     /// lets the model find it.
-    pub fn pieces(&self, samples: &[f32], options: &Options) -> Vec<(usize, usize, String)> {
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         let language = options.language.as_deref().map(str::trim).filter(|code| {
             self.languages
                 .iter()
@@ -128,30 +118,16 @@ impl Voxtral {
             tail.extend(self.bpe.encode_plain(&format!("lang:{code}")));
         }
         tail.push(k.transcribe);
-        let mut pieces = Vec::new();
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
-            if audio::is_silent(window) {
-                continue;
-            }
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             let encoded = self.encoder.encode(&self.mel.compute(window));
             // Each row of the projector's input is `join` encoder frames side by side.
             let n = encoded.len() / (self.join * self.d_encoder);
             let mut h = self.linear1.forward(&encoded, n);
             activation::gelu(&mut h);
             let audio = self.linear2.forward(&h, n);
-            let d = self.decoder.width();
-            let mut rows = Buf::scratch((head.len() + n + tail.len()) * d);
-            rows[..head.len() * d].copy_from_slice(&self.decoder.embed(&head));
-            rows[head.len() * d..(head.len() + n) * d].copy_from_slice(&audio);
-            rows[(head.len() + n) * d..].copy_from_slice(&self.decoder.embed(&tail));
-            let seconds = window.len() / crate::SAMPLE_RATE as usize;
-            let max_new = MIN_NEW_TOKENS.max(seconds * TOKENS_PER_SECOND);
-            let ids = self.decoder.generate_rows(rows, max_new, &[k.eos]);
-            let text = self.bpe.decode(&ids).trim().to_string();
-            if !text.is_empty() {
-                pieces.push((audio::offset(samples, window), window.len(), text));
-            }
-        }
-        pieces
+            let budget = BUDGET.tokens(window.len());
+            let ids = self.decoder.answer(&head, &audio, &tail, budget, &[k.eos]);
+            self.bpe.decode(&ids).trim().to_string()
+        })
     }
 }

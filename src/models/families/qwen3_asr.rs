@@ -7,22 +7,25 @@
 //! structure follows the Apache-2.0 `qwen-asr` package
 //! (`modeling_qwen3_asr.py`); tensor names are its `thinker.*` names.
 
-use crate::audio::{self, whisper_mel::WhisperMel};
+use crate::audio::whisper_mel::WhisperMel;
+use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::models::config::Json;
+use crate::layers::{add_into, attention, linear, stacked, Gelu, Norm};
 use crate::models::files::Files;
-use crate::models::layers::{add_into, attention, linear, stacked, Gelu, Norm};
-use crate::models::parts::causal_lm::CausalLm;
+use crate::models::parts::causal_lm::{CausalLm, TokenBudget};
+use crate::models::{speech_windows, Family};
 use crate::text::bpe::Bpe;
-use crate::{Device, Options, Precision};
+use crate::{BiasWeights, Device, Options, Precision, Segment};
 use parking_lot::RwLock;
 
 /// Longest window per pass. The reference takes up to 20 minutes at once;
 /// two minutes keep the decoder's caches near 100 MB.
-const WINDOW_SAMPLES: usize = 120 * 16_000;
+const WINDOW_SAMPLES: usize = 120 * crate::SAMPLE_RATE as usize;
 /// The reference's `max_new_tokens`; longer windows get more.
-const MIN_NEW_TOKENS: usize = 512;
-const TOKENS_PER_SECOND: usize = 8;
+const BUDGET: TokenBudget = TokenBudget {
+    least: 512,
+    per_second: 8,
+};
 /// What the model writes between the language and the transcript.
 const TEXT_TAG: &str = "<asr_text>";
 /// Where the config of each part is.
@@ -70,7 +73,6 @@ struct AudioConfig {
     heads: usize,
     ffn: usize,
     mels: usize,
-    /// Channels of the three convolutions.
     channels: usize,
     /// Mel frames per chunk (`2 * n_window`).
     chunk: usize,
@@ -110,7 +112,6 @@ impl AudioConfig {
         Ok(config)
     }
 
-    /// Mel bins after the three convolutions.
     fn bins(&self) -> usize {
         half(half(half(self.mels)))
     }
@@ -134,7 +135,6 @@ struct AudioEncoder {
     config: AudioConfig,
     /// Three 3x3 convolutions, stride 2, padding 1; weights `[out][in][3][3]`.
     convs: [Dense; 3],
-    /// Channels and bins after the convolutions to the model width.
     conv_out: Dense,
     /// Sinusoids, `max_positions x d`; each chunk starts at position 0.
     positions: Vec<f32>,
@@ -160,7 +160,32 @@ pub struct Qwen3Asr {
 }
 
 impl Qwen3Asr {
-    pub fn load(
+    fn transcribe_window(&self, samples: &[f32], context: &str, language: Option<&str>) -> String {
+        let frames = samples.len() / crate::audio::whisper_mel::HOP;
+        if frames == 0 {
+            return String::new();
+        }
+        let mel = self.mel.compute_frames(samples, frames);
+        let (audio, _) = self.encoder.encode(&mel, frames);
+        let head =
+            format!("<|im_start|>system\n{context}<|im_end|>\n<|im_start|>user\n<|audio_start|>");
+        let mut tail = "<|audio_end|><|im_end|>\n<|im_start|>assistant\n".to_string();
+        if let Some(name) = language {
+            tail.push_str(&format!("language {name}{TEXT_TAG}"));
+        }
+        let (head, tail) = (self.bpe.encode(&head), self.bpe.encode(&tail));
+        debug_assert!(!head.contains(&self.audio_pad));
+        let budget = BUDGET.tokens(samples.len());
+        let ids = self
+            .decoder
+            .answer(&head, &audio, &tail, budget, &self.stop);
+        let raw = self.bpe.decode(&ids);
+        transcript(&raw, language.is_some())
+    }
+}
+
+impl Family for Qwen3Asr {
+    fn load(
         files: &Files,
         json: &Json,
         precision: Precision,
@@ -175,11 +200,16 @@ impl Qwen3Asr {
                 "config.json: the audio encoder and the language model differ in width".into(),
             );
         }
-        let bpe = Bpe::from_files(files)?;
-        let id = |token: &str| {
-            bpe.id(token)
-                .ok_or_else(|| format!("the tokenizer has no {token}"))
+        let bpe = if files.has("tokenizer.json") {
+            Bpe::parse(&files.read("tokenizer.json")?)?
+        } else {
+            Bpe::from_legacy(
+                &files.read("vocab.json")?,
+                &files.read("merges.txt")?,
+                &files.read("tokenizer_config.json")?,
+            )?
         };
+        let id = |token: &str| bpe.token(token);
         let audio_pad = id("<|audio_pad|>")?;
         let stop = vec![id("<|im_end|>")?, id("<|endoftext|>")?];
         let languages = json
@@ -203,7 +233,7 @@ impl Qwen3Asr {
 
     /// Terms to favor, as the context of the system prompt: Qwen3-ASR is
     /// trained to spell words as its context does. No term is skipped.
-    pub fn set_dictionary(&self, terms: &[String]) -> Vec<String> {
+    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
         let terms: Vec<&str> = terms
             .iter()
             .map(|t| t.trim())
@@ -213,10 +243,9 @@ impl Qwen3Asr {
         Vec::new()
     }
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
     /// `options.language` (one of 30) makes the model write that language;
     /// without one, it detects the language.
-    pub fn pieces(&self, samples: &[f32], options: &Options) -> Vec<(usize, usize, String)> {
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         let language = options.language.as_deref().and_then(|code| {
             LANGUAGE_NAMES
                 .iter()
@@ -225,41 +254,9 @@ impl Qwen3Asr {
                 .filter(|name| self.languages.iter().any(|l| l == name))
         });
         let context = self.context.read().clone();
-        audio::windows(samples, WINDOW_SAMPLES)
-            .into_iter()
-            .filter(|window| !audio::is_silent(window))
-            .filter_map(|window| {
-                let text = self.transcribe_window(window, &context, language);
-                (!text.is_empty()).then(|| (audio::offset(samples, window), window.len(), text))
-            })
-            .collect()
-    }
-
-    fn transcribe_window(&self, samples: &[f32], context: &str, language: Option<&str>) -> String {
-        let frames = samples.len() / crate::audio::whisper_mel::HOP;
-        if frames == 0 {
-            return String::new();
-        }
-        let mel = self.mel.compute_frames(samples, frames);
-        let (audio, count) = self.encoder.encode(&mel, frames);
-        let head =
-            format!("<|im_start|>system\n{context}<|im_end|>\n<|im_start|>user\n<|audio_start|>");
-        let mut tail = "<|audio_end|><|im_end|>\n<|im_start|>assistant\n".to_string();
-        if let Some(name) = language {
-            tail.push_str(&format!("language {name}{TEXT_TAG}"));
-        }
-        let (head, tail) = (self.bpe.encode(&head), self.bpe.encode(&tail));
-        let d = self.decoder.width();
-        let mut rows = Buf::scratch((head.len() + count + tail.len()) * d);
-        rows[..head.len() * d].copy_from_slice(&self.decoder.embed(&head));
-        rows[head.len() * d..(head.len() + count) * d].copy_from_slice(&audio);
-        rows[(head.len() + count) * d..].copy_from_slice(&self.decoder.embed(&tail));
-        debug_assert!(!head.contains(&self.audio_pad));
-        let seconds = samples.len() / crate::SAMPLE_RATE as usize;
-        let max_new = MIN_NEW_TOKENS.max(seconds * TOKENS_PER_SECOND);
-        let ids = self.decoder.generate_rows(rows, max_new, &self.stop);
-        let raw = self.bpe.decode(&ids);
-        transcript(&raw, language.is_some())
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
+            self.transcribe_window(window, &context, language)
+        })
     }
 }
 

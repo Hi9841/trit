@@ -30,7 +30,7 @@ unsafe impl Sync for OutPtr {}
 
 /// The product kernel. The activation quantizer follows `Isa`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Path {
+pub(super) enum Path {
     Scalar,
     #[cfg(target_arch = "x86_64")]
     Avx2,
@@ -56,34 +56,6 @@ enum Path {
 }
 
 impl Path {
-    fn detect(isa: Isa) -> Self {
-        match isa {
-            Isa::Scalar => Self::Scalar,
-            #[cfg(target_arch = "x86_64")]
-            Isa::Avx2 if is_x86_feature_detected!("avxvnni") => Self::Vnni256,
-            #[cfg(target_arch = "x86_64")]
-            Isa::Avx2 => Self::Avx2,
-            #[cfg(target_arch = "x86_64")]
-            Isa::Avx512Vnni if std::env::var("TRIT_ISA").as_deref() == Ok("avxvnni") => {
-                Self::Vnni256
-            }
-            #[cfg(target_arch = "x86_64")]
-            Isa::Avx512Vnni => Self::Vnni512,
-            #[cfg(target_arch = "aarch64")]
-            Isa::Neon => Self::Neon,
-            #[cfg(target_arch = "aarch64")]
-            Isa::NeonDot
-                if std::arch::is_aarch64_feature_detected!("i8mm")
-                    && std::env::var("TRIT_ISA").as_deref() != Ok("dotprod") =>
-            {
-                Self::NeonMmla
-            }
-            #[cfg(target_arch = "aarch64")]
-            Isa::NeonDot => Self::NeonDot,
-        }
-    }
-
-    /// Outputs per packed block.
     fn rows(self) -> usize {
         match self {
             Self::Scalar => 1,
@@ -162,9 +134,8 @@ macro_rules! vnni256_task {
     }};
 }
 
-/// The int8 product path of this CPU, for `cpu_path`.
 pub fn path_name() -> &'static str {
-    match Path::detect(Isa::detect()) {
+    match super::isa::isa_choice().int8 {
         Path::Scalar => "scalar",
         #[cfg(target_arch = "x86_64")]
         Path::Avx2 => "avx2",
@@ -199,13 +170,24 @@ pub struct Int8 {
 /// Values per block of ggml's Q8_0.
 pub const Q8_0_BLOCK: usize = 32;
 
+pub(super) fn group_scale(max: f32) -> f32 {
+    if max > 0.0 {
+        max / 127.0
+    } else {
+        1.0
+    }
+}
+
+pub(super) fn quantize_code(value: f32, scale: f32) -> i8 {
+    (value / scale).round_ties_even().clamp(-127.0, 127.0) as i8
+}
+
 impl Int8 {
     /// Whether a `n x k` layer fits the kernels: whole groups and whole tiles.
     pub fn fits(n: usize, k: usize) -> bool {
         Self::fits_group(n, k, GROUP)
     }
 
-    /// `fits` for groups of `group` inputs.
     pub fn fits_group(n: usize, k: usize, group: usize) -> bool {
         k.is_multiple_of(group) && n.is_multiple_of(32)
     }
@@ -214,8 +196,8 @@ impl Int8 {
     /// per block of `Q8_0_BLOCK` (the f16 scale widened to f32). The codes
     /// are packed for this CPU's kernel, not changed.
     pub fn from_q8_0(n: usize, k: usize, codes: &[i8], block_scales: &[f32]) -> Self {
-        let isa = Isa::detect();
-        let path = Path::detect(isa);
+        let choice = super::isa::isa_choice();
+        let (isa, path) = (choice.ternary, choice.int8);
         let rows = path.rows();
         let groups = k / Q8_0_BLOCK;
         let mut weights = vec![0i8; n * k];
@@ -245,8 +227,8 @@ impl Int8 {
 
     /// Quantizes row-major `n x k` weights; `row(r, out)` writes row `r` as f32.
     pub fn quantize(n: usize, k: usize, row: impl Fn(usize, &mut [f32]) + Sync) -> Self {
-        let isa = Isa::detect();
-        let path = Path::detect(isa);
+        let choice = super::isa::isa_choice();
+        let (isa, path) = (choice.ternary, choice.int8);
         let rows = path.rows();
         let groups = k / GROUP;
         let mut weights = vec![0i8; n * k];
@@ -263,7 +245,7 @@ impl Int8 {
                 for g in 0..groups {
                     let span = &values[g * GROUP..(g + 1) * GROUP];
                     let max = span.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-                    let scale = if max > 0.0 { max / 127.0 } else { 1.0 };
+                    let scale = group_scale(max);
                     // SAFETY: each block belongs to one task; the buffers outlive the step.
                     unsafe {
                         *all_s
@@ -271,7 +253,7 @@ impl Int8 {
                             .as_mut_ptr() = scale
                     };
                     for (i, v) in span.iter().enumerate() {
-                        let code = (v / scale).round_ties_even().clamp(-127.0, 127.0) as i8;
+                        let code = quantize_code(*v, scale);
                         // VNNI reads the byte as unsigned `w + 128`.
                         let code = if path.flipped() { code ^ i8::MIN } else { code };
                         let kk = g * GROUP + i;

@@ -13,7 +13,7 @@ use crate::cpu::gemm::{Blocks, Dense, Precision};
 use crate::cpu::half::HalfDense;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
-use crate::models::layers::argmax;
+use crate::layers::argmax;
 use crate::Cancel;
 use std::collections::HashMap;
 
@@ -61,7 +61,6 @@ struct Lstm {
 }
 
 impl Lstm {
-    /// One step of the cell from the gate products: updates `h` and `c`.
     fn cell(&self, gates: &mut [f32], h: &mut [f32], c: &mut [f32]) {
         let dh = h.len();
         for (g, b) in gates.iter_mut().zip(&self.bias) {
@@ -328,7 +327,6 @@ impl Transducer {
         frames: &mut Vec<usize>,
     ) {
         let candidates = dictionary.candidates(tokens);
-        // Every spelling to score, once: the words heard and each term.
         let mut jobs: Vec<Job> = Vec::new();
         let mut job = |start: usize, spelling: &[usize], end: End| -> usize {
             let found = jobs
@@ -343,7 +341,6 @@ impl Transducer {
                 jobs.len() - 1
             })
         };
-        // Per candidate: the job of the words heard, the jobs of the term, the prior.
         let mut plans = Vec::new();
         for candidate in &candidates {
             let span = candidate.span.clone();
@@ -426,8 +423,6 @@ impl Transducer {
                 .next
                 .max(frames[start].saturating_sub(SPAN_REACH))
         };
-        // The frames each job crosses: from its first frame to its end, and
-        // the anchor token there.
         let spans: Vec<Option<(usize, usize, Option<usize>)>> = jobs
             .iter()
             .map(|job| {
@@ -439,11 +434,8 @@ impl Transducer {
                 (last >= from).then(|| (from, last - from, anchor))
             })
             .collect();
-        // Jobs that share a start and a first few tokens share the decoder
-        // there, and so the joint rows: one node per (start, prefix).
         let mut nodes: Vec<Node> = Vec::new();
         let mut index: HashMap<(usize, &[usize]), usize> = HashMap::new();
-        // Per job: its node before each token and after the last.
         let mut paths: Vec<Vec<usize>> = Vec::with_capacity(jobs.len());
         for (job, span) in jobs.iter().zip(&spans) {
             let Some((_, width, anchor)) = *span else {
@@ -470,7 +462,6 @@ impl Transducer {
             }
             paths.push(path);
         }
-        // Decoder output of each node, one batch per depth: parents come first.
         let mut outputs: Vec<Vec<f32>> = vec![Vec::new(); nodes.len()];
         let mut states: Vec<DecoderState> = vec![DecoderState::default(); nodes.len()];
         let mut pending: Vec<usize> = Vec::new();
@@ -502,7 +493,6 @@ impl Transducer {
             }
             pending = wait;
         }
-        // The joint input of every node and frame.
         let mut input = Vec::new();
         let mut total = 0;
         for (node, output) in nodes.iter_mut().zip(&outputs) {
@@ -520,7 +510,6 @@ impl Transducer {
         } else {
             self.joint.forward(&input, total)
         };
-        // Every row as log-probabilities, in parallel.
         team::chunks_mut(&mut logits, cols, |_, row| {
             for &id in heard.banned {
                 row[id] = f32::NEG_INFINITY;
@@ -564,7 +553,6 @@ impl Transducer {
                         .copied()
                         .zip(duration_part.iter().copied());
                     for (d, p) in tdt.chain(rnnt_moves.clone()) {
-                        // A path past the anchor misses it; past the end it closes.
                         let target = if f + d <= width {
                             f + d
                         } else if anchor.is_some() {
@@ -585,7 +573,6 @@ impl Transducer {
             }
             let end = alpha[at(width, count)];
             out.push(match anchor {
-                // The anchor token on its own frame, after the last token.
                 Some(id) => end + row(path[count], width).0[id],
                 None => end,
             });

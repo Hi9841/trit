@@ -4,6 +4,7 @@
 //! FunASR's names (`audio_encoder`, `audio_adaptor`) and the Hugging Face
 //! Qwen3 names under `llm.model`.
 
+use super::blocks::{kaldi_front, llm_block, KaldiFront, LlmShape};
 use super::{qwen3_asr, sensevoice, Gguf, Name};
 use serde_json::{json, Value};
 
@@ -48,37 +49,46 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "num_blocks": a("n_blocks")?,
             "low_frame_rate": g.get("stt.funasr_nano.adaptor.use_low_frame_rate").as_bool().unwrap_or(false),
         },
-        "llm_config": {
-            "model_type": "qwen3",
-            "hidden_size": q("hidden_size")?,
-            "intermediate_size": q("intermediate_size")?,
-            "num_hidden_layers": q("n_layers")?,
-            "num_attention_heads": q("n_heads")?,
-            "num_key_value_heads": q("n_kv_heads")?,
-            "head_dim": q("head_dim")?,
-            "vocab_size": vocab,
-            "rms_norm_eps": float("rms_norm_eps"),
-            "rope_theta": float("rope_theta"),
-            "tie_word_embeddings": g.get("stt.funasr_nano.decoder.tie_word_embeddings").as_bool().unwrap_or(true),
-        },
-        "feature_extractor": {
-            "type": "kaldi_fbank",
-            "sample_rate": g.num("stt.frontend.sample_rate")?,
-            "win_length": g.num("stt.frontend.win_length")?,
-            "hop_length": g.num("stt.frontend.hop_length")?,
-            "num_mel_bins": g.num("stt.frontend.num_mels")?,
-            "lfr_m": g.num("stt.frontend.lfr_m")?,
-            "lfr_n": g.num("stt.frontend.lfr_n")?,
-            "upscale_samples": g.get("stt.frontend.upscale_samples").as_bool().unwrap_or(true),
-            "cmvn": g.get("stt.frontend.apply_cmvn").as_bool().unwrap_or(true),
-        },
+        "llm_config": llm_block(LlmShape {
+            model_type: "qwen3",
+            hidden: q("hidden_size")?,
+            intermediate: q("intermediate_size")?,
+            layers: q("n_layers")?,
+            heads: q("n_heads")?,
+            kv_heads: q("n_kv_heads")?,
+            head_dim: q("head_dim")?,
+            vocab,
+            rms_norm_eps: float("rms_norm_eps"),
+            rope_theta: float("rope_theta"),
+            tie: g
+                .get("stt.funasr_nano.decoder.tie_word_embeddings")
+                .as_bool()
+                .unwrap_or(true),
+        }),
+        "feature_extractor": kaldi_front(KaldiFront {
+            sample_rate: g.num("stt.frontend.sample_rate")?,
+            win: g.num("stt.frontend.win_length")?,
+            hop: g.num("stt.frontend.hop_length")?,
+            mels: g.num("stt.frontend.num_mels")?,
+            lfr_m: g.num("stt.frontend.lfr_m")?,
+            lfr_n: g.num("stt.frontend.lfr_n")?,
+            upscale: g
+                .get("stt.frontend.upscale_samples")
+                .as_bool()
+                .unwrap_or(true),
+            cmvn: Some(
+                g.get("stt.frontend.apply_cmvn")
+                    .as_bool()
+                    .unwrap_or(true),
+            ),
+        }),
     }))
 }
 
 /// A transcribe.cpp Fun-ASR tensor name as Trit names it.
 pub fn hf_name(name: &str) -> Option<Name> {
     if name.starts_with("dec.") {
-        return qwen3_asr::language_model_name(name, "llm.model");
+        return qwen3_asr::language_model_name(name, "llm.");
     }
     if let Some(rest) = name.strip_prefix("adaptor.") {
         if let Some((layer, part)) = rest.strip_prefix("blocks.").and_then(|r| r.split_once('.')) {
@@ -92,11 +102,8 @@ pub fn hf_name(name: &str) -> Option<Name> {
                 ("norm_attn.", "norm1."),
                 ("norm_ffn.", "norm2."),
             ];
-            let (from, to) = BLOCK.iter().find(|(from, _)| part.starts_with(from))?;
-            return Some(Name::To(format!(
-                "audio_adaptor.blocks.{layer}.{to}{}",
-                &part[from.len()..]
-            )));
+            let mapped = super::map_suffix(part, &BLOCK)?;
+            return Some(Name::To(format!("audio_adaptor.blocks.{layer}.{mapped}")));
         }
         return Some(Name::To(format!("audio_adaptor.{rest}")));
     }

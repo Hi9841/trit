@@ -31,7 +31,6 @@ pub struct Best {
     pub log_probability: f32,
 }
 
-/// One live sequence: its decoder state and the logits for its next token.
 struct Live<S> {
     tokens: Vec<usize>,
     score: f32,
@@ -133,7 +132,6 @@ pub fn search<S: Clone>(
                         kept.push((b, token, score));
                     }
                 }
-                // The `width` best ended sequences stay.
                 ended.sort_by(|a, b| b.rank.total_cmp(&a.rank));
                 ended.truncate(width);
             }

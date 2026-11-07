@@ -8,9 +8,9 @@
 use super::blocks::{AdaInResBlock, SnakeBlock};
 use super::Noise;
 use crate::audio::stft::Stft;
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, team, tensors::Tensors};
-use crate::models::config::Json;
-use crate::models::parts::conv::{Conv1d, Upsample};
+use crate::tts::conv::{Conv1d, Upsample};
 
 /// The source: the harmonics of F0 (the fundamental and 8 overtones).
 const HARMONICS: usize = 9;
@@ -34,7 +34,12 @@ pub struct Decoder {
 }
 
 impl Decoder {
-    pub fn load(t: &Tensors, c: &Json, (hidden, style): (usize, usize)) -> Result<Self, String> {
+    pub fn load(
+        t: &Tensors,
+        c: &Json,
+        (hidden, style): (usize, usize),
+        sample_rate: u32,
+    ) -> Result<Self, String> {
         let wide = 1024;
         let residual = 64;
         let joined = wide + residual + 2;
@@ -52,7 +57,7 @@ impl Decoder {
                 block("decoder.decode.3", (joined, hidden), true)?,
             ],
             asr_res: Conv1d::load(t, "decoder.asr_res.0", (hidden, residual), (1, 1))?,
-            generator: Generator::load(t, c, style)?,
+            generator: Generator::load(t, c, style, sample_rate)?,
             hidden,
         })
     }
@@ -106,7 +111,6 @@ impl Decoder {
     }
 }
 
-/// The width of `x` with `frames` rows.
 fn block_inputs(x: &[f32], frames: usize) -> usize {
     x.len() / frames
 }
@@ -130,7 +134,7 @@ struct Generator {
 }
 
 impl Generator {
-    fn load(t: &Tensors, c: &Json, style: usize) -> Result<Self, String> {
+    fn load(t: &Tensors, c: &Json, style: usize, sample_rate: u32) -> Result<Self, String> {
         let list = |key: &str| -> Result<Vec<usize>, String> {
             c.get(key)
                 .as_array()
@@ -228,7 +232,7 @@ impl Generator {
             merge: (weights, bias),
             stft: Stft::new(n_fft, hop),
             scale: rates.iter().product::<usize>() * hop,
-            sample_rate: 24_000.0,
+            sample_rate: sample_rate as f32,
         })
     }
 
@@ -268,8 +272,6 @@ impl Generator {
                     ((*s as f32) * 2.0 * std::f32::consts::PI) * scale as f32;
             }
         }
-        // Back to the sample rate (linear interpolation up by `scale`), sines,
-        // voiced or noise, mixed.
         let (weights, bias) = (&self.merge.0, self.merge.1);
         let mut out = vec![0.0f32; samples];
         let mut draws = vec![0.0f32; samples * HARMONICS];
@@ -328,7 +330,6 @@ impl Generator {
             length *= stage.up.stride;
             let channels = stage.up.outputs;
             if i == last {
-                // Reflection padding of one frame at the start.
                 let mut padded = Buf::scratch((length + 1) * channels);
                 padded[..channels].copy_from_slice(&up[channels..2 * channels]);
                 padded[channels..].copy_from_slice(&up);

@@ -3,13 +3,12 @@
 //! the shared building blocks (`parts/`) its config names. A new family is
 //! one row in `FAMILIES` and one `Family` impl.
 
-pub mod config;
 pub mod families;
 pub mod fermion;
 pub mod files;
 pub mod gguf;
-pub mod layers;
 pub mod nemo;
+pub mod package;
 pub mod parts;
 
 use families::{
@@ -20,84 +19,31 @@ use families::{
 use crate::{BiasWeights, Device, Options, Precision, Segment, Spread};
 use std::path::Path;
 
-/// A model that one published file holds, in place of `config.json` and
-/// `model.safetensors`: an NVIDIA NeMo archive, a GGUF file, or a Fermion
-/// container. Each gives the config, tensor names, and tokenizer of the
-/// Hugging Face checkpoint.
-pub enum Package {
-    Nemo(nemo::Archive),
-    Gguf(gguf::Gguf),
-    Fermion(fermion::Container),
-}
-
-impl Package {
-    /// The package of a model folder: its `model.fermion`, or its one
-    /// `.nemo` or `.gguf` file when the folder has no `config.json`.
-    pub fn find(dir: &Path) -> Result<Option<Self>, String> {
-        match (fermion::find(dir), nemo::find(dir), gguf::find(dir)) {
-            (Some(path), None, None) => fermion::Container::open(&path).map(|c| Some(Self::Fermion(c))),
-            (None, Some(path), None) => nemo::Archive::open(&path).map(|a| Some(Self::Nemo(a))),
-            (None, None, Some(path)) => gguf::Gguf::open(&path).map(|g| Some(Self::Gguf(g))),
-            (None, None, None) => Ok(None),
-            _ => Err(format!(
-                "{} holds more than one model file (.fermion, .nemo, .gguf); keep one model per folder",
-                dir.display()
-            )),
-        }
-    }
-
-    /// Whether `dir` holds a package (`find` would open one).
-    pub fn in_folder(dir: &Path) -> bool {
-        let found = [
-            fermion::find(dir).is_some(),
-            nemo::find(dir).is_some(),
-            gguf::find(dir).is_some(),
-        ];
-        found.iter().filter(|found| **found).count() == 1
-    }
-
-    /// Whether the package gives file `name` of a Hugging Face folder.
-    pub fn provides(&self, name: &str) -> bool {
-        match self {
-            Self::Nemo(archive) => archive.provides(name),
-            Self::Gguf(file) => file.provides(name),
-            Self::Fermion(container) => container.provides(name),
-        }
-    }
-
-    /// File `name` of a Hugging Face folder of this model.
-    pub fn file(&self, name: &str) -> Result<String, String> {
-        match self {
-            Self::Nemo(archive) => archive.file(name),
-            Self::Gguf(file) => file.file(name),
-            Self::Fermion(container) => container.file(name),
-        }
-    }
-
-    pub fn tensors(
-        &self,
+pub trait Family: Send + Sync {
+    fn load(
+        files: &files::Files,
+        config: &crate::config::Json,
         precision: Precision,
         device: Device,
-    ) -> Result<crate::cpu::tensors::Tensors, String> {
-        match self {
-            Self::Nemo(archive) => archive.tensors(precision, device),
-            Self::Gguf(file) => file.tensors(precision, device),
-            Self::Fermion(container) => container.tensors(precision, device),
-        }
+    ) -> Result<Self, String>
+    where
+        Self: Sized;
+
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment>;
+
+    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
+        crate::joined(&self.segments(samples, options))
+    }
+
+    /// Sets the terms to favor; returns the terms it cannot use. A family
+    /// with no way to steer its decoder skips every term.
+    fn set_dictionary(&self, terms: &[String], _weights: BiasWeights) -> Vec<String> {
+        terms.to_vec()
     }
 }
 
-/// What every family does with audio.
-pub trait Family: Send + Sync {
-    /// The family name, for example `parakeet_tdt`.
-    fn kind(&self) -> &'static str;
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String;
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment>;
-    /// Sets the terms to favor; returns the terms it cannot use.
-    fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String>;
-}
-
-type Load = fn(&files::Files, &config::Json, Precision, Device) -> Result<Box<dyn Family>, String>;
+type Load =
+    fn(&files::Files, &crate::config::Json, Precision, Device) -> Result<Box<dyn Family>, String>;
 
 /// One `model_type` Trit runs: the worker spread its products need, and
 /// how to load it.
@@ -107,121 +53,39 @@ pub struct Row {
     load: Load,
 }
 
+const fn row<F: Family + 'static>(model_type: &'static str, spread: Spread) -> Row {
+    Row {
+        model_type,
+        spread,
+        load: |files, config, precision, device| {
+            Ok(Box::new(F::load(files, config, precision, device)?))
+        },
+    }
+}
+
 /// Every family, by `model_type`. Tall products (Whisper) use every core.
 pub const FAMILIES: [Row; 21] = [
-    Row {
-        model_type: "parakeet_tdt",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "parakeet_rnnt",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "parakeet_ctc",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "gigaam_rnnt",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "gigaam_ctc",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "medasr",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(parakeet::Parakeet::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "whisper",
-        spread: Spread::AllCores,
-        load: |files, c, p, d| Ok(Box::new(whisper::Whisper::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "moonshine",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(moonshine::Moonshine::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "moonshine_streaming",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(moonshine::Moonshine::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "canary",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(canary::Canary::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "wav2vec2",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(wav2vec2::Wav2Vec2::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "qwen3_asr",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(qwen3_asr::Qwen3Asr::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "canary_qwen",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(canary_qwen::CanaryQwen::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "fun_asr_nano",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(fun_asr::FunAsr::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "granite_speech",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| {
-            Ok(Box::new(granite_speech::GraniteSpeech::load(
-                files, c, p, d,
-            )?))
-        },
-    },
-    Row {
-        model_type: "voxtral",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(voxtral::Voxtral::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "voxtral_realtime",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| {
-            Ok(Box::new(voxtral_realtime::VoxtralRealtime::load(
-                files, c, p, d,
-            )?))
-        },
-    },
-    Row {
-        model_type: "moss",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(moss::Moss::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "granite_speech_nar",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(granite_nar::GraniteNar::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "granite_ctc",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(granite_ctc::GraniteCtc::load(files, c, p, d)?)),
-    },
-    Row {
-        model_type: "sensevoice",
-        spread: Spread::OneCache,
-        load: |files, c, p, d| Ok(Box::new(sensevoice::SenseVoice::load(files, c, p, d)?)),
-    },
+    row::<parakeet::Parakeet>("parakeet_tdt", Spread::OneCache),
+    row::<parakeet::Parakeet>("parakeet_rnnt", Spread::OneCache),
+    row::<parakeet::Parakeet>("parakeet_ctc", Spread::OneCache),
+    row::<parakeet::Parakeet>("gigaam_rnnt", Spread::OneCache),
+    row::<parakeet::Parakeet>("gigaam_ctc", Spread::OneCache),
+    row::<parakeet::Parakeet>("medasr", Spread::OneCache),
+    row::<whisper::Whisper>("whisper", Spread::AllCores),
+    row::<moonshine::Moonshine>("moonshine", Spread::OneCache),
+    row::<moonshine::Moonshine>("moonshine_streaming", Spread::OneCache),
+    row::<canary::Canary>("canary", Spread::OneCache),
+    row::<wav2vec2::Wav2Vec2>("wav2vec2", Spread::OneCache),
+    row::<qwen3_asr::Qwen3Asr>("qwen3_asr", Spread::OneCache),
+    row::<canary_qwen::CanaryQwen>("canary_qwen", Spread::OneCache),
+    row::<fun_asr::FunAsr>("fun_asr_nano", Spread::OneCache),
+    row::<granite_speech::GraniteSpeech>("granite_speech", Spread::OneCache),
+    row::<voxtral::Voxtral>("voxtral", Spread::OneCache),
+    row::<voxtral_realtime::VoxtralRealtime>("voxtral_realtime", Spread::OneCache),
+    row::<moss::Moss>("moss", Spread::OneCache),
+    row::<granite_nar::GraniteNar>("granite_speech_nar", Spread::OneCache),
+    row::<granite_ctc::GraniteCtc>("granite_ctc", Spread::OneCache),
+    row::<sensevoice::SenseVoice>("sensevoice", Spread::OneCache),
 ];
 
 /// The `model_type` values Trit runs, for messages and `trit doctor`.
@@ -235,13 +99,15 @@ pub const MODEL_TYPES: [&str; FAMILIES.len()] = {
     names
 };
 
-/// One loaded network.
-pub struct Model(Box<dyn Family>);
+pub struct Model {
+    row: &'static Row,
+    family: Box<dyn Family>,
+}
 
 impl Model {
     pub fn load(dir: &Path, precision: Precision, device: Device) -> Result<Self, String> {
         let files = files::Files::open(dir)?;
-        let config = config::Json::parse(&files.read("config.json")?)?;
+        let config = crate::config::Json::parse(&files.read("config.json")?)?;
         let kind = config
             .str("model_type")
             .ok_or("config.json has no `model_type`")?;
@@ -263,289 +129,66 @@ impl Model {
             })?;
         let device = crate::active_device(device)?;
         let _team = crate::cpu::enter(row.spread);
-        Ok(Self((row.load)(&files, &config, precision, device)?))
+        let family = (row.load)(&files, &config, precision, device)?;
+        Ok(Self { row, family })
     }
 
     pub fn kind(&self) -> &'static str {
-        self.0.kind()
+        self.row.model_type
     }
 
     pub fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        let _team = crate::cpu::enter(spread(self.kind()));
-        self.0.transcribe(samples, options)
+        let _team = crate::cpu::enter(self.row.spread);
+        self.family.transcribe(samples, options)
     }
 
     pub fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        let _team = crate::cpu::enter(spread(self.kind()));
-        self.0.segments(samples, options)
+        let _team = crate::cpu::enter(self.row.spread);
+        self.family.segments(samples, options)
     }
 
     pub fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
-        self.0.set_dictionary(terms, weights)
+        self.family.set_dictionary(terms, weights)
     }
 }
 
-/// The worker spread of a family; `OneCache` for an unknown name.
-pub fn spread(kind: &str) -> Spread {
-    FAMILIES
-        .iter()
-        .find(|row| row.model_type == kind)
-        .map_or(Spread::OneCache, |row| row.spread)
+/// Drops what recordings longer than the usual built.
+pub fn release_caches() {
+    parts::fastconformer::release_positions();
 }
 
-/// Text per window: `(first sample, samples, text)`.
-type Pieces = Vec<(usize, usize, String)>;
-
-/// One segment per window.
-fn windowed(pieces: Pieces) -> Vec<Segment> {
+/// One segment per window of at most `max` samples that gives text.
+fn windowed(
+    samples: &[f32],
+    max: usize,
+    mut text_of: impl FnMut(&[f32]) -> String,
+) -> Vec<Segment> {
     let seconds = |samples: usize| samples as f32 / crate::SAMPLE_RATE as f32;
-    pieces
+    crate::audio::windows(samples, max)
         .into_iter()
-        .map(|(start, len, text)| Segment {
-            start: seconds(start),
-            end: seconds(start + len),
-            text,
+        .filter_map(|window| {
+            let text = text_of(window);
+            let start = crate::audio::offset(samples, window);
+            (!text.is_empty()).then(|| Segment {
+                start: seconds(start),
+                end: seconds(start + window.len()),
+                text,
+            })
         })
         .collect()
 }
 
-/// Pieces joined with one space, as the families write a transcript.
-fn joined(pieces: Pieces) -> String {
-    let texts: Vec<String> = pieces.into_iter().map(|(_, _, text)| text).collect();
-    texts.join(" ")
-}
-
-impl Family for parakeet::Parakeet {
-    fn kind(&self) -> &'static str {
-        parakeet::Parakeet::kind(self)
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        parakeet::Parakeet::transcribe(self, samples, options)
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        parakeet::Parakeet::segments(self, samples, options)
-    }
-    fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
-        parakeet::Parakeet::set_dictionary(self, terms, weights)
-    }
-}
-
-impl Family for whisper::Whisper {
-    fn kind(&self) -> &'static str {
-        "whisper"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        whisper::Whisper::set_dictionary(self, terms)
-    }
-}
-
-impl Family for moonshine::Moonshine {
-    fn kind(&self) -> &'static str {
-        "moonshine"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
-        moonshine::Moonshine::set_dictionary(self, terms, weights)
-    }
-}
-
-impl Family for canary::Canary {
-    fn kind(&self) -> &'static str {
-        "canary"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
-        canary::Canary::set_dictionary(self, terms, weights)
-    }
-}
-
-impl Family for wav2vec2::Wav2Vec2 {
-    fn kind(&self) -> &'static str {
-        "wav2vec2"
-    }
-    fn transcribe(&self, samples: &[f32], _: &Options) -> String {
-        joined(self.pieces(samples))
-    }
-    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples))
-    }
-    /// Characters with no decoder to steer: no term can be favored.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for canary_qwen::CanaryQwen {
-    fn kind(&self) -> &'static str {
-        "canary_qwen"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    /// The language model has no term bias yet: every term is skipped.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for fun_asr::FunAsr {
-    fn kind(&self) -> &'static str {
-        "fun_asr_nano"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    /// The hotword prompt is not wired yet: every term is skipped.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for granite_speech::GraniteSpeech {
-    fn kind(&self) -> &'static str {
-        "granite_speech"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    /// The keyword prompt is not wired yet: every term is skipped.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for voxtral::Voxtral {
-    fn kind(&self) -> &'static str {
-        "voxtral"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    /// The language model has no term bias yet: every term is skipped.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for voxtral_realtime::VoxtralRealtime {
-    fn kind(&self) -> &'static str {
-        "voxtral_realtime"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    /// The language model has no term bias yet: every term is skipped.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for moss::Moss {
-    fn kind(&self) -> &'static str {
-        "moss"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    /// The hotword prompt is not wired yet: every term is skipped.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for granite_nar::GraniteNar {
-    fn kind(&self) -> &'static str {
-        "granite_speech_nar"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    /// A one-pass editor with no term bias: every term is skipped.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for granite_ctc::GraniteCtc {
-    fn kind(&self) -> &'static str {
-        "granite_ctc"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    /// A CTC head with no decoder to steer: no term can be favored.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for sensevoice::SenseVoice {
-    fn kind(&self) -> &'static str {
-        "sensevoice"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    /// A CTC head with no decoder to steer: no term can be favored.
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        terms.to_vec()
-    }
-}
-
-impl Family for qwen3_asr::Qwen3Asr {
-    fn kind(&self) -> &'static str {
-        "qwen3_asr"
-    }
-    fn transcribe(&self, samples: &[f32], options: &Options) -> String {
-        joined(self.pieces(samples, options))
-    }
-    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(self.pieces(samples, options))
-    }
-    fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        qwen3_asr::Qwen3Asr::set_dictionary(self, terms)
-    }
+/// `windowed`, without the windows that hold no speech.
+fn speech_windows(
+    samples: &[f32],
+    max: usize,
+    mut text_of: impl FnMut(&[f32]) -> String,
+) -> Vec<Segment> {
+    windowed(samples, max, |window| {
+        if crate::audio::is_silent(window) {
+            String::new()
+        } else {
+            text_of(window)
+        }
+    })
 }

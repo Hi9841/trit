@@ -3,19 +3,19 @@
 //! SiLU MLP in the decoder. Tensor names follow the Hugging Face
 //! `MoonshineForConditionalGeneration` files.
 
-use crate::audio;
+use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team};
-use crate::models::config::Json;
-use crate::models::files::Files;
-use crate::models::layers::{
+use crate::layers::{
     add_into, argmax, attention, attention_with, conv_columns, linear, stacked, Gelu, HeadMajor,
     Norm, Rotary,
 };
+use crate::models::files::Files;
 use crate::models::parts::beam;
 use crate::models::parts::logit_bias::{self as bias, Bias, BiasWeights};
 use crate::models::parts::moonshine_streaming::{StreamConfig, StreamingEncoder};
+use crate::models::{speech_windows, Family};
 use crate::text::sentencepiece::Tokenizer;
-use crate::{Device, Options, Precision};
+use crate::{Device, Options, Precision, Segment};
 use parking_lot::RwLock;
 
 /// Most tokens per second of speech that decoding may write, against
@@ -36,7 +36,7 @@ const BEAMS: usize = 5;
 const BEAM_RULES: crate::models::parts::beam::Rules =
     crate::models::parts::beam::Rules::Transformers;
 /// Longest window per pass; the decoder holds 194 positions.
-const WINDOW_SAMPLES: usize = 30 * 16_000;
+const WINDOW_SAMPLES: usize = 30 * crate::SAMPLE_RATE as usize;
 
 struct Config {
     d: usize,
@@ -152,7 +152,248 @@ pub struct Moonshine {
 }
 
 impl Moonshine {
-    pub fn load(
+    /// Encoder output, `frames x d`.
+    fn encode(&self, samples: &[f32]) -> (Buf, usize) {
+        let (conv1, group_norm, conv2, conv3, layers, norm) = match &self.encoder {
+            Encoder::Streaming(stream) => return stream.encode(samples),
+            Encoder::Conv(stem) => (
+                &stem.conv1,
+                &stem.group_norm,
+                &stem.conv2,
+                &stem.conv3,
+                &stem.layers,
+                &stem.norm,
+            ),
+        };
+        let c = &self.config;
+        let d = c.d;
+        let l1 = (samples.len() - 127) / 64 + 1;
+        let cols = conv_columns(samples, (samples.len(), 1), (127, 64, 0), l1);
+        let mut h = conv1.forward(&cols, l1);
+        activation::tanh(&mut h);
+        // Group norm with one group: statistics over every channel and frame.
+        let n = h.len() as f32;
+        let mean = h.iter().sum::<f32>() / n;
+        let var = h.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
+        let inv = 1.0 / (var + 1e-5).sqrt();
+        let (weight, bias) = group_norm;
+        team::chunks_mut(&mut h, d, |_, row| {
+            for ((v, w), b) in row.iter_mut().zip(weight).zip(bias) {
+                *v = (*v - mean) * inv * w + b;
+            }
+        });
+        let l2 = (l1 - 7) / 3 + 1;
+        let mut h = conv2.forward(&conv_columns(&h, (l1, d), (7, 3, 0), l2), l2);
+        // The conv stem always uses the exact form (`F.gelu`).
+        Gelu::Exact.apply(&mut h, 2 * d);
+        let frames = (l2 - 3) / 2 + 1;
+        let mut x = conv3.forward(&conv_columns(&h, (l2, 2 * d), (3, 2, 0), frames), frames);
+        Gelu::Exact.apply(&mut x, d);
+        for layer in layers {
+            let normed = layer.norm_attn.apply(&x, d);
+            let mut qkv = layer.qkv.forward(&normed, frames);
+            self.rotary
+                .apply(&mut qkv, (frames, 3 * d), (c.heads, d / c.heads), 0);
+            self.rotary
+                .apply(&mut qkv[d..], (frames, 3 * d), (c.heads, d / c.heads), 0);
+            let att = attention(
+                (&qkv, 3 * d),
+                (&qkv[d..], 3 * d),
+                (&qkv[2 * d..], 3 * d),
+                (frames, frames),
+                (d, c.heads, c.heads),
+                false,
+            );
+            add_into(&mut x, &layer.out.forward(&att, frames));
+            let normed = layer.norm_mlp.apply(&x, d);
+            let mut hidden = layer.fc1.forward(&normed, frames);
+            c.gelu.apply(&mut hidden, c.ffn);
+            add_into(&mut x, &layer.fc2.forward(&hidden, frames));
+        }
+        (norm.apply(&x, d), frames)
+    }
+
+    fn generate(
+        &self,
+        (encoded, frames): &(Buf, usize),
+        limit: usize,
+        beam: usize,
+        dictionary: Option<&Bias>,
+    ) -> Vec<usize> {
+        let c = &self.config;
+        let d = c.d;
+        let cross: Vec<HeadMajor> = self
+            .decoder
+            .iter()
+            .map(|layer| {
+                let kv = layer.cross_kv.forward(encoded, *frames);
+                HeadMajor::new(
+                    (&kv, 2 * d),
+                    (&kv[d..], 2 * d),
+                    *frames,
+                    (d / c.heads, c.heads),
+                )
+            })
+            .collect();
+        let mut cache = Cache {
+            keys: vec![Vec::with_capacity(limit * d); c.decoder_layers],
+            values: vec![Vec::with_capacity(limit * d); c.decoder_layers],
+            position: 0,
+        };
+        let mut logits = self.step(&cross, &mut cache, c.bos);
+        // The dictionary works on greedy decoding; with one, decode greedy.
+        if beam > 1 && dictionary.is_none() {
+            let step =
+                |caches: &mut [Cache], tokens: &[usize]| self.step_beams(&cross, caches, tokens);
+            return beam::search(
+                (beam, BEAM_RULES),
+                (cache, logits),
+                (limit, c.eos),
+                |_, _| {},
+                step,
+            )
+            .tokens;
+        }
+        let mut ids = Vec::new();
+        let mut run = dictionary.map(bias::Run::new);
+        loop {
+            let token = match &mut run {
+                Some(run) => run.pick(&mut logits),
+                None => argmax(&logits),
+            };
+            if token == c.eos {
+                break;
+            }
+            match &mut run {
+                Some(run) => run.push(token),
+                None => ids.push(token),
+            }
+            if run.as_ref().map_or(ids.len(), bias::Run::len) == limit {
+                break;
+            }
+            logits = self.step(&cross, &mut cache, token);
+        }
+        run.map_or(ids, bias::Run::finish)
+    }
+
+    fn step_beams(&self, cross: &[HeadMajor], caches: &mut [Cache], tokens: &[usize]) -> Vec<Buf> {
+        let c = &self.config;
+        let (d, m) = (c.d, tokens.len());
+        let mut x = Buf::scratch(m * d);
+        for (row, &token) in x.chunks_exact_mut(d).zip(tokens) {
+            self.embed.row(token, row);
+        }
+        for (l, layer) in self.decoder.iter().enumerate() {
+            let normed = layer.norm_self.apply(&x, d);
+            let mut qkv = layer.self_qkv.forward(&normed, m);
+            let mut att = Buf::scratch(m * d);
+            for ((row, out), cache) in qkv
+                .chunks_exact_mut(3 * d)
+                .zip(att.chunks_exact_mut(d))
+                .zip(caches.iter_mut())
+            {
+                let position = cache.position;
+                self.rotary
+                    .apply(row, (1, 3 * d), (c.heads, d / c.heads), position);
+                self.rotary
+                    .apply(&mut row[d..], (1, 3 * d), (c.heads, d / c.heads), position);
+                cache.keys[l].extend_from_slice(&row[d..2 * d]);
+                cache.values[l].extend_from_slice(&row[2 * d..]);
+                out.copy_from_slice(&attention(
+                    (&row[..d], d),
+                    (&cache.keys[l], d),
+                    (&cache.values[l], d),
+                    (1, position + 1),
+                    (d, c.heads, c.heads),
+                    false,
+                ));
+            }
+            add_into(&mut x, &layer.self_out.forward(&att, m));
+            let normed = layer.norm_cross.apply(&x, d);
+            let q = layer.cross_q.forward(&normed, m);
+            let att = attention_with((&q, d), &cross[l], m, (d, c.heads), false);
+            add_into(&mut x, &layer.cross_out.forward(&att, m));
+            let normed = layer.norm_mlp.apply(&x, d);
+            let mut wide = layer.fc1.forward(&normed, m);
+            let mut gated = Buf::scratch(m * c.ffn);
+            for (row, out) in wide
+                .chunks_exact_mut(2 * c.ffn)
+                .zip(gated.chunks_exact_mut(c.ffn))
+            {
+                let (value, gate) = row.split_at_mut(c.ffn);
+                activation::silu(gate);
+                for ((o, v), g) in out.iter_mut().zip(value.iter()).zip(gate.iter()) {
+                    *o = v * g;
+                }
+            }
+            add_into(&mut x, &layer.fc2.forward(&gated, m));
+        }
+        caches.iter_mut().for_each(|cache| cache.position += 1);
+        let normed = self.decoder_norm.apply(&x, d);
+        let logits = self
+            .head
+            .as_ref()
+            .unwrap_or(&self.embed)
+            .forward(&normed, m);
+        logits
+            .chunks_exact(c.vocab)
+            .map(|row| {
+                let mut out = Buf::scratch(c.vocab);
+                out.copy_from_slice(row);
+                out
+            })
+            .collect()
+    }
+
+    fn step(&self, cross: &[HeadMajor], cache: &mut Cache, token: usize) -> Buf {
+        let c = &self.config;
+        let d = c.d;
+        let position = cache.position;
+        let mut x = vec![0.0; d];
+        self.embed.row(token, &mut x);
+        for (l, layer) in self.decoder.iter().enumerate() {
+            let normed = layer.norm_self.apply(&x, d);
+            let mut qkv = layer.self_qkv.forward(&normed, 1);
+            self.rotary
+                .apply(&mut qkv, (1, 3 * d), (c.heads, d / c.heads), position);
+            self.rotary
+                .apply(&mut qkv[d..], (1, 3 * d), (c.heads, d / c.heads), position);
+            cache.keys[l].extend_from_slice(&qkv[d..2 * d]);
+            cache.values[l].extend_from_slice(&qkv[2 * d..]);
+            let seen = position + 1;
+            let att = attention(
+                (&qkv[..d], d),
+                (&cache.keys[l], d),
+                (&cache.values[l], d),
+                (1, seen),
+                (d, c.heads, c.heads),
+                false,
+            );
+            add_into(&mut x, &layer.self_out.forward(&att, 1));
+            let normed = layer.norm_cross.apply(&x, d);
+            let q = layer.cross_q.forward(&normed, 1);
+            let att = attention_with((&q, d), &cross[l], 1, (d, c.heads), false);
+            add_into(&mut x, &layer.cross_out.forward(&att, 1));
+            let normed = layer.norm_mlp.apply(&x, d);
+            let mut wide = layer.fc1.forward(&normed, 1);
+            let (value, gate) = wide.split_at_mut(c.ffn);
+            activation::silu(gate);
+            for (v, g) in value.iter_mut().zip(gate.iter()) {
+                *v *= g;
+            }
+            add_into(&mut x, &layer.fc2.forward(value, 1));
+        }
+        cache.position += 1;
+        let normed = self.decoder_norm.apply(&x, d);
+        self.head
+            .as_ref()
+            .unwrap_or(&self.embed)
+            .forward(&normed, 1)
+    }
+}
+
+impl Family for Moonshine {
+    fn load(
         files: &Files,
         config: &Json,
         precision: Precision,
@@ -257,287 +498,31 @@ impl Moonshine {
     /// Moonshine is English only; `options.language` changes nothing.
     /// Terms to favor while decoding; with terms set, decoding is greedy (the
     /// bonuses follow one sequence). See `parakeet::bias`.
-    pub fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
+    fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
         let (bias, skipped) = bias::build(&self.tokenizer, terms, weights);
         *self.dictionary.write() = bias;
         skipped
     }
 
-    /// The text of each window that holds speech: `(first sample, samples, text)`.
-    pub fn pieces(&self, samples: &[f32], options: &Options) -> Vec<(usize, usize, String)> {
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         let dictionary = self.dictionary.read();
-        let mut pieces = Vec::new();
-        for window in audio::windows(samples, WINDOW_SAMPLES) {
+        speech_windows(samples, WINDOW_SAMPLES, |window| {
             // The encoder needs at least one output frame.
             let least = match &self.encoder {
                 Encoder::Conv(_) => 127 + 64 * (6 + 2 * 3),
                 Encoder::Streaming(stream) => stream.min_samples(),
             };
-            if window.len() < least || audio::is_silent(window) {
-                continue;
+            if window.len() < least {
+                return String::new();
             }
             let encoded = self.encode(window);
-            let limit = ((window.len() as f32 / 16_000.0 * self.config.tokens_per_second) as usize
+            let limit = ((window.len() as f32 / crate::SAMPLE_RATE as f32
+                * self.config.tokens_per_second) as usize
                 + 4)
             .min(self.config.max_tokens);
             let ids = self.generate(&encoded, limit, options.beams(BEAMS), dictionary.as_ref());
-            let piece = self.tokenizer.decode(&ids);
-            let piece = piece.trim();
-            if !piece.is_empty() {
-                pieces.push((
-                    audio::offset(samples, window),
-                    window.len(),
-                    piece.to_string(),
-                ));
-            }
-        }
-        pieces
-    }
-
-    /// Encoder output, `frames x d`.
-    fn encode(&self, samples: &[f32]) -> (Buf, usize) {
-        let (conv1, group_norm, conv2, conv3, layers, norm) = match &self.encoder {
-            Encoder::Streaming(stream) => return stream.encode(samples),
-            Encoder::Conv(stem) => (
-                &stem.conv1,
-                &stem.group_norm,
-                &stem.conv2,
-                &stem.conv3,
-                &stem.layers,
-                &stem.norm,
-            ),
-        };
-        let c = &self.config;
-        let d = c.d;
-        let l1 = (samples.len() - 127) / 64 + 1;
-        let cols = conv_columns(samples, (samples.len(), 1), (127, 64, 0), l1);
-        let mut h = conv1.forward(&cols, l1);
-        activation::tanh(&mut h);
-        // Group norm with one group: statistics over every channel and frame.
-        let n = h.len() as f32;
-        let mean = h.iter().sum::<f32>() / n;
-        let var = h.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
-        let inv = 1.0 / (var + 1e-5).sqrt();
-        let (weight, bias) = group_norm;
-        team::chunks_mut(&mut h, d, |_, row| {
-            for ((v, w), b) in row.iter_mut().zip(weight).zip(bias) {
-                *v = (*v - mean) * inv * w + b;
-            }
-        });
-        let l2 = (l1 - 7) / 3 + 1;
-        let mut h = conv2.forward(&conv_columns(&h, (l1, d), (7, 3, 0), l2), l2);
-        // The conv stem always uses the exact form (`F.gelu`).
-        Gelu::Exact.apply(&mut h, 2 * d);
-        let frames = (l2 - 3) / 2 + 1;
-        let mut x = conv3.forward(&conv_columns(&h, (l2, 2 * d), (3, 2, 0), frames), frames);
-        Gelu::Exact.apply(&mut x, d);
-        for layer in layers {
-            let normed = layer.norm_attn.apply(&x, d);
-            let mut qkv = layer.qkv.forward(&normed, frames);
-            self.rotary
-                .apply(&mut qkv, (frames, 3 * d), (c.heads, d / c.heads), 0);
-            self.rotary
-                .apply(&mut qkv[d..], (frames, 3 * d), (c.heads, d / c.heads), 0);
-            let att = attention(
-                (&qkv, 3 * d),
-                (&qkv[d..], 3 * d),
-                (&qkv[2 * d..], 3 * d),
-                (frames, frames),
-                (d, c.heads, c.heads),
-                false,
-            );
-            add_into(&mut x, &layer.out.forward(&att, frames));
-            let normed = layer.norm_mlp.apply(&x, d);
-            let mut hidden = layer.fc1.forward(&normed, frames);
-            c.gelu.apply(&mut hidden, c.ffn);
-            add_into(&mut x, &layer.fc2.forward(&hidden, frames));
-        }
-        (norm.apply(&x, d), frames)
-    }
-
-    /// Tokens from the start token until end of text or `limit`: greedy
-    /// (with the dictionary, when there is one), or `beam` beams.
-    fn generate(
-        &self,
-        (encoded, frames): &(Buf, usize),
-        limit: usize,
-        beam: usize,
-        dictionary: Option<&Bias>,
-    ) -> Vec<usize> {
-        let c = &self.config;
-        let d = c.d;
-        // Cross-attention keys and values, laid out per head once per window.
-        let cross: Vec<HeadMajor> = self
-            .decoder
-            .iter()
-            .map(|layer| {
-                let kv = layer.cross_kv.forward(encoded, *frames);
-                HeadMajor::new(
-                    (&kv, 2 * d),
-                    (&kv[d..], 2 * d),
-                    *frames,
-                    (d / c.heads, c.heads),
-                )
-            })
-            .collect();
-        let mut cache = Cache {
-            keys: vec![Vec::with_capacity(limit * d); c.decoder_layers],
-            values: vec![Vec::with_capacity(limit * d); c.decoder_layers],
-            position: 0,
-        };
-        let mut logits = self.step(&cross, &mut cache, c.bos);
-        // The dictionary works on greedy decoding; with one, decode greedy.
-        if beam > 1 && dictionary.is_none() {
-            let step =
-                |caches: &mut [Cache], tokens: &[usize]| self.step_beams(&cross, caches, tokens);
-            return beam::search(
-                (beam, BEAM_RULES),
-                (cache, logits),
-                (limit, c.eos),
-                |_, _| {},
-                step,
-            )
-            .tokens;
-        }
-        let mut ids = Vec::new();
-        let mut run = dictionary.map(bias::Run::new);
-        loop {
-            let token = match &mut run {
-                Some(run) => run.pick(&mut logits),
-                None => argmax(&logits),
-            };
-            if token == c.eos {
-                break;
-            }
-            match &mut run {
-                Some(run) => run.push(token),
-                None => ids.push(token),
-            }
-            if run.as_ref().map_or(ids.len(), bias::Run::len) == limit {
-                break;
-            }
-            logits = self.step(&cross, &mut cache, token);
-        }
-        run.map_or(ids, bias::Run::finish)
-    }
-
-    /// Feeds `tokens[i]` to `caches[i]` (beams of one window) as one batch,
-    /// so each layer's weights are read once for all beams. Returns the next
-    /// logits of each.
-    fn step_beams(&self, cross: &[HeadMajor], caches: &mut [Cache], tokens: &[usize]) -> Vec<Buf> {
-        let c = &self.config;
-        let (d, m) = (c.d, tokens.len());
-        let mut x = Buf::scratch(m * d);
-        for (row, &token) in x.chunks_exact_mut(d).zip(tokens) {
-            self.embed.row(token, row);
-        }
-        for (l, layer) in self.decoder.iter().enumerate() {
-            let normed = layer.norm_self.apply(&x, d);
-            let mut qkv = layer.self_qkv.forward(&normed, m);
-            let mut att = Buf::scratch(m * d);
-            for ((row, out), cache) in qkv
-                .chunks_exact_mut(3 * d)
-                .zip(att.chunks_exact_mut(d))
-                .zip(caches.iter_mut())
-            {
-                let position = cache.position;
-                self.rotary
-                    .apply(row, (1, 3 * d), (c.heads, d / c.heads), position);
-                self.rotary
-                    .apply(&mut row[d..], (1, 3 * d), (c.heads, d / c.heads), position);
-                cache.keys[l].extend_from_slice(&row[d..2 * d]);
-                cache.values[l].extend_from_slice(&row[2 * d..]);
-                out.copy_from_slice(&attention(
-                    (&row[..d], d),
-                    (&cache.keys[l], d),
-                    (&cache.values[l], d),
-                    (1, position + 1),
-                    (d, c.heads, c.heads),
-                    false,
-                ));
-            }
-            add_into(&mut x, &layer.self_out.forward(&att, m));
-            let normed = layer.norm_cross.apply(&x, d);
-            let q = layer.cross_q.forward(&normed, m);
-            let att = attention_with((&q, d), &cross[l], m, (d, c.heads), false);
-            add_into(&mut x, &layer.cross_out.forward(&att, m));
-            let normed = layer.norm_mlp.apply(&x, d);
-            let mut wide = layer.fc1.forward(&normed, m);
-            let mut gated = Buf::scratch(m * c.ffn);
-            for (row, out) in wide
-                .chunks_exact_mut(2 * c.ffn)
-                .zip(gated.chunks_exact_mut(c.ffn))
-            {
-                let (value, gate) = row.split_at_mut(c.ffn);
-                activation::silu(gate);
-                for ((o, v), g) in out.iter_mut().zip(value.iter()).zip(gate.iter()) {
-                    *o = v * g;
-                }
-            }
-            add_into(&mut x, &layer.fc2.forward(&gated, m));
-        }
-        caches.iter_mut().for_each(|cache| cache.position += 1);
-        let normed = self.decoder_norm.apply(&x, d);
-        let logits = self
-            .head
-            .as_ref()
-            .unwrap_or(&self.embed)
-            .forward(&normed, m);
-        logits
-            .chunks_exact(c.vocab)
-            .map(|row| {
-                let mut out = Buf::scratch(c.vocab);
-                out.copy_from_slice(row);
-                out
-            })
-            .collect()
-    }
-
-    /// Feeds one token and returns the logits for the next one.
-    fn step(&self, cross: &[HeadMajor], cache: &mut Cache, token: usize) -> Buf {
-        let c = &self.config;
-        let d = c.d;
-        let position = cache.position;
-        let mut x = vec![0.0; d];
-        self.embed.row(token, &mut x);
-        for (l, layer) in self.decoder.iter().enumerate() {
-            let normed = layer.norm_self.apply(&x, d);
-            let mut qkv = layer.self_qkv.forward(&normed, 1);
-            self.rotary
-                .apply(&mut qkv, (1, 3 * d), (c.heads, d / c.heads), position);
-            self.rotary
-                .apply(&mut qkv[d..], (1, 3 * d), (c.heads, d / c.heads), position);
-            cache.keys[l].extend_from_slice(&qkv[d..2 * d]);
-            cache.values[l].extend_from_slice(&qkv[2 * d..]);
-            let seen = position + 1;
-            let att = attention(
-                (&qkv[..d], d),
-                (&cache.keys[l], d),
-                (&cache.values[l], d),
-                (1, seen),
-                (d, c.heads, c.heads),
-                false,
-            );
-            add_into(&mut x, &layer.self_out.forward(&att, 1));
-            let normed = layer.norm_cross.apply(&x, d);
-            let q = layer.cross_q.forward(&normed, 1);
-            let att = attention_with((&q, d), &cross[l], 1, (d, c.heads), false);
-            add_into(&mut x, &layer.cross_out.forward(&att, 1));
-            let normed = layer.norm_mlp.apply(&x, d);
-            let mut wide = layer.fc1.forward(&normed, 1);
-            let (value, gate) = wide.split_at_mut(c.ffn);
-            activation::silu(gate);
-            for (v, g) in value.iter_mut().zip(gate.iter()) {
-                *v *= g;
-            }
-            add_into(&mut x, &layer.fc2.forward(value, 1));
-        }
-        cache.position += 1;
-        let normed = self.decoder_norm.apply(&x, d);
-        self.head
-            .as_ref()
-            .unwrap_or(&self.embed)
-            .forward(&normed, 1)
+            self.tokenizer.decode(&ids).trim().to_string()
+        })
     }
 }
 

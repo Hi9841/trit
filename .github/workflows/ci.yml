@@ -34,6 +34,20 @@ jobs:
             echo "error: a word list ships in the speech-to-text engine; it decodes with the model alone"
             exit 1
           fi
+      - name: C ABI
+        shell: bash
+        # include/trit.h and the bindings are written by hand. The header
+        # names every export; a binding names only exports.
+        run: |
+          exports=$(grep -A1 'no_mangle' ffi/src/lib.rs | grep -o 'trit_[a-z0-9_]*' | sort -u)
+          header=$(grep -o '\btrit_[a-z0-9_]*(' include/trit.h | tr -d '(' | sort -u)
+          bindings=$(grep -ohw 'trit_[a-z0-9_]*' bindings/python/trit.py bindings/csharp/Trit.cs bindings/node/trit.mjs | grep -v '^trit_ffi$' | sort -u)
+          if [ "$exports" != "$header" ] || [ -n "$(comm -13 <(echo "$exports") <(echo "$bindings"))" ]; then
+            diff <(echo "$exports") <(echo "$header")
+            comm -13 <(echo "$exports") <(echo "$bindings")
+            echo "error: include/trit.h or a binding does not match ffi/src/lib.rs"
+            exit 1
+          fi
       - name: Format
         run: cargo fmt --all -- --check
       - name: Build

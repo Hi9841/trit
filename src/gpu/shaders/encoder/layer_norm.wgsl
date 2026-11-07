@@ -1,7 +1,8 @@
 // Row layer norm for the Parakeet encoder.
-// y = (x - mean) / sqrt(var + 1e-5) * weight + bias.
+// y = (x - mean) / sqrt(var + eps) * weight + bias.
 // mean = sum(x) / d. var = sum((x - mean)^2) / d. The divisor is d.
-// Trit: trit/src/models/transformer.rs Norm::apply and normalize_row.
+// Trit: src/models/layers.rs Norm::apply and normalize_row.
+// eps is the FastConformer norm epsilon.
 //
 // Do not bind y to the same buffer as x.
 //
@@ -10,20 +11,19 @@
 //   binding 1  storage read        weight  [d]
 //   binding 2  storage read        bias    [d]
 //   binding 3  storage read_write  y       [rows, d]
-//   binding 4  uniform             Params  { rows, d, pad, pad }
+//   binding 4  uniform             Params  { rows, d, eps, pad }
 //
 // Entry point: layer_norm
 // Workgroup: (256, 1, 1)
 // Dispatch: (rows, 1, 1)
 // One workgroup reads one row and writes one row.
 
-const EPS: f32 = 0.00001;
 const WG: u32 = 256u;
 
 struct Params {
     rows: u32,
     d: u32,
-    _pad0: u32,
+    eps: f32,
     _pad1: u32,
 }
 
@@ -78,7 +78,7 @@ fn layer_norm(
         }
     }
     scratch[lane] = partial;
-    let inv = 1.0 / sqrt(reduce_sum(lane) / f32(p.d) + EPS);
+    let inv = 1.0 / sqrt(reduce_sum(lane) / f32(p.d) + p.eps);
 
     if (live) {
         let base = row * p.d;

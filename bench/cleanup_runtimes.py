@@ -30,6 +30,24 @@ SYSTEM = ("You are a text normalizer for speech-to-text transcripts. The input b
           "those settings and output only the cleaned text.")
 CONTROL = "[Styling: semi-formal] [Structure: prose] [Context: general]"
 
+
+def check_copies():
+    """The prompt and the token budget here copy src/cleanup.rs. Stop when that file changed."""
+    source = (ROOT / "src" / "cleanup.rs").read_text(encoding="utf-8")
+    source = re.sub(r"\\\r?\n\s*", "", source)
+    copies = (
+        SYSTEM,
+        "<|im_start|>system\\n{SYSTEM}<|im_end|>\\n<|im_start|>user\\n",
+        "<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n",
+        "(transcript.len() / 2 + 64).min(1024)",
+    )
+    for copy in copies:
+        if copy not in source:
+            sys.exit(f"src/cleanup.rs no longer has: {copy}")
+
+
+check_copies()
+
 # The examples of the model card, with its outputs.
 CARD = [
     ("so um i need to like send the the report by uh friday no wait make that thursday",

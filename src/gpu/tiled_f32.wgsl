@@ -69,16 +69,16 @@ fn store_one(row: u32, col: u32, value: f32) {
         return;
     }
     var v = value;
-    if ((p.flags & 1u) != 0u) {
+    if ((p.flags & FLAG_BIAS) != 0u) {
         v = v + bias[col];
     }
-    if ((p.flags & 2u) != 0u) {
+    if ((p.flags & FLAG_RELU) != 0u) {
         v = max(v, 0.0);
     }
     y[row * p.n + col] = v;
 }
 
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(TILE, TILE, 1)
 fn gemm(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(local_invocation_index) linear: u32,

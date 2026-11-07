@@ -17,7 +17,6 @@ impl Json {
         Self(value)
     }
 
-    /// The config as the text of a `config.json`.
     pub fn to_text(&self) -> String {
         self.0.to_string()
     }
@@ -28,7 +27,6 @@ impl Json {
         path.split('.').fold(&self.0, |value, key| &value[key])
     }
 
-    /// A whole number that the model needs.
     pub fn num(&self, path: &str) -> Result<usize, String> {
         self.get(path)
             .as_u64()

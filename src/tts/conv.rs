@@ -29,7 +29,7 @@ fn block_frames(frames: usize) -> usize {
     per_task.div_ceil(6).saturating_mul(6).clamp(6, MAX_BLOCK)
 }
 
-/// `max(v, slope * v)`: leaky ReLU for `0 <= slope <= 1`.
+/// Leaky ReLU for `0 <= slope <= 1`.
 #[inline(always)]
 fn leaky(v: f32, slope: f32) -> f32 {
     v.max(v * slope)
@@ -144,7 +144,6 @@ impl Conv1d {
         })
     }
 
-    /// The output frames for `frames` input frames.
     pub fn out_frames(&self, frames: usize) -> usize {
         (frames + 2 * self.pad).saturating_sub(self.dilation * (self.kernel - 1) + 1) / self.stride
             + 1

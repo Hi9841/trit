@@ -46,7 +46,6 @@ enum Op {
     Gelu,
 }
 
-/// `v = e^v`.
 pub fn exp(values: &mut [f32]) {
     apply(values, Op::Exp);
 }

@@ -3,7 +3,9 @@
 //! audio encoder (`audio_tower`), the projector, and the Ministral language
 //! model with its delay-conditioned `ada` layers (`language_model`).
 
+use super::blocks::{llm_block, LlmShape};
 use super::{qwen3_asr, Gguf, Name};
+use crate::models::parts::causal_lm::CausalLm;
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
@@ -20,6 +22,23 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     if text("stt.frontend.type") != "mel" || text("stt.frontend.normalize") != "global" {
         return Err("its audio features differ from Voxtral Realtime's (fixed peak)".into());
     }
+    let mut llm = llm_block(LlmShape {
+        model_type: "mistral",
+        hidden: v("decoder.hidden_size")?,
+        intermediate: v("decoder.intermediate_size")?,
+        layers: v("decoder.n_layers")?,
+        heads: v("decoder.n_heads")?,
+        kv_heads: v("decoder.n_kv_heads")?,
+        head_dim: v("decoder.head_dim")?,
+        vocab: v("decoder.vocab_size")?,
+        rms_norm_eps: vf("decoder.rms_norm_eps"),
+        rope_theta: vf("decoder.rope_theta"),
+        tie: g
+            .get("stt.voxtral_realtime.decoder.tie_word_embeddings")
+            .as_bool()
+            .unwrap_or(true),
+    });
+    llm["ada_hidden"] = json!(v("time.ada_hidden")?);
     Ok(json!({
         "model_type": "voxtral_realtime",
         "bos_token_id": g.num("tokenizer.ggml.bos_token_id")?,
@@ -40,20 +59,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "downsample_factor": v("projector.downsample_factor")?,
             "audio_length_per_tok": v("projector.audio_length_per_tok")?,
         },
-        "llm_config": {
-            "model_type": "mistral",
-            "hidden_size": v("decoder.hidden_size")?,
-            "intermediate_size": v("decoder.intermediate_size")?,
-            "num_hidden_layers": v("decoder.n_layers")?,
-            "num_attention_heads": v("decoder.n_heads")?,
-            "num_key_value_heads": v("decoder.n_kv_heads")?,
-            "head_dim": v("decoder.head_dim")?,
-            "vocab_size": v("decoder.vocab_size")?,
-            "rms_norm_eps": vf("decoder.rms_norm_eps"),
-            "rope_theta": vf("decoder.rope_theta"),
-            "tie_word_embeddings": g.get("stt.voxtral_realtime.decoder.tie_word_embeddings").as_bool().unwrap_or(true),
-            "ada_hidden": v("time.ada_hidden")?,
-        },
+        "llm_config": llm,
         "feature_extractor": {
             "n_fft": g.num("stt.frontend.n_fft")?,
             "win_length": g.num("stt.frontend.win_length")?,
@@ -76,23 +82,22 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("enc.conv.1.", "audio_tower.conv2."),
         ("enc.final_norm.", "audio_tower.norm."),
     ];
-    for (from, to) in TOP {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(Name::To(format!("{to}{rest}")));
-        }
+    if let Some(mapped) = super::map_suffix(name, &TOP) {
+        return Some(Name::To(mapped));
     }
     if let Some((layer, part)) = name
         .strip_prefix("dec.blocks.")
         .and_then(|rest| rest.split_once('.'))
     {
         if let Some(rest) = part.strip_prefix("ada.") {
-            return Some(Name::To(format!(
-                "language_model.model.layers.{layer}.ada.{rest}"
+            return Some(Name::To(CausalLm::model_tensor(
+                "language_model.",
+                &format!("layers.{layer}.ada.{rest}"),
             )));
         }
     }
     if name.starts_with("dec.") {
-        return qwen3_asr::language_model_name(name, "language_model.model");
+        return qwen3_asr::language_model_name(name, "language_model.");
     }
     let (layer, part) = name.strip_prefix("enc.blocks.")?.split_once('.')?;
     const BLOCK: [(&str, &str); 9] = [
@@ -106,9 +111,6 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("ffn.up.", "mlp.up_proj."),
         ("ffn.down.", "mlp.down_proj."),
     ];
-    let (from, to) = BLOCK.iter().find(|(from, _)| part.starts_with(from))?;
-    Some(Name::To(format!(
-        "audio_tower.layers.{layer}.{to}{}",
-        &part[from.len()..]
-    )))
+    let mapped = super::map_suffix(part, &BLOCK)?;
+    Some(Name::To(format!("audio_tower.layers.{layer}.{mapped}")))
 }

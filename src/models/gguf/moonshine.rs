@@ -109,10 +109,8 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("dec.token_embd.", "model.decoder.embed_tokens."),
         ("dec.final_norm.", "model.decoder.norm."),
     ];
-    for (from, to) in TOP {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(Name::To(format!("{to}{rest}")));
-        }
+    if let Some(mapped) = super::map_suffix(name, &TOP) {
+        return Some(Name::To(mapped));
     }
     // The same GGUF suffix names a different norm in the two stacks.
     const ENCODER: [(&str, &str); 7] = [
@@ -124,7 +122,7 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("norm_ffn.", "post_attention_layernorm."),
         ("ffn.", "mlp."),
     ];
-    const DECODER: [(&str, &str); 11] = [
+    const DECODER: [(&str, &str); 12] = [
         ("norm_self.", "input_layernorm."),
         ("self_attn.q.", "self_attn.q_proj."),
         ("self_attn.k.", "self_attn.k_proj."),
@@ -136,6 +134,7 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("cross_attn.v.", "encoder_attn.v_proj."),
         ("cross_attn.out.", "encoder_attn.o_proj."),
         ("norm_ffn.", "final_layernorm."),
+        ("ffn.", "mlp."),
     ];
     let (side, rest, table): (&str, &str, &[(&str, &str)]) =
         if let Some(rest) = name.strip_prefix("enc.blocks.") {
@@ -144,13 +143,6 @@ pub fn hf_name(name: &str) -> Option<Name> {
             ("decoder", name.strip_prefix("dec.blocks.")?, &DECODER)
         };
     let (layer, part) = rest.split_once('.')?;
-    let (from, to) = table
-        .iter()
-        .copied()
-        .chain([("ffn.", "mlp.")])
-        .find(|(from, _)| part.starts_with(from))?;
-    Some(Name::To(format!(
-        "model.{side}.layers.{layer}.{to}{}",
-        &part[from.len()..]
-    )))
+    let mapped = super::map_suffix(part, table)?;
+    Some(Name::To(format!("model.{side}.layers.{layer}.{mapped}")))
 }

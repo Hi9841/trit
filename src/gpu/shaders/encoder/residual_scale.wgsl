@@ -1,6 +1,6 @@
 // x = x + scale * y, element by element.
-// Trit: transformer.rs add_scaled, called from Norm::residual.
-// scale is 0.5 for both feed-forward residuals and 1.0 for attention and conv.
+// Trit: src/models/layers.rs add_scaled, called from Norm::residual.
+// The scale is the FastConformer residual weight for this step.
 //
 // x and y must be different buffers.
 //

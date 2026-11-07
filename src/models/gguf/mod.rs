@@ -4,12 +4,13 @@
 //! file's `general.architecture`, and the tensors take the Hugging Face
 //! names and keep their stored types under `Precision::Auto` (a Q8_0 file
 //! runs as Q8_0). The family loaders then run as for a Hugging Face folder.
-//!
-//! Read: `parakeet` (TDT, RNNT, CTC; full or local attention), `whisper`,
-//! `moonshine`, `canary`, and `qwen3_asr`.
+//! The architectures are the rows of `ARCH`.
 
+use super::package::Package;
 use crate::cpu::tensors::Tensors;
 use crate::{Device, Precision};
+
+pub(crate) mod blocks;
 
 mod canary;
 mod canary_qwen;
@@ -29,35 +30,97 @@ mod voxtral;
 mod voxtral_realtime;
 mod whisper;
 
-/// The architectures Trit reads, by `general.architecture`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Arch {
-    Parakeet,
-    Whisper,
-    Moonshine,
-    Canary,
-    Qwen3Asr,
-    Gigaam,
-    Sensevoice,
-    Medasr,
-    GraniteCtc,
-    CanaryQwen,
-    FunAsr,
-    MoonshineStreaming,
-    GraniteSpeech,
-    Voxtral,
-    Cohere,
-    VoxtralRealtime,
-    Moss,
-    GraniteNar,
-}
-
 /// What a tensor of the file becomes.
 pub(super) enum Name {
     /// The Hugging Face name.
     To(String),
     /// A tensor Trit computes itself (a mel filterbank, a window).
     Skip,
+}
+
+type Build = fn(&Gguf) -> Result<Value, String>;
+
+/// One `general.architecture`: who writes its config, who renames its tensors,
+/// and the files it has besides `config.json` and `tokenizer.json`.
+struct Arch {
+    name: &'static str,
+    config: Build,
+    rename: fn(&str) -> Option<Name>,
+    extra: &'static [(&'static str, Build)],
+}
+
+const fn arch(name: &'static str, config: Build, rename: fn(&str) -> Option<Name>) -> Arch {
+    Arch {
+        name,
+        config,
+        rename,
+        extra: &[],
+    }
+}
+
+const ARCH: &[Arch] = &[
+    arch("parakeet", parakeet::config, parakeet::hf_name),
+    Arch {
+        extra: &[("generation_config.json", whisper::generation)],
+        ..arch("whisper", whisper::config, whisper::hf_name)
+    },
+    arch("moonshine", moonshine::config, moonshine::hf_name),
+    arch("canary", canary::config, canary::hf_name),
+    arch("qwen3_asr", qwen3_asr::config, qwen3_asr::hf_name),
+    arch("gigaam", gigaam::config, gigaam::hf_name),
+    arch("sensevoice", sensevoice::config, sensevoice::hf_name),
+    arch("medasr", medasr::config, medasr::hf_name),
+    arch(
+        "granite_speech5_ctc",
+        granite_ctc::config,
+        granite_ctc::hf_name,
+    ),
+    arch("canary_qwen", canary_qwen::config, canary_qwen::hf_name),
+    arch("funasr_nano", fun_asr::config, fun_asr::hf_name),
+    arch(
+        "moonshine_streaming",
+        moonshine::streaming_config,
+        moonshine::hf_name,
+    ),
+    arch(
+        "granite_speech",
+        granite_speech::config,
+        granite_speech::hf_name,
+    ),
+    arch("voxtral", voxtral::config, voxtral::hf_name),
+    arch("cohere_asr", cohere::config, cohere::hf_name),
+    arch(
+        "voxtral_realtime",
+        voxtral_realtime::config,
+        voxtral_realtime::hf_name,
+    ),
+    arch("moss", moss::config, moss::hf_name),
+    arch(
+        "granite_speech_nar",
+        granite_nar::config,
+        granite_nar::hf_name,
+    ),
+];
+
+/// The first table row whose source prefix `part` has, with that prefix
+/// replaced. A shorter source must come after a longer one (`attn.q` after
+/// `attn.q_norm`).
+pub(super) fn map_suffix(part: &str, table: &[(&str, &str)]) -> Option<String> {
+    let (from, to) = table.iter().find(|(from, _)| part.starts_with(from))?;
+    Some(format!("{to}{}", &part[from.len()..]))
+}
+
+/// Every `from` in `name`, in order. A later row sees the earlier replacements.
+pub(super) fn replace_all(name: &str, table: &[(&str, &str)]) -> String {
+    table
+        .iter()
+        .fold(name.to_string(), |name, (from, to)| name.replace(from, to))
+}
+
+fn arch_names() -> String {
+    let names: Vec<&str> = ARCH.iter().map(|row| row.name).collect();
+    let (last, head) = names.split_last().expect("ARCH has a row");
+    format!("{}, and {last}", head.join(", "))
 }
 use serde_json::{json, Map, Value};
 use std::fs::File;
@@ -78,12 +141,7 @@ pub fn find(dir: &Path) -> Option<PathBuf> {
     if dir.join("config.json").is_file() {
         return None;
     }
-    let mut files = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "gguf"));
-    let first = files.next()?;
-    files.next().is_none().then_some(first)
+    super::package::only_file(dir, "gguf")
 }
 
 pub struct Gguf {
@@ -145,21 +203,11 @@ impl Gguf {
             .ok_or_else(|| fail("the tensor data runs past the end of the file".into()))?;
         let mut tensors = Vec::with_capacity(infos.len());
         for (name, kind, count, offset) in infos {
-            let block = crate::cpu::ggml_quants::BlockType::from_ggml(kind);
-            let (dtype, bytes) = match (kind, block) {
-                (0, _) => ("F32", count.checked_mul(4)),
-                (1, _) => ("F16", count.checked_mul(2)),
-                (8, _) if count % 32 == 0 => ("Q8_0", (count / 32).checked_mul(34)),
-                (30, _) => ("BF16", count.checked_mul(2)),
-                (_, Some((block, name))) if count % block.block().0 as u64 == 0 => {
-                    let (values, size) = block.block();
-                    (name, (count / values as u64).checked_mul(size as u64))
-                }
-                (other, _) => {
-                    return Err(fail(format!(
-                        "tensor {name} has ggml type {other}; Trit reads F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, and Q6_K"
-                    )))
-                }
+            let Some((dtype, bytes)) = crate::cpu::ggml_quants::layout(kind, count) else {
+                return Err(fail(format!(
+                    "tensor {name} has ggml type {kind}; Trit reads {}",
+                    crate::cpu::ggml_quants::type_list()
+                )));
             };
             let span = data.checked_add(offset).and_then(|start| {
                 let end = start.checked_add(bytes?)?;
@@ -177,32 +225,18 @@ impl Gguf {
         })
     }
 
-    fn arch(&self) -> Result<Arch, String> {
-        match self.get("general.architecture").as_str() {
-            Some("parakeet") => Ok(Arch::Parakeet),
-            Some("whisper") => Ok(Arch::Whisper),
-            Some("moonshine") => Ok(Arch::Moonshine),
-            Some("canary") => Ok(Arch::Canary),
-            Some("qwen3_asr") => Ok(Arch::Qwen3Asr),
-            Some("gigaam") => Ok(Arch::Gigaam),
-            Some("sensevoice") => Ok(Arch::Sensevoice),
-            Some("medasr") => Ok(Arch::Medasr),
-            Some("granite_speech5_ctc") => Ok(Arch::GraniteCtc),
-            Some("canary_qwen") => Ok(Arch::CanaryQwen),
-            Some("funasr_nano") => Ok(Arch::FunAsr),
-            Some("moonshine_streaming") => Ok(Arch::MoonshineStreaming),
-            Some("granite_speech") => Ok(Arch::GraniteSpeech),
-            Some("voxtral") => Ok(Arch::Voxtral),
-            Some("cohere_asr") => Ok(Arch::Cohere),
-            Some("voxtral_realtime") => Ok(Arch::VoxtralRealtime),
-            Some("moss") => Ok(Arch::Moss),
-            Some("granite_speech_nar") => Ok(Arch::GraniteNar),
-            other => Err(format!(
-                "{}: GGUF architecture {} is not read; Trit reads parakeet, whisper, moonshine, canary, qwen3_asr, gigaam, sensevoice, medasr, granite_speech5_ctc, canary_qwen, funasr_nano, moonshine_streaming, granite_speech, voxtral, cohere_asr, voxtral_realtime, moss, and granite_speech_nar",
-                self.path.display(),
-                other.unwrap_or("(none)")
-            )),
-        }
+    fn row(&self) -> Result<&Arch, String> {
+        let name = self.get("general.architecture").as_str();
+        ARCH.iter()
+            .find(|row| Some(row.name) == name)
+            .ok_or_else(|| {
+                format!(
+                    "{}: GGUF architecture {} is not read; Trit reads {}",
+                    self.path.display(),
+                    name.unwrap_or("(none)"),
+                    arch_names()
+                )
+            })
     }
 
     pub(super) fn get(&self, key: &str) -> &Value {
@@ -210,9 +244,7 @@ impl Gguf {
     }
 
     pub(super) fn num(&self, key: &str) -> Result<u64, String> {
-        self.get(key)
-            .as_u64()
-            .ok_or_else(|| format!("{} has no {key}", self.path.display()))
+        self.get(key).as_u64().ok_or_else(|| format!("no {key}"))
     }
 
     /// The id of token `text` in `tokenizer.ggml.tokens`.
@@ -222,35 +254,38 @@ impl Gguf {
             .iter()
             .position(|token| token.as_str() == Some(text))
     }
+}
 
-    /// The tensors under their Hugging Face names, in their stored types.
-    pub fn tensors(&self, precision: Precision, device: Device) -> Result<Tensors, String> {
-        let arch = self.arch()?;
+impl Package for Gguf {
+    fn provides(&self, name: &str) -> bool {
+        let Ok(row) = self.row() else {
+            return false;
+        };
+        name == "config.json"
+            || name == "tokenizer.json"
+            || row.extra.iter().any(|(file, _)| *file == name)
+    }
+
+    fn file(&self, name: &str) -> Result<String, String> {
+        let row = self.row()?;
+        let fail = |e: String| format!("{}: {e}", self.path.display());
+        if name == "tokenizer.json" {
+            return self.tokenizer_json();
+        }
+        if name == "config.json" {
+            return (row.config)(self).map(|v| v.to_string()).map_err(fail);
+        }
+        if let Some((_, build)) = row.extra.iter().find(|(file, _)| *file == name) {
+            return build(self).map(|v| v.to_string()).map_err(fail);
+        }
+        Err(format!("{} has no {name}", self.path.display()))
+    }
+
+    fn tensors(&self, precision: Precision, device: Device) -> Result<Tensors, String> {
+        let row = self.row()?;
         let mut renamed = Vec::with_capacity(self.tensors.len());
         for (name, dtype, start, end) in &self.tensors {
-            let to = match arch {
-                // A multitalker bundle's Sortformer diarizer: Trit runs one speaker.
-                Arch::Parakeet if name.starts_with("sortformer.") => Some(Name::Skip),
-                Arch::Parakeet => parakeet::hf_name(name).map(Name::To),
-                Arch::Whisper => whisper::hf_name(name),
-                Arch::Moonshine => moonshine::hf_name(name),
-                Arch::Canary => canary::hf_name(name),
-                Arch::Qwen3Asr => qwen3_asr::hf_name(name),
-                Arch::Gigaam => gigaam::hf_name(name),
-                Arch::Sensevoice => sensevoice::hf_name(name),
-                Arch::Medasr => medasr::hf_name(name),
-                Arch::GraniteCtc => granite_ctc::hf_name(name),
-                Arch::CanaryQwen => canary_qwen::hf_name(name),
-                Arch::FunAsr => fun_asr::hf_name(name),
-                Arch::MoonshineStreaming => moonshine::hf_name(name),
-                Arch::GraniteSpeech => granite_speech::hf_name(name),
-                Arch::Voxtral => voxtral::hf_name(name),
-                Arch::Cohere => cohere::hf_name(name),
-                Arch::VoxtralRealtime => voxtral_realtime::hf_name(name),
-                Arch::Moss => moss::hf_name(name),
-                Arch::GraniteNar => granite_nar::hf_name(name),
-            };
-            match to {
+            match (row.rename)(name) {
                 Some(Name::To(hf)) => renamed.push((hf, dtype.clone(), *start, *end)),
                 Some(Name::Skip) => {}
                 None => {
@@ -263,79 +298,9 @@ impl Gguf {
         }
         Tensors::open_gguf(&self.path, renamed, precision, device)
     }
+}
 
-    /// The files a Hugging Face folder of this model holds.
-    pub fn provides(&self, name: &str) -> bool {
-        matches!(
-            (self.arch(), name),
-            (Ok(_), "config.json" | "tokenizer.json")
-                | (Ok(Arch::Whisper), "generation_config.json")
-        )
-    }
-
-    /// File `name` of a Hugging Face folder of this model, from the metadata.
-    pub fn file(&self, name: &str) -> Result<String, String> {
-        let arch = self.arch()?;
-        let fail = |e: String| format!("{}: {e}", self.path.display());
-        match (arch, name) {
-            (Arch::Parakeet, "config.json") => parakeet::config(self).map(|v| v.to_string()),
-            (Arch::Whisper, "config.json") => {
-                whisper::config(self).map(|v| v.to_string()).map_err(fail)
-            }
-            (Arch::Moonshine, "config.json") => {
-                moonshine::config(self).map(|v| v.to_string()).map_err(fail)
-            }
-            (Arch::Canary, "config.json") => {
-                canary::config(self).map(|v| v.to_string()).map_err(fail)
-            }
-            (Arch::GraniteNar, "config.json") => granite_nar::config(self)
-                .map(|v| v.to_string())
-                .map_err(fail),
-            (Arch::Moss, "config.json") => moss::config(self).map(|v| v.to_string()).map_err(fail),
-            (Arch::VoxtralRealtime, "config.json") => voxtral_realtime::config(self)
-                .map(|v| v.to_string())
-                .map_err(fail),
-            (Arch::Cohere, "config.json") => {
-                cohere::config(self).map(|v| v.to_string()).map_err(fail)
-            }
-            (Arch::Voxtral, "config.json") => {
-                voxtral::config(self).map(|v| v.to_string()).map_err(fail)
-            }
-            (Arch::GraniteSpeech, "config.json") => granite_speech::config(self)
-                .map(|v| v.to_string())
-                .map_err(fail),
-            (Arch::MoonshineStreaming, "config.json") => moonshine::streaming_config(self)
-                .map(|v| v.to_string())
-                .map_err(fail),
-            (Arch::FunAsr, "config.json") => {
-                fun_asr::config(self).map(|v| v.to_string()).map_err(fail)
-            }
-            (Arch::CanaryQwen, "config.json") => canary_qwen::config(self)
-                .map(|v| v.to_string())
-                .map_err(fail),
-            (Arch::GraniteCtc, "config.json") => granite_ctc::config(self)
-                .map(|v| v.to_string())
-                .map_err(fail),
-            (Arch::Medasr, "config.json") => {
-                medasr::config(self).map(|v| v.to_string()).map_err(fail)
-            }
-            (Arch::Sensevoice, "config.json") => sensevoice::config(self)
-                .map(|v| v.to_string())
-                .map_err(fail),
-            (Arch::Gigaam, "config.json") => {
-                gigaam::config(self).map(|v| v.to_string()).map_err(fail)
-            }
-            (Arch::Qwen3Asr, "config.json") => {
-                qwen3_asr::config(self).map(|v| v.to_string()).map_err(fail)
-            }
-            (Arch::Whisper, "generation_config.json") => whisper::generation(self)
-                .map(|v| v.to_string())
-                .map_err(fail),
-            (_, "tokenizer.json") => self.tokenizer_json(),
-            _ => Err(format!("{} has no {name}", self.path.display())),
-        }
-    }
-
+impl Gguf {
     /// `tokenizer.json` from the `tokenizer.ggml.*` lists. A file with
     /// `merges` gives them in rank order; one without (Parakeet's
     /// SentencePiece models) gives scores, and the merges come from them.

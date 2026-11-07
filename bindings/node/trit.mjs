@@ -116,7 +116,7 @@ export class Trit {
     if (!this.#handle) throw new TritError(c.lastError());
   }
 
-  /** @returns {string} "parakeet_tdt", "parakeet_ctc", "canary", "whisper", or "moonshine". */
+  /** @returns {string} The `model_type` of the model, for example "parakeet_tdt". */
   get kind() {
     return c.kind(this.#live());
   }

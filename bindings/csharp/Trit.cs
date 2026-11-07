@@ -97,7 +97,7 @@ public sealed class Trit : IDisposable
     /// <summary>Returns memory freed by earlier calls to the system; call it when the app goes idle.</summary>
     public static void ReleaseMemory() => Native.trit_release_memory();
 
-    /// <summary>"parakeet_tdt", "parakeet_ctc", "canary", "whisper", or "moonshine".</summary>
+    /// <summary>The `model_type` of the model, for example "parakeet_tdt".</summary>
     public string Kind => Marshal.PtrToStringUTF8(Native.trit_kind(Handle))!;
 
     /// <summary>16 kHz mono samples in -1..1; language is an ISO 639-1 code or null to detect it; beam: beams

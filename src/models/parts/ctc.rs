@@ -18,7 +18,7 @@ pub fn greedy(
                 *value = f32::NEG_INFINITY;
             }
         }
-        let token = crate::models::layers::argmax(&row);
+        let token = crate::layers::argmax(&row);
         if token != blank && token != previous {
             tokens.push(token);
             frames.push(index);

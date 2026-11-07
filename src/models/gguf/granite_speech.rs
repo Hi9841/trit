@@ -5,6 +5,7 @@
 //! projector stays under `projector.`, and the language model takes the
 //! Hugging Face Granite names under `language_model`.
 
+use super::blocks::{llm_block, LlmShape};
 use super::{qwen3_asr, Gguf, Name};
 use serde_json::{json, Value};
 
@@ -27,6 +28,26 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         return Err("its audio features differ from Granite Speech's".into());
     }
     let d = e("hidden")?;
+    let mut llm = llm_block(LlmShape {
+        model_type: "granite",
+        hidden: q("hidden_size")?,
+        intermediate: q("intermediate_size")?,
+        layers: q("n_layers")?,
+        heads: q("n_heads")?,
+        kv_heads: q("n_kv_heads")?,
+        head_dim: q("head_dim")?,
+        vocab: q("vocab_size")?,
+        rms_norm_eps: qf("rms_norm_eps"),
+        rope_theta: qf("rope_theta"),
+        tie: g
+            .get("stt.granite.decoder.tie_word_embeddings")
+            .as_bool()
+            .unwrap_or(false),
+    });
+    llm["embedding_multiplier"] = json!(qf("embedding_multiplier"));
+    llm["attention_multiplier"] = json!(qf("attention_multiplier"));
+    llm["residual_multiplier"] = json!(qf("residual_multiplier"));
+    llm["logits_scaling"] = json!(qf("logits_scaling"));
     let variant = text("stt.variant");
     // IBM's instruction for each release (transcribe.cpp's prompts).
     let (instruction, chat) = match variant {
@@ -75,34 +96,14 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "window_size": g.num("stt.granite.window_size")?,
             "downsample_rate": g.num("stt.granite.downsample_rate")?,
         },
-        "llm_config": {
-            "model_type": "granite",
-            "hidden_size": q("hidden_size")?,
-            "intermediate_size": q("intermediate_size")?,
-            "num_hidden_layers": q("n_layers")?,
-            "num_attention_heads": q("n_heads")?,
-            "num_key_value_heads": q("n_kv_heads")?,
-            "head_dim": q("head_dim")?,
-            "vocab_size": q("vocab_size")?,
-            "rms_norm_eps": qf("rms_norm_eps"),
-            "rope_theta": qf("rope_theta"),
-            "tie_word_embeddings": g.get("stt.granite.decoder.tie_word_embeddings").as_bool().unwrap_or(false),
-            "embedding_multiplier": qf("embedding_multiplier"),
-            "attention_multiplier": qf("attention_multiplier"),
-            "residual_multiplier": qf("residual_multiplier"),
-            "logits_scaling": qf("logits_scaling"),
-        },
-        "feature_extractor": {
-            "n_fft": g.num("stt.frontend.n_fft")?,
-            "win_length": g.num("stt.frontend.win_length")?,
-            "hop_length": g.num("stt.frontend.hop_length")?,
-            "num_mel_bins": g.num("stt.frontend.num_mels")?,
-            "stack_factor": 2,
-            "floor_db": 8.0,
-            "deltas": false,
-            "frames": "even",
-        },
+        "llm_config": llm,
+        "feature_extractor": front(g)?,
     }))
+}
+
+/// The mel front end of Granite Speech 4.x.
+pub(super) fn front(g: &Gguf) -> Result<Value, String> {
+    super::blocks::granite_front(g, 2, 8.0, false, "even")
 }
 
 /// A transcribe.cpp Granite Speech tensor name as Trit names it.
@@ -117,15 +118,19 @@ pub fn hf_name(name: &str) -> Option<Name> {
         return Some(Name::To(format!("language_model.lm_head.{rest}")));
     }
     if name.starts_with("dec.") {
-        return qwen3_asr::language_model_name(name, "language_model.model");
+        return qwen3_asr::language_model_name(name, "language_model.");
     }
     // The block names of Granite Speech 5.0 (`parts::granite_conformer`).
     let rest = name.strip_prefix("enc.")?;
-    let rest = rest
-        .replace(".ff1.up.", ".ff1.linear1.")
-        .replace(".ff1.down.", ".ff1.linear2.")
-        .replace(".ff2.up.", ".ff2.linear1.")
-        .replace(".ff2.down.", ".ff2.linear2.")
-        .replace(".norm_post.", ".norm_out.");
+    let rest = super::replace_all(
+        rest,
+        &[
+            (".ff1.up.", ".ff1.linear1."),
+            (".ff1.down.", ".ff1.linear2."),
+            (".ff2.up.", ".ff2.linear1."),
+            (".ff2.down.", ".ff2.linear2."),
+            (".norm_post.", ".norm_out."),
+        ],
+    );
     Some(Name::To(format!("encoder.{rest}")))
 }

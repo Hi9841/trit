@@ -123,7 +123,6 @@ def report_snr(name: str, values: list[tuple[str, float]]) -> None:
     print(f"{name}_length_mismatches: {lengths}")
 
 
-# ---------- VITS (Meta MMS-TTS) ----------
 
 
 def vits(trit: str, voice: str, asr: str, seeds: int) -> None:
@@ -184,7 +183,6 @@ def vits(trit: str, voice: str, asr: str, seeds: int) -> None:
     report_snr("noise_off", snrs)
 
 
-# ---------- Kokoro ----------
 
 MASK = (1 << 64) - 1
 

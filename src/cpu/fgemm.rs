@@ -12,9 +12,7 @@
 
 use super::buf::Buf;
 use super::team;
-use std::sync::OnceLock;
 
-/// Rows and columns per parallel task.
 const BLOCK: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,39 +44,7 @@ impl Level {
 /// The widest float path this CPU runs. `TRIT_ISA=scalar|avx2` forces a slower one;
 /// on arm64, `TRIT_ISA=scalar` forces the scalar path.
 pub(crate) fn level() -> Level {
-    static LEVEL: OnceLock<Level> = OnceLock::new();
-    *LEVEL.get_or_init(|| {
-        let forced = std::env::var("TRIT_ISA").unwrap_or_default();
-        #[cfg(target_arch = "x86_64")]
-        {
-            // F16C comes with every AVX2 CPU; the f16 decoder layers need it.
-            let avx2 = is_x86_feature_detected!("avx2")
-                && is_x86_feature_detected!("fma")
-                && is_x86_feature_detected!("f16c");
-            match forced.as_str() {
-                "scalar" => return Level::Scalar,
-                "avx2" if avx2 => return Level::Avx2,
-                _ => {}
-            }
-            // `multiversion!` compiles this level with all of these.
-            if avx2
-                && is_x86_feature_detected!("avx512f")
-                && is_x86_feature_detected!("avx512bw")
-                && is_x86_feature_detected!("avx512vl")
-            {
-                return Level::Avx512;
-            }
-            if avx2 {
-                return Level::Avx2;
-            }
-        }
-        #[cfg(target_arch = "aarch64")]
-        if forced != "scalar" {
-            return Level::Neon;
-        }
-        let _ = forced;
-        Level::Scalar
-    })
+    super::isa::isa_choice().float_level
 }
 
 /// A weight element: f32, or f16 as its bits. The loads are `inline(always)`
@@ -90,13 +56,10 @@ pub trait Weight: Copy + Send + Sync + 'static {
     fn to_f32(self) -> f32;
     /// `dst = src` as f32; the caller sizes `dst` like `src`.
     fn widen(src: &[Self], dst: &mut [f32]);
-    /// 16 values from `p`.
     #[cfg(target_arch = "x86_64")]
     unsafe fn load16(p: *const Self) -> std::arch::x86_64::__m512;
-    /// 8 values from `p`.
     #[cfg(target_arch = "x86_64")]
     unsafe fn load8(p: *const Self) -> std::arch::x86_64::__m256;
-    /// 4 values from `p`.
     #[cfg(target_arch = "aarch64")]
     unsafe fn load4(p: *const Self) -> std::arch::aarch64::float32x4_t;
 }
@@ -236,14 +199,12 @@ unsafe impl Sync for OutPtr {}
 pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Buf {
     assert!(x.len() >= m * k && w.len() >= n * k);
     let mut out = Buf::scratch(m * n);
-    let (row_blocks, col_blocks) = (m.div_ceil(BLOCK), n.div_ceil(BLOCK));
+    let (row_blocks, col_blocks) = block_counts(m, n);
     let ptr = OutPtr(out.as_mut_ptr());
     let level = level();
     team::for_each(row_blocks * col_blocks, |task| {
-        let rows = (task / col_blocks) * BLOCK..((task / col_blocks + 1) * BLOCK).min(m);
-        let cols = (task % col_blocks) * BLOCK..((task % col_blocks + 1) * BLOCK).min(n);
+        let (rows, cols) = block_span(task, col_blocks, m, n);
         if W::WIDEN && rows.len() > 4 {
-            // Widen this block's weight rows once; every row tile reuses them.
             PANEL.with(|panel| {
                 let mut panel = panel.borrow_mut();
                 panel.resize(cols.len() * k, 0.0);
@@ -284,12 +245,11 @@ pub fn matmul_widened(
 ) -> Buf {
     assert!(x.len() >= m * k);
     let mut out = Buf::scratch(m * n);
-    let (row_blocks, col_blocks) = (m.div_ceil(BLOCK), n.div_ceil(BLOCK));
+    let (row_blocks, col_blocks) = block_counts(m, n);
     let ptr = OutPtr(out.as_mut_ptr());
     let level = level();
     team::for_each(row_blocks * col_blocks, |task| {
-        let rows = (task / col_blocks) * BLOCK..((task / col_blocks + 1) * BLOCK).min(m);
-        let cols = (task % col_blocks) * BLOCK..((task % col_blocks + 1) * BLOCK).min(n);
+        let (rows, cols) = block_span(task, col_blocks, m, n);
         PANEL.with(|panel| {
             let mut panel = panel.borrow_mut();
             panel.resize(cols.len() * k, 0.0);
@@ -304,7 +264,25 @@ pub fn matmul_widened(
     out
 }
 
-/// One block, on the calling thread.
+fn block_counts(m: usize, n: usize) -> (usize, usize) {
+    (m.div_ceil(BLOCK), n.div_ceil(BLOCK))
+}
+
+fn block_span(
+    task: usize,
+    col_blocks: usize,
+    m: usize,
+    n: usize,
+) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    let row = task / col_blocks;
+    let col = task % col_blocks;
+    (
+        row * BLOCK..((row + 1) * BLOCK).min(m),
+        col * BLOCK..((col + 1) * BLOCK).min(n),
+    )
+}
+
+/// On the calling thread.
 #[allow(clippy::too_many_arguments)]
 unsafe fn block<W: Weight>(
     level: Level,
@@ -758,7 +736,6 @@ mod nn_avx2 {
                         _ => tile::<1>(x, k, w, n, i, j, out),
                     }
                 } else {
-                    // The right edge, under 16 columns: plain loops.
                     for row in i..i + r {
                         for col in j..j + c {
                             let mut total = 0.0f32;
@@ -831,7 +808,6 @@ mod nn_neon {
                         _ => tile::<1>(x, k, w, n, i, j, out),
                     }
                 } else {
-                    // The right edge, under 16 columns: plain loops.
                     for row in i..i + r {
                         for col in j..j + c {
                             let mut total = 0.0f32;

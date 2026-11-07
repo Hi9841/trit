@@ -4,9 +4,9 @@
 //! as Transformers' `generate` does with the model's defaults (20 tokens
 //! after the start token, the end token forced at the last step).
 
+use crate::config::Json;
 use crate::cpu::{gemm::Dense, tensors::Tensors};
-use crate::models::config::Json;
-use crate::models::layers::{attention, linear, Gelu, Norm};
+use crate::layers::{attention, linear, Gelu, Norm};
 use crate::{Device, Precision};
 use std::collections::HashMap;
 use std::path::Path;

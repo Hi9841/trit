@@ -126,8 +126,6 @@ impl KaldiFbank {
     }
 }
 
-/// Kaldi's triangular mel filters on the HTK scale (`1127 ln(1 + f / 700)`),
-/// from `LOW_HZ` to half the sample rate, over `n_fft / 2 + 1` bins.
 fn htk_filters(sample_rate: usize, n_fft: usize, mels: usize) -> Vec<f32> {
     let bins = n_fft / 2 + 1;
     let mel = |hz: f64| 1127.0 * (1.0 + hz / 700.0).ln();

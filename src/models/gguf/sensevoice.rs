@@ -4,6 +4,7 @@
 //! of FunASR's `SenseVoiceSmall` state dict. The file's CMVN feeds the
 //! front end as published.
 
+use super::blocks::{kaldi_front, KaldiFront};
 use super::{Gguf, Name};
 use serde_json::{json, Value};
 
@@ -58,16 +59,19 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "emotion_neutral": special("emotion_neutral")?,
             "with_itn": special("withitn")?,
         },
-        "feature_extractor": {
-            "type": "kaldi_fbank",
-            "sample_rate": g.num("stt.frontend.sample_rate")?,
-            "win_length": g.num("stt.frontend.win_length")?,
-            "hop_length": g.num("stt.frontend.hop_length")?,
-            "num_mel_bins": g.num("stt.frontend.num_mels")?,
-            "lfr_m": g.num("stt.frontend.lfr_m")?,
-            "lfr_n": g.num("stt.frontend.lfr_n")?,
-            "upscale_samples": g.get("stt.frontend.upscale_samples").as_bool().unwrap_or(true),
-        },
+        "feature_extractor": kaldi_front(KaldiFront {
+            sample_rate: g.num("stt.frontend.sample_rate")?,
+            win: g.num("stt.frontend.win_length")?,
+            hop: g.num("stt.frontend.hop_length")?,
+            mels: g.num("stt.frontend.num_mels")?,
+            lfr_m: g.num("stt.frontend.lfr_m")?,
+            lfr_n: g.num("stt.frontend.lfr_n")?,
+            upscale: g
+                .get("stt.frontend.upscale_samples")
+                .as_bool()
+                .unwrap_or(true),
+            cmvn: None,
+        }),
     }))
 }
 
@@ -78,10 +82,8 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("enc.embed.", "embed."),
         ("ctc.head.", "ctc.ctc_lo."),
     ];
-    for (from, to) in TOP {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(Name::To(format!("{to}{rest}")));
-        }
+    if let Some(mapped) = super::map_suffix(name, &TOP) {
+        return Some(Name::To(mapped));
     }
     encoder_name(name, "encoder")
 }
@@ -110,9 +112,6 @@ pub fn encoder_name(name: &str, prefix: &str) -> Option<Name> {
         ("norm_attn.", "norm1."),
         ("norm_ffn.", "norm2."),
     ];
-    let (from, to) = BLOCK.iter().find(|(from, _)| part.starts_with(from))?;
-    Some(Name::To(format!(
-        "{prefix}.{stack}.{layer}.{to}{}",
-        &part[from.len()..]
-    )))
+    let mapped = super::map_suffix(part, &BLOCK)?;
+    Some(Name::To(format!("{prefix}.{stack}.{layer}.{mapped}")))
 }

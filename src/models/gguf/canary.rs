@@ -6,6 +6,7 @@
 //! come from the Parakeet table with `model.` before them.
 
 use super::{parakeet, Gguf, Name};
+use crate::models::package::{encoder_block, EncShape};
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
@@ -41,19 +42,20 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "eos_token_id": c("special.endoftext_id")?,
             "hidden_act": "relu",
         },
-        "encoder_config": {
-            "hidden_size": c("encoder.d_model")?,
-            "intermediate_size": c("encoder.d_ff")?,
-            "num_attention_heads": c("encoder.n_heads")?,
-            "num_hidden_layers": c("encoder.n_layers")?,
-            "num_mel_bins": g.num("stt.frontend.num_mels")?,
-            "conv_kernel_size": c("encoder.conv_kernel")?,
-            "subsampling_factor": c("encoder.subsampling_factor")?,
-            "subsampling_conv_channels": c("encoder.subsampling_channels")?,
-            "subsampling_conv_kernel_size": 3,
-            "subsampling_conv_stride": 2,
-            "scale_input": g.get("stt.canary.encoder.xscaling").as_bool().unwrap_or(false),
-        },
+        "encoder_config": encoder_block(EncShape {
+            hidden: c("encoder.d_model")?,
+            intermediate: c("encoder.d_ff")?,
+            heads: c("encoder.n_heads")?,
+            layers: c("encoder.n_layers")?,
+            mels: g.num("stt.frontend.num_mels")?,
+            conv_kernel: c("encoder.conv_kernel")?,
+            subsample: c("encoder.subsampling_factor")?,
+            sub_channels: c("encoder.subsampling_channels")?,
+            scale_input: g
+                .get("stt.canary.encoder.xscaling")
+                .as_bool()
+                .unwrap_or(false),
+        }),
         "languages": g.get("general.languages"),
         "prompt_format": format,
     }))
@@ -69,7 +71,7 @@ pub fn hf_name(name: &str) -> Option<Name> {
         return Some(Name::To(format!("model.encoder_decoder_proj.{rest}")));
     }
     if name.starts_with("enc.") {
-        return parakeet::hf_name(name).map(|hf| Name::To(format!("model.{hf}")));
+        return parakeet::rename(name, "model.", "conv.bn.");
     }
     const TOP: [(&str, &str); 4] = [
         ("dec.embed.token.", "model.decoder.embed_tokens."),
@@ -77,30 +79,49 @@ pub fn hf_name(name: &str) -> Option<Name> {
         ("dec.norm.", "model.decoder.norm."),
         ("dec.head.", "proj_out."),
     ];
-    for (from, to) in TOP {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(Name::To(format!("{to}{rest}")));
-        }
+    if let Some(mapped) = super::map_suffix(name, &TOP) {
+        return Some(Name::To(mapped));
     }
     let (layer, part) = name.strip_prefix("dec.layer.")?.split_once('.')?;
-    const LAYER: [(&str, &str); 13] = [
-        ("norm1.", "input_layernorm."),
-        ("self_attn.q.", "self_attn.q_proj."),
-        ("self_attn.k.", "self_attn.k_proj."),
-        ("self_attn.v.", "self_attn.v_proj."),
-        ("self_attn.o.", "self_attn.o_proj."),
-        ("norm2.", "post_attention_layernorm."),
-        ("cross_attn.q.", "encoder_attn.q_proj."),
-        ("cross_attn.k.", "encoder_attn.k_proj."),
-        ("cross_attn.v.", "encoder_attn.v_proj."),
-        ("cross_attn.o.", "encoder_attn.o_proj."),
-        ("norm3.", "final_layernorm."),
-        ("ffn.up.", "mlp.fc1."),
-        ("ffn.down.", "mlp.fc2."),
+    const FROM: [&str; 13] = [
+        "norm1.",
+        "self_attn.q.",
+        "self_attn.k.",
+        "self_attn.v.",
+        "self_attn.o.",
+        "norm2.",
+        "cross_attn.q.",
+        "cross_attn.k.",
+        "cross_attn.v.",
+        "cross_attn.o.",
+        "norm3.",
+        "ffn.up.",
+        "ffn.down.",
     ];
-    let (from, to) = LAYER.iter().find(|(from, _)| part.starts_with(from))?;
-    Some(Name::To(format!(
-        "model.decoder.layers.{layer}.{to}{}",
-        &part[from.len()..]
-    )))
+    let suffix = decoder_suffix(part, &FROM)?;
+    Some(Name::To(format!("model.decoder.layers.{layer}.{suffix}")))
+}
+
+/// The Hugging Face suffixes of a Canary-plan decoder layer. Canary and
+/// Cohere name the same 13 roles with different source tokens.
+pub(super) const DECODER_TO: [&str; 13] = [
+    "input_layernorm.",
+    "self_attn.q_proj.",
+    "self_attn.k_proj.",
+    "self_attn.v_proj.",
+    "self_attn.o_proj.",
+    "post_attention_layernorm.",
+    "encoder_attn.q_proj.",
+    "encoder_attn.k_proj.",
+    "encoder_attn.v_proj.",
+    "encoder_attn.o_proj.",
+    "final_layernorm.",
+    "mlp.fc1.",
+    "mlp.fc2.",
+];
+
+pub(super) fn decoder_suffix(part: &str, from: &[&str; 13]) -> Option<String> {
+    let index = from.iter().position(|from| part.starts_with(from))?;
+    let rest = &part[from[index].len()..];
+    Some(format!("{}{rest}", DECODER_TO[index]))
 }

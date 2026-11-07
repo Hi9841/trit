@@ -8,7 +8,6 @@ use super::store::Store;
 use super::team;
 use super::tensors::f16_to_f32;
 
-/// Output rows per parallel task.
 const ROWS_PER_TASK: usize = 128;
 
 pub struct HalfDense {
@@ -74,7 +73,6 @@ impl HalfDense {
         out
     }
 
-    /// One input vector of `in_features` values.
     pub fn matvec(&self, x: &[f32]) -> Buf {
         assert_eq!(x.len(), self.in_features);
         let (n, k) = (self.out_features, self.in_features);

@@ -6,6 +6,7 @@
 //! take the Canary names.
 
 use super::{canary, Gguf, Name};
+use crate::models::package::{encoder_block, EncShape};
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
@@ -42,19 +43,17 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "eos_token_id": g.num("tokenizer.ggml.eos_token_id")?,
             "hidden_act": "relu",
         },
-        "encoder_config": {
-            "hidden_size": e("d_model")?,
-            "intermediate_size": e("d_ff")?,
-            "num_attention_heads": e("n_heads")?,
-            "num_hidden_layers": e("n_layers")?,
-            "num_mel_bins": g.num("stt.frontend.num_mels")?,
-            "conv_kernel_size": e("conv_kernel")?,
-            "subsampling_factor": e("subsampling_factor")?,
-            "subsampling_conv_channels": e("subsampling_channels")?,
-            "subsampling_conv_kernel_size": 3,
-            "subsampling_conv_stride": 2,
-            "scale_input": false,
-        },
+        "encoder_config": encoder_block(EncShape {
+            hidden: e("d_model")?,
+            intermediate: e("d_ff")?,
+            heads: e("n_heads")?,
+            layers: e("n_layers")?,
+            mels: g.num("stt.frontend.num_mels")?,
+            conv_kernel: e("conv_kernel")?,
+            subsample: e("subsampling_factor")?,
+            sub_channels: e("subsampling_channels")?,
+            scale_input: false,
+        }),
         "languages": g.get("general.languages"),
         "prompt_format": "canary2",
     }))
@@ -72,35 +71,30 @@ pub fn hf_name(name: &str) -> Option<Name> {
         // The head is the token table; its bias goes beside the table.
         ("head.", "model.decoder.embed_tokens."),
     ];
-    for (from, to) in TOP {
-        if let Some(rest) = name.strip_prefix(from) {
-            return Some(Name::To(format!("{to}{rest}")));
-        }
+    if let Some(mapped) = super::map_suffix(name, &TOP) {
+        return Some(Name::To(mapped));
     }
     if let Some((layer, part)) = name
         .strip_prefix("dec.blocks.")
         .and_then(|rest| rest.split_once('.'))
     {
-        const LAYER: [(&str, &str); 13] = [
-            ("norm_self.", "input_layernorm."),
-            ("self_attn.q.", "self_attn.q_proj."),
-            ("self_attn.k.", "self_attn.k_proj."),
-            ("self_attn.v.", "self_attn.v_proj."),
-            ("self_attn.out.", "self_attn.o_proj."),
-            ("norm_cross.", "post_attention_layernorm."),
-            ("cross_attn.q.", "encoder_attn.q_proj."),
-            ("cross_attn.k.", "encoder_attn.k_proj."),
-            ("cross_attn.v.", "encoder_attn.v_proj."),
-            ("cross_attn.out.", "encoder_attn.o_proj."),
-            ("norm_ff.", "final_layernorm."),
-            ("ff.dense_in.", "mlp.fc1."),
-            ("ff.dense_out.", "mlp.fc2."),
+        const FROM: [&str; 13] = [
+            "norm_self.",
+            "self_attn.q.",
+            "self_attn.k.",
+            "self_attn.v.",
+            "self_attn.out.",
+            "norm_cross.",
+            "cross_attn.q.",
+            "cross_attn.k.",
+            "cross_attn.v.",
+            "cross_attn.out.",
+            "norm_ff.",
+            "ff.dense_in.",
+            "ff.dense_out.",
         ];
-        let (from, to) = LAYER.iter().find(|(from, _)| part.starts_with(from))?;
-        return Some(Name::To(format!(
-            "model.decoder.layers.{layer}.{to}{}",
-            &part[from.len()..]
-        )));
+        let suffix = canary::decoder_suffix(part, &FROM)?;
+        return Some(Name::To(format!("model.decoder.layers.{layer}.{suffix}")));
     }
     canary::hf_name(name)
 }
