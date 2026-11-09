@@ -8,6 +8,9 @@ usage (from the repository root):
 Each round runs side A, then side B, each in a fresh process (TRIT_LIB picks the
 library), so warm-up and drift favor neither. A side loads the model, runs one
 warm-up clip, then transcribes every clip of the sets, one call each, timed.
+Each call is also charged its CPU time (user and kernel, all threads, with
+the 3 ms that the workers spin after a call), and a side reports its private
+memory after the run and its peak working set (Windows).
 Prints per round: the median ms, the total errors, and the texts. Then the
 verdict: median of the per-round medians, their range, the median of the
 per-clip B/A ratios, a rank-sum test on the per-clip times of all rounds, a
@@ -64,13 +67,41 @@ def side(model: str, sets: list[str], cleanup: bool) -> None:
     out = []
     for path in clips:
         samples = read_clip(path)
+        c0 = time.process_time()
         t0 = time.perf_counter()
         text = engine.transcribe(samples, language="en")
         ms = (time.perf_counter() - t0) * 1000
+        # The workers spin for 3 ms after a call before they park: that CPU
+        # time belongs to the call. The sleep itself uses none.
+        time.sleep(0.005)
+        cpu = (time.process_time() - c0) * 1000
         ref = path.with_suffix(".txt").read_text(encoding="utf-8-sig")
-        out.append({"clip": f"{path.parent.name}/{path.stem}", "ms": ms, "hyp": text,
+        out.append({"clip": f"{path.parent.name}/{path.stem}", "ms": ms, "cpu": cpu, "hyp": text,
                     "errors": edits(normalize(ref).split(), normalize(text).split())})
+    out[0]["private_mb"], out[0]["peak_mb"] = memory()
     print(json.dumps(out))
+
+
+def memory() -> tuple[float, float]:
+    """Private bytes now and the peak working set of this process, in MB (0, 0 off Windows)."""
+    if os.name != "nt":
+        return 0.0, 0.0
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("faults", wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in (
+                "peak_working_set", "working_set", "peak_paged", "paged", "peak_nonpaged", "nonpaged",
+                "pagefile", "peak_pagefile", "private")]
+
+    counters = Counters()
+    counters.cb = ctypes.sizeof(counters)
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    ctypes.windll.psapi.GetProcessMemoryInfo(
+        wintypes.HANDLE(kernel32.GetCurrentProcess()), ctypes.byref(counters), counters.cb)
+    return counters.private / 2**20, counters.peak_working_set / 2**20
 
 
 def run(lib: str, model: str, sets: list[str], cleanup: bool) -> list[dict]:
@@ -114,6 +145,15 @@ def main() -> None:
     print(f"B: median {statistics.median(med['B']):.1f} ms (rounds {min(med['B']):.1f}-{max(med['B']):.1f})")
     print(f"per-clip B/A median ratio {ratio:.3f}; rank-sum p = {p:.2g}; paired signed-rank p = {paired:.2g}; "
           f"{'significant' if paired < 0.01 else 'not significant'}")
+    if all("cpu" in rows[0] for v in runs.values() for rows in v):
+        cpu = {k: [statistics.median(rows[i]["cpu"] for rows in v) for i in range(clips)] for k, v in runs.items()}
+        cpu_ratio = statistics.median(b / a for a, b in zip(cpu["A"], cpu["B"]) if a > 0)
+        print(f"CPU time per clip: A median {statistics.median(cpu['A']):.0f} ms, B {statistics.median(cpu['B']):.0f} ms, "
+              f"per-clip ratio {cpu_ratio:.3f}, paired p = {wilcoxon(cpu['A'], cpu['B']).pvalue:.2g}")
+        mem = {k: [(rows[0]["private_mb"], rows[0]["peak_mb"]) for rows in v] for k, v in runs.items()}
+        print("memory after the run, private / peak working set, median MB: " + ", ".join(
+            f"{k} {statistics.median(x[0] for x in v):.0f} / {statistics.median(x[1] for x in v):.0f}"
+            for k, v in mem.items()))
     print(f"errors A {err['A']}, B {err['B']}; texts differing: {differ} of {clips}")
     for name in dict.fromkeys(x["clip"].split("/")[0] for x in runs["A"][0]):
         e = {k: sum(x["errors"] for x in v[0] if x["clip"].startswith(name + "/")) for k, v in runs.items()}
