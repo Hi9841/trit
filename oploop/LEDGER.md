@@ -831,3 +831,29 @@ jobs (a gap). CLI, 200 clean clips, one process, one run, not a reported number.
   tiny about 12 % faster. CPU time per clip falls too: 15 threads spin less.
 - Test: each beam's candidates are computed alone and joined in beam order, so the sort
   sees the same list: 0 texts differ.
+- Result (`ab.py`, F0 against B13, 3 rounds x 200 clean, 0 texts differ, errors equal):
+
+  | Journey | A | B | per-clip ratio | paired p | CPU time of a round |
+  |---|---:|---:|---:|---:|---:|
+  | J1 Whisper tiny | 62.3 ms (58.0-62.5) | 54.6 ms (52.8-55.9) | 0.899 | 7e-33 | not summed yet |
+  | J2 Whisper base.en | 105.8 ms (99.8-106.0) | 95.8 ms (95.0-98.1) | 0.940 | 9.4e-26 | 369.9 to 343.5 s (0.928) |
+  | J3 Moonshine tiny | 34.8 ms (33.9-35.4) | 29.8 ms (29.3-30.2) | 0.847 | 9.1e-25 | not summed yet |
+
+- Limiter after the change: the beam step is one job of 5 tasks, bound by the three passes
+  of one beam over the vocabulary.
+- Decision: KEEP. The forecast (12 % for both) held for tiny (10 %) and was low for
+  Moonshine tiny (15 %).
+- Harness: the CPU clock of Windows has steps of 15.6 ms, so `ab.py` now sums the CPU time
+  of a round and gives the ratio of the round medians.
+
+### SI-014 small steps on the calling thread
+
+- Journey: J1, J2, J3 (J4 as a guard: its jobs under 5 us are 1.5 % of a call).
+- Hypothesis: Whisper tiny runs 1,734 jobs under 5 us per clip (902 ms of 17,604 ms, 5 %),
+  mean 2.6 us, and Moonshine tiny 2,643 (796 ms of 13,227 ms, 6 %). They are the layer norms
+  of 5 rows, and the self-attention of one query per beam (`HeadMajor::new` and
+  `attention_with`, 6 tasks each). The work of one is under 1 us; the rest is the hand-out
+  to 16 threads. A scope that keeps the steps of a short input on the calling thread
+  (`team::here`) should save about 3 ms per tiny clip (5 %) and about 2 ms per Moonshine
+  clip, and some CPU time.
+- Test: the same functions run per row and per head, in the same order: 0 texts differ.

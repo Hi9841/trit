@@ -146,10 +146,14 @@ def main() -> None:
     print(f"per-clip B/A median ratio {ratio:.3f}; rank-sum p = {p:.2g}; paired signed-rank p = {paired:.2g}; "
           f"{'significant' if paired < 0.01 else 'not significant'}")
     if all("cpu" in rows[0] for v in runs.values() for rows in v):
-        cpu = {k: [statistics.median(rows[i]["cpu"] for rows in v) for i in range(clips)] for k, v in runs.items()}
-        cpu_ratio = statistics.median(b / a for a, b in zip(cpu["A"], cpu["B"]) if a > 0)
-        print(f"CPU time per clip: A median {statistics.median(cpu['A']):.0f} ms, B {statistics.median(cpu['B']):.0f} ms, "
-              f"per-clip ratio {cpu_ratio:.3f}, paired p = {wilcoxon(cpu['A'], cpu['B']).pvalue:.2g}")
+        # The clock of the CPU time has steps of 15.6 ms on Windows: sum each round.
+        cpu = {k: [sum(x["cpu"] for x in rows) / 1000 for rows in v] for k, v in runs.items()}
+        wall = {k: [sum(x["ms"] for x in rows) / 1000 for rows in v] for k, v in runs.items()}
+        print("CPU time of a round, s (rounds): " + ", ".join(
+            f"{k} {statistics.median(v):.1f} ({min(v):.1f}-{max(v):.1f})" for k, v in cpu.items())
+            + f"; B/A {statistics.median(cpu['B']) / statistics.median(cpu['A']):.3f}")
+        print("time of a round, s: " + ", ".join(f"{k} {statistics.median(v):.2f}" for k, v in wall.items())
+              + f"; B/A {statistics.median(wall['B']) / statistics.median(wall['A']):.3f}")
         mem = {k: [(rows[0]["private_mb"], rows[0]["peak_mb"]) for rows in v] for k, v in runs.items()}
         print("memory after the run, private / peak working set, median MB: " + ", ".join(
             f"{k} {statistics.median(x[0] for x in v):.0f} / {statistics.median(x[1] for x in v):.0f}"

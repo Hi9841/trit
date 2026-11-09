@@ -36,6 +36,10 @@ struct Live<S> {
     score: f32,
     state: S,
     logits: Buf,
+    /// The best next tokens and their scores, best first: filled by the
+    /// beam's task of a step. The caller gives it its room, so the task
+    /// allocates nothing.
+    offers: Vec<(usize, f32)>,
 }
 
 /// An ended sequence: its tokens (end of text not included), the sum of
@@ -52,41 +56,56 @@ struct Ended {
 /// feeds `tokens[i]` to `states[i]`, all beams as one batch (the weights are
 /// read once per step), and returns the next logits of each. `S` is the
 /// decoder's own state (its self-attention caches), cloned when a beam splits.
-pub fn search<S: Clone>(
+pub fn search<S: Clone + Send>(
     (width, rules): (usize, Rules),
     (state, logits): (S, Buf),
     (limit, eos): (usize, usize),
-    mask: impl Fn(&mut [f32], &[usize]),
+    mask: impl Fn(&mut [f32], &[usize]) + Sync,
     mut step: impl FnMut(&mut [S], &[usize]) -> Vec<Buf>,
 ) -> Best {
+    // The candidates each sequence offers.
+    let offered = match rules {
+        Rules::OpenAi => width + 1,
+        Rules::Transformers => 2 * width,
+    };
     let mut live = vec![Live {
         tokens: Vec::new(),
         score: 0.0,
         state,
         logits,
+        offers: Vec::with_capacity(offered + 1),
     }];
     let mut ended: Vec<Ended> = Vec::new();
     for generated in 0..limit {
         let last = generated + 1 == limit;
         // (score, beam, token), best first.
-        let mut candidates: Vec<(f32, usize, usize)> = Vec::new();
-        for (b, beam) in live.iter_mut().enumerate() {
+        // One task per sequence: each reads its own logits (three passes
+        // over the vocabulary). One after the other on the caller, 5 beams
+        // took 0.65 ms of each Whisper step, with all other threads idle.
+        crate::cpu::team::chunks_mut(&mut live, 1, |_, beam| {
+            let beam = &mut beam[0];
             // log softmax(x) = (x - max) - log sum exp(x - max); the order of
             // the logits is the order of their log probabilities.
-            let (offered, (max, log_sum)) = match rules {
+            let (max, log_sum) = match rules {
                 Rules::OpenAi => {
                     mask(&mut beam.logits, &beam.tokens);
-                    (width + 1, log_sum_exp(&beam.logits))
+                    log_sum_exp(&beam.logits)
                 }
                 Rules::Transformers => {
                     let normalizer = log_sum_exp(&beam.logits);
                     mask(&mut beam.logits, &beam.tokens);
-                    (2 * width, normalizer)
+                    normalizer
                 }
             };
-            for (token, logit) in top(&beam.logits, offered) {
-                candidates.push((beam.score + ((logit - max) - log_sum), b, token));
+            top(&beam.logits, offered, &mut beam.offers);
+            let score = beam.score;
+            for (_, logit) in &mut beam.offers {
+                *logit = score + ((*logit - max) - log_sum);
             }
+        });
+        let mut candidates: Vec<(f32, usize, usize)> = Vec::with_capacity(live.len() * offered);
+        for (b, beam) in live.iter().enumerate() {
+            candidates.extend(beam.offers.iter().map(|(token, score)| (*score, b, *token)));
         }
         candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
         // (beam, token, score) of the sequences that go on.
@@ -174,6 +193,7 @@ pub fn search<S: Clone>(
                     score,
                     state,
                     logits,
+                    offers: Vec::with_capacity(offered + 1),
                 }
             })
             .collect();
@@ -233,9 +253,10 @@ fn log_sum_exp(logits: &[f32]) -> (f32, f32) {
     })
 }
 
-/// The `count` largest values with their indices, largest first.
-fn top(values: &[f32], count: usize) -> Vec<(usize, f32)> {
-    let mut best: Vec<(usize, f32)> = Vec::with_capacity(count + 1);
+/// The `count` largest values with their indices, largest first, in `best`,
+/// which has room for `count + 1`.
+fn top(values: &[f32], count: usize, best: &mut Vec<(usize, f32)>) {
+    best.clear();
     for (i, &v) in values.iter().enumerate() {
         if v == f32::NEG_INFINITY || (best.len() == count && v <= best[count - 1].1) {
             continue;
@@ -244,5 +265,4 @@ fn top(values: &[f32], count: usize) -> Vec<(usize, f32)> {
         best.insert(at, (i, v));
         best.truncate(count);
     }
-    best
 }
