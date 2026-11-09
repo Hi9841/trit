@@ -969,3 +969,59 @@ Gaps of 100 us or more, by the jobs before and after:
   and a take about 4 %.
 - Test: the group sums are integers and the float steps of each output and frame keep their
   order: every value is the same, so 0 texts differ.
+- Result (`ab.py`, B17 against B18, 5 rounds x 200 clean, two runs; another session built
+  with `rustc` in both, 1 to 5 cores, and the medians were 34 to 38 ms, not 31): per-clip
+  ratio 1.017 (p = 0.0054), then 0.999 (p = 0.84); time of a round 1.039, then 1.028. 0 of
+  200 texts differ and 81 errors in both runs, so the values are the same, as forecast.
+- Decision: REVERT. No gain in either run, and the round times lean to a loss. The unpack
+  is not what limits the ternary product; the limiter is not found. Together with P-9
+  (2.1 of 2.6 T multiply-adds per second) this says: the ternary kernel has no cheap gain
+  left on this CPU, and a change of the order of its float sums changes the text (SI-009).
+  A new attempt needs a quiet computer and a counter of the vector operations, not a guess.
+
+### Gates of the branch head (after SI-017, with SI-014, SI-016, SI-018 reverted)
+
+- Clippy `-D warnings --release` (workspace, and `-p trit` with the GPU off), fmt, and
+  `trit skill --check`: clean. The commit of SI-017 went in before clippy ran and broke it
+  (`type_complexity`); the next commit has the fix. Run clippy before each commit.
+- Text, main against the head (`ab.py`): Redux 0 of 400 texts differ (clean 81, other 172
+  errors on both sides); Whisper tiny 0 of 200 (231), base.en 0 of 200 (124), Moonshine tiny
+  0 of 200 (133).
+- `bench/paths.py` (3 clips; `TRIT_ISA=scalar|avx2|avxvnni`, 1 thread): the same text for
+  Moonshine tiny, Redux, and Whisper tiny. The script now makes the path of the executable
+  absolute: Windows did not start `target/release/trit.exe` as written, so the new CI
+  step failed before this fix.
+- 25 edge-case WAV files: no crash; the six sample formats of one clip give its text.
+  6 threads x 8 calls with `release_memory`: 0 wrong texts (Redux, Whisper tiny).
+- Not run: `tech`, `tts16`, the owner's takes (no clips here), the voices, S1-mini, the
+  language-model families, and a build of TDT against this branch (another session worked
+  in that checkout).
+
+### Journeys, main against the head
+
+Another session used 6 cores during this last run, so the medians are high (Redux 49 ms, not
+31). Both sides ran in turns. The ratios agree with the products of the steps measured
+on a quieter computer (tiny 0.929 x 0.899, base.en 0.971 x 0.940, Moonshine 0.956 x 0.847 x 0.936).
+
+| Journey | Per-clip ratio | Time of a round | CPU time of a round | Rounds x clips |
+|---|---:|---:|---:|---:|
+| J1 Whisper tiny | 0.875 | 0.848 | 0.853 | 2 x 200 |
+| J2 Whisper base.en | 0.918 | 0.893 | 0.885 | 2 x 200 |
+| J3 Moonshine tiny | 0.778 | 0.772 | 0.797 | 2 x 200 |
+| J4 Redux | 0.988 (p = 0.096) | 1.059 (disturbed) | 0.984 | 3 x 400 |
+| Redux load / first take over 30 s | 0.972 / 0.939 | | | 14 runs |
+
+Kept: SI-012, SI-013, SI-015, SI-017. Reverted: SI-014, SI-016, SI-018 (and the panic
+payload of the review fixes).
+
+### Next
+
+- Whisper, the gaps of P-11 again with a timer on `Buf::scratch` itself, on a quiet
+  computer; then SI-016 again if the fill is the cause.
+- Moonshine: the serial code between the conv layers of the encoder (0.77 ms per clip), and
+  one table of rotary turns for the queries and the keys of all layers of a call.
+- The decoder steps: self-attention builds the head-major copy of all keys and values
+  again for each token (`layers.rs` `attention`, called from `causal_lm.rs` and the Whisper
+  and Moonshine steps). Keep the caches in that layout. It needs S1-mini for J5.
+- Memory: the first take over 30 s adds 148 MB of position tables (the reach doubles to the
+  60 s of a full window). A reach in steps of 10 s gives 98 MB for a 31 s take.

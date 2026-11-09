@@ -1447,16 +1447,27 @@ impl RelCache {
 /// asked for. Every layer of a model projects the same table, one after the
 /// other: one table for each layer was 23 of 24 builds too many (2 million
 /// `sin` and `cos` calls each at the load of a model 1,024 wide).
-static SINES: Mutex<Option<(usize, usize, Arc<Vec<f32>>)>> = Mutex::new(None);
+static SINES: Mutex<Option<Sines>> = Mutex::new(None);
+
+/// A sinusoid table and what it was built for.
+struct Sines {
+    reach: usize,
+    width: usize,
+    table: Arc<Vec<f32>>,
+}
 
 /// `relative_positions(reach + 1, d)`, from `SINES` when it holds that one.
 fn sines(reach: usize, d: usize) -> Arc<Vec<f32>> {
     let mut kept = SINES.lock();
     match kept.as_ref() {
-        Some((r, width, table)) if (*r, *width) == (reach, d) => Arc::clone(table),
+        Some(sines) if (sines.reach, sines.width) == (reach, d) => Arc::clone(&sines.table),
         _ => {
             let table = Arc::new(relative_positions(reach + 1, d));
-            *kept = Some((reach, d, Arc::clone(&table)));
+            *kept = Some(Sines {
+                reach,
+                width: d,
+                table: Arc::clone(&table),
+            });
             table
         }
     }

@@ -38,7 +38,8 @@ def texts(trit: str, model: str, clips: list[str], extra: dict[str, str]) -> lis
 def main() -> None:
     if len(sys.argv) < 4:
         sys.exit(__doc__)
-    trit, model, clips = sys.argv[1], sys.argv[2], sys.argv[3:]
+    # An absolute path: Windows does not start `target/release/trit.exe` as written.
+    trit, model, clips = os.path.abspath(sys.argv[1]), sys.argv[2], sys.argv[3:]
     first = texts(trit, model, clips, RUNS[0])
     print(f"default: {first}")
     if not any(first):
