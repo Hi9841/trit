@@ -749,3 +749,85 @@ Not done:
 - One joint product for the frames between two tokens. It needs an A/B session.
 - The new Linux and macOS lines did not compile on this PC (no C compiler for those targets).
 - `trit ... | head` ends with a panic on the closed pipe (seen with `trit doctor`).
+
+## Session 2026-11-09 (review fixes, then speed and CPU load of the decoder families)
+
+Work: branch `oploop` (from `main` 4760865). A = `oploop/baseline/trit_ffi-base.dll` (main).
+The clips of `clean` and `other` came back with `bench/librispeech.py` (now in `bench/clips`);
+`tech`, `tts16`, and the owner's takes are not on this computer, so this session has no
+gate on them.
+
+### Floor F0 (commits 636e38f, fa2b66b, 26ebcba: the review fixes)
+
+- Redux, `ab.py`, main against F0, 3 rounds, clean and other: 0 of 400 texts differ, errors
+  81 and 172 on both sides, per-clip ratio 0.995 (paired p = 0.074).
+- Whisper tiny, base.en, Moonshine tiny, 3 rounds x 200 clean: 0 texts differ each, errors
+  231, 124, 133 on both sides.
+- Clippy `-D warnings --release` (workspace, and `-p trit` with the GPU off), fmt, and
+  `trit skill --check`: clean.
+- Live: 25 edge-case WAV files with no crash; the same text for 3 clips on
+  `TRIT_ISA=scalar|avx2|avxvnni`, 1 and 3 threads, and 4 models (before the fixes; `bench/paths.py`
+  now checks it).
+- Put back: the panic payload of a worker in `run_tasks`. I wrote it again in the review
+  fixes; this ledger rejected it on 2026-11-05 (0.8 % to 1.1 % slower). `team.rs` has the
+  task loop of main again.
+
+### Noise (A against A, Redux, F0 twice, 3 rounds x 200 clean)
+
+Medians 32.2 and 31.0 ms, per-clip ratio 0.991, paired signed-rank p = 3e-05. The paired
+test calls a 0.9 % difference of one build with itself significant: the side that runs
+second in a round is a little faster. A gain counts in this session only above 1.5 %,
+and when it repeats. CPU time per clip: 250 and 250 ms (ratio 1.000).
+
+### Harness: CPU time and memory (`ab.py`, commit after F0)
+
+`ab.py` now charges each call its CPU time (`time.process_time`, all threads, with the
+3 ms that the workers spin after a call), and reports the private memory and the peak
+working set of each side. Redux: 250 ms of CPU for a 31 ms clip, so all 8 threads are busy
+for the whole call. The private memory of a side (1.49 GB) is mostly numpy and scipy:
+use it only to compare A with B.
+
+### SI-012 beam search: a sequence that goes on in one beam keeps its state
+
+- Written after the change (it was part of the review fixes), so this is a record, not a test
+  of a forecast. The review estimated the copies at 20 MB per step for large-v3-turbo.
+- Change: `beam.rs` cloned every kept beam's state (all self-attention caches) at each
+  step. A parent with one child now gives its state; only a parent that splits is cloned.
+- Result, main against F0, 3 rounds x 200 clean, 0 texts differ: Whisper tiny ratio 0.929
+  (p = 1.6e-16; one noisy A round, 62.2 to 85.6 ms), base.en 0.971 (p = 2.9e-08), Moonshine
+  tiny 0.956 (p = 2.5e-10). F0 holds the other review fixes too, but none of them is in the
+  decode path of these models.
+- Decision: KEEP (commit 26ebcba).
+
+### Profile P-10 (the thread team by job: `oploop/baseline/trace.exe`, a temporary build)
+
+`Team::for_each` counted each parallel job, its duration, and the serial time between two
+jobs (a gap). CLI, 200 clean clips, one process, one run, not a reported number.
+
+| | Redux | Whisper tiny | Moonshine tiny |
+|---|---:|---:|---:|
+| Calls, total | 9,139 ms | 17,604 ms | 13,227 ms |
+| Inside parallel jobs | 8,804 ms (96 %) | 12,511 ms (71 %) | 7,374 ms (56 %) |
+| Jobs under 5 us (count, time) | 44,940, 133 ms | 346,824, 902 ms | 528,575, 796 ms |
+| Serial gaps of 100 us to 3 ms (count, time) | 528, 269 ms | 9,481, 4,353 ms | 7,400, 3,344 ms |
+| Serial gaps of 3 ms or more | 9, 62 ms | 22, 158 ms | 98, 1,775 ms |
+
+- Redux is parallel for 96 % of a call. Its jobs under 5 us are 1.5 % of the time.
+- Whisper tiny: about 24 gaps of 0.65 ms and 23 gaps of 0.25 ms per clip, 22 ms of 88 ms.
+  The 0.65 ms gap is the beam step on the caller: for each of 5 beams, `log_sum_exp` over
+  51,864 logits, a scalar `max` fold, `mask`, and `top`. All other threads spin meanwhile.
+- Whisper tiny runs 1,734 jobs under 5 us per clip (mean 2.6 us): the decoder's norms, GELU,
+  per-beam attention, and dense products for 5 rows. The work of one is far under 1 us.
+- Moonshine tiny: 45 % of a call is serial. 98 gaps of 18 ms (not found yet), and 32 gaps
+  of 0.36 ms per clip (the beam step, vocabulary 32,768).
+
+### SI-013 beam step: the beams' scores in parallel
+
+- Journey: J1, J2, J3.
+- Hypothesis: the beam step on the caller (`beam.rs` `search`: `log_sum_exp`, `mask`, `top`
+  for each live beam, one after the other) costs about 16 ms of 88 ms per Whisper tiny clip
+  (18 %), and about 11 ms of 66 ms per Moonshine tiny clip. One task per beam on the team
+  should cut that stage about 4 times (5 beams), so tiny about 12 % faster and Moonshine
+  tiny about 12 % faster. CPU time per clip falls too: 15 threads spin less.
+- Test: each beam's candidates are computed alone and joined in beam order, so the sort
+  sees the same list: 0 texts differ.
