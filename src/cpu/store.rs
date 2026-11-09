@@ -277,8 +277,9 @@ struct Progress {
     span: (f32, f32),
     total: AtomicU64,
     done: AtomicU64,
-    /// The last value reported, in thousandths.
-    shown: AtomicU64,
+    /// The highest value reported, in thousandths. All passes of one load
+    /// share it, so the value never goes back when a pass starts again.
+    shown: Arc<AtomicU64>,
 }
 
 static PROGRESS: Mutex<Option<Arc<Progress>>> = Mutex::new(None);
@@ -303,11 +304,14 @@ pub(crate) fn did_read(bytes: u64) {
     }
 }
 
+/// The caller's progress function, and the highest value it got in this load.
+type Report<'a> = (&'a Arc<dyn Fn(f32) + Send + Sync>, &'a Arc<AtomicU64>);
+
 /// One load pass with `cache` as its session. Returns the model and the
 /// session, for its writer or its misses.
 fn pass<R>(
     cache: Option<Cache>,
-    report: Option<&Arc<dyn Fn(f32) + Send + Sync>>,
+    report: Option<Report<'_>>,
     span: (f32, f32),
     load: impl FnOnce() -> R,
 ) -> (R, Option<Session>) {
@@ -315,18 +319,33 @@ fn pass<R>(
         cache,
         missed: false,
     });
-    *PROGRESS.lock() = report.map(|report| {
+    *PROGRESS.lock() = report.map(|(report, shown)| {
         Arc::new(Progress {
             report: Arc::clone(report),
             span,
             total: AtomicU64::new(0),
             done: AtomicU64::new(0),
-            shown: AtomicU64::new(0),
+            shown: Arc::clone(shown),
         })
     });
+    // Also when `load` panics: a session that stays would take the buffers
+    // of the next load, and its progress function would get their reads.
+    let _closed = Closed;
     let result = load();
-    *PROGRESS.lock() = None;
-    (result, SESSION.lock().take())
+    // A statement of its own: the lock must be free again when `_closed`
+    // drops and takes it (a guard in the last expression lives longer).
+    let session = SESSION.lock().take();
+    (result, session)
+}
+
+/// Ends the session and the progress of a pass when it drops.
+struct Closed;
+
+impl Drop for Closed {
+    fn drop(&mut self) {
+        *PROGRESS.lock() = None;
+        *SESSION.lock() = None;
+    }
 }
 
 /// Runs a load that keeps no cache, in its turn: its buffers must not reach
@@ -354,9 +373,10 @@ pub(crate) fn load<M>(
     load: impl Fn() -> Result<M, String>,
 ) -> Result<M, String> {
     let _turn = LOADS.lock();
-    let report = report.as_ref();
+    let shown = Arc::new(AtomicU64::new(0));
+    let report = report.as_ref().map(|report| (report, &shown));
     let finished = |model: Result<M, String>| {
-        if let (Some(report), Ok(_)) = (report, &model) {
+        if let (Some((report, _)), Ok(_)) = (report, &model) {
             report(1.0);
         }
         model
@@ -402,15 +422,19 @@ pub(crate) fn load<M>(
     finished(pass(cache, report, (0.6, 0.4), &load).0)
 }
 
-/// Removes the cache files of other Trit versions and kernel paths.
+/// Removes the cache files of other Trit versions and kernel paths. The
+/// files of the other precisions of this version stay: a second program can
+/// use one of them.
 fn remove_stale(folder: &Path, keep: &str) {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return;
     };
+    let (version, kernels) = (version_part(), kernels_part());
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name != keep && name.starts_with("weights-") && name.ends_with(".bin") {
+        let current = name.starts_with(&version) && name.ends_with(&kernels);
+        if name != keep && !current && name.starts_with("weights-") && name.ends_with(".bin") {
             // A file that another process maps stays until it closes it.
             let _ = std::fs::remove_file(entry.path());
         }
@@ -440,14 +464,21 @@ fn remove_old_temporaries(folder: &Path) {
 /// The cache file name for a load: the Trit version, the precision, and the
 /// kernel paths, which set the layouts.
 pub(crate) fn file_name(precision: &str) -> String {
+    format!("{}{precision}{}", version_part(), kernels_part())
+}
+
+/// The start of every cache file name of this Trit version.
+fn version_part() -> String {
+    format!("weights-{}-", env!("CARGO_PKG_VERSION"))
+}
+
+/// The end of every cache file name of this computer's kernel paths.
+fn kernels_part() -> String {
     let path: String = super::cpu_path()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    format!(
-        "weights-{}-{precision}-{path}.bin",
-        env!("CARGO_PKG_VERSION")
-    )
+    format!("-{path}.bin")
 }
 
 struct Mapping {

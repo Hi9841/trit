@@ -359,6 +359,11 @@ impl Family for Canary {
 
     /// Terms to favor while decoding; with terms set, decoding is greedy (the
     /// bonuses follow one sequence). See `parakeet::bias`.
+    /// The languages of the prompt. Another code decodes as English.
+    fn languages(&self) -> Option<Vec<String>> {
+        Some(self.config.languages.clone())
+    }
+
     fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
         let (bias, skipped) = bias::build(&self.tokenizer, terms, weights);
         *self.dictionary.write() = bias;
@@ -371,7 +376,7 @@ impl Family for Canary {
     /// Recordings longer than 40 s (the longest Canary was trained on) go
     /// through in windows cut at quiet points.
     fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        windowed(samples, WINDOW_SAMPLES, |window| {
+        windowed(samples, WINDOW_SAMPLES, options, |window| {
             self.transcribe_window(window, options)
         })
     }

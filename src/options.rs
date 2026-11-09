@@ -33,11 +33,11 @@ pub struct Options {
 }
 
 /// Stops a call that runs on another thread. Parakeet looks at it between
-/// encoder blocks, between decoder steps, and between windows, and the call
+/// encoder blocks, between decoder steps, and between windows; the other
+/// families between windows (30 s to 2 minutes of audio each). The call
 /// then returns no text. The caller holds this value, so it knows that the
-/// empty text is not silence. The other families do not look at it yet and
-/// run to the end. Clones share one flag; two values are equal when they
-/// share it.
+/// empty text is not silence. Clones share one flag; two values are equal
+/// when they share it.
 #[derive(Clone, Debug, Default)]
 pub struct Cancel(Arc<AtomicBool>);
 

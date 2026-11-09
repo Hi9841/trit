@@ -374,7 +374,7 @@ fn parse_yaml(text: &str) -> Result<Value, String> {
         return Ok(Value::Null);
     }
     let indent = lines[0].0;
-    let value = block(&mut lines, &mut at, indent)?;
+    let value = block(&mut lines, &mut at, indent, 0)?;
     if at != lines.len() {
         return Err(format!("line {} is not indented as YAML", at + 1));
     }
@@ -385,8 +385,21 @@ fn is_item(text: &str) -> bool {
     text == "-" || text.starts_with("- ")
 }
 
-/// The mapping or sequence whose lines start at `indent`.
-fn block(lines: &mut [(usize, String)], at: &mut usize, indent: usize) -> Result<Value, String> {
+/// Levels of mappings and sequences inside each other. A NeMo config has
+/// about 6; each level is a call of `block`, and a file of `- - - ...`
+/// used all of the stack.
+const MAX_YAML_DEPTH: usize = 64;
+
+/// The mapping or sequence whose lines start at `indent`, `depth` levels down.
+fn block(
+    lines: &mut [(usize, String)],
+    at: &mut usize,
+    indent: usize,
+    depth: usize,
+) -> Result<Value, String> {
+    if depth > MAX_YAML_DEPTH {
+        return Err(format!("line {} is nested too deep", *at + 1));
+    }
     if is_item(&lines[*at].1) {
         let mut items = Vec::new();
         while *at < lines.len() && lines[*at].0 == indent && is_item(&lines[*at].1) {
@@ -395,13 +408,13 @@ fn block(lines: &mut [(usize, String)], at: &mut usize, indent: usize) -> Result
                 *at += 1;
                 let child = lines.get(*at).map(|line| line.0).filter(|i| *i > indent);
                 items.push(match child {
-                    Some(child) => block(lines, at, child)?,
+                    Some(child) => block(lines, at, child, depth + 1)?,
                     None => Value::Null,
                 });
             } else if is_item(&rest) || key_value(&rest).is_some() {
                 // `- - 70` or `- key: value`: the rest opens a block two columns in.
                 lines[*at] = (indent + 2, rest);
-                items.push(block(lines, at, indent + 2)?);
+                items.push(block(lines, at, indent + 2, depth + 1)?);
             } else {
                 items.push(scalar(&rest)?);
                 *at += 1;
@@ -417,10 +430,10 @@ fn block(lines: &mut [(usize, String)], at: &mut usize, indent: usize) -> Result
         *at += 1;
         let value = if value.is_empty() {
             match lines.get(*at) {
-                Some((child, _)) if *child > indent => block(lines, at, *child)?,
+                Some((child, _)) if *child > indent => block(lines, at, *child, depth + 1)?,
                 // OmegaConf writes a sequence at the indent of its key.
                 Some((child, text)) if *child == indent && is_item(text) => {
-                    block(lines, at, indent)?
+                    block(lines, at, indent, depth + 1)?
                 }
                 _ => Value::Null,
             }

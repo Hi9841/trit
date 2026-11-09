@@ -9,7 +9,9 @@ pub enum Device {
     /// Dense and ternary products run on the GPU. The load fails when the
     /// machine has no adapter, or when Trit was built without `gpu`.
     Gpu,
-    /// The GPU when it is available, otherwise the CPU.
+    /// The faster of the two for the model: the GPU when the computer has
+    /// an adapter and the model's family runs faster there (the Parakeet
+    /// encoder), otherwise the CPU.
     Auto,
 }
 
@@ -34,8 +36,14 @@ impl Device {
 }
 
 /// `TRIT_DEVICE=cpu|gpu|auto` overrides `requested`. `Gpu` fails when there
-/// is no adapter. `Auto` is then the CPU. The result is `Cpu` or `Gpu`.
-pub(crate) fn active_device(requested: Device) -> Result<Device, String> {
+/// is no adapter. `Auto` is the GPU only for a model that runs faster there
+/// (`gpu_gain`) on a computer with an adapter. The result is `Cpu` or `Gpu`.
+///
+/// Why `Auto` is not "the GPU when there is one": a dense product of the
+/// other families goes to the GPU and back for each layer. On an RTX 4090
+/// that made Whisper tiny, base.en, and large-v3-turbo 1.7, 2.0, and 2.6
+/// times slower than the CPU (3 clips of 5 s, 2026-11-09).
+pub(crate) fn active_device(requested: Device, gpu_gain: bool) -> Result<Device, String> {
     let requested = match std::env::var("TRIT_DEVICE") {
         Ok(name) if !name.is_empty() => Device::parse(&name.to_ascii_lowercase())?,
         _ => requested,
@@ -43,7 +51,7 @@ pub(crate) fn active_device(requested: Device) -> Result<Device, String> {
     match requested {
         Device::Cpu => Ok(Device::Cpu),
         Device::Gpu => gpu_adapter().map(|_| Device::Gpu),
-        Device::Auto => Ok(if gpu_adapter().is_ok() {
+        Device::Auto => Ok(if gpu_gain && gpu_adapter().is_ok() {
             Device::Gpu
         } else {
             Device::Cpu

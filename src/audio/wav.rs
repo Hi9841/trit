@@ -3,6 +3,9 @@
 
 use std::path::Path;
 
+/// WAVE_FORMAT_EXTENSIBLE: the real format code is in the SubFormat field.
+const EXTENSIBLE: u16 = 0xFFFE;
+
 pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let not_wav = || format!("{} is not a WAV file", path.display());
@@ -12,20 +15,26 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
     let mut format = None;
     let mut data = None;
     let mut offset = 12usize;
-    while offset + 8 <= bytes.len() {
+    while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
         let id = &bytes[offset..offset + 4];
         let size = le_u32(&bytes, offset + 4) as usize;
         let body = offset + 8;
         // A writer that streams sets the data size too large; read what is there.
-        let end = (body + size).min(bytes.len());
+        let end = body.saturating_add(size).min(bytes.len());
         if id == b"fmt " && end - body >= 16 {
             let field = |at: usize| u16::from_le_bytes([bytes[body + at], bytes[body + at + 1]]);
             let rate = le_u32(&bytes, body + 4);
-            format = Some((field(0), field(2), rate, field(14)));
+            // WAVE_FORMAT_EXTENSIBLE: the format code is the start of the
+            // SubFormat field (1 PCM, 3 IEEE float), not the bit depth.
+            let tag = match field(0) {
+                EXTENSIBLE if end - body >= 26 => field(24),
+                tag => tag,
+            };
+            format = Some((tag, field(2), rate, field(14)));
         } else if id == b"data" {
             data = Some(&bytes[body..end]);
         }
-        offset = body + size + (size % 2);
+        offset = body.saturating_add(size).saturating_add(size % 2);
     }
     let (tag, channels, rate, bits) = format.ok_or_else(not_wav)?;
     let data = data.ok_or_else(not_wav)?;
@@ -36,13 +45,15 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
             path.display()
         ));
     }
-    // 1 = PCM, 3 = IEEE float, 0xFFFE = extensible (the subformat matches the bit depth here).
+    // 1 = PCM, 3 = IEEE float.
     let sample: fn(&[u8]) -> f32 = match (tag, bits) {
-        (1 | 0xFFFE, 16) => |b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0,
-        (3 | 0xFFFE, 32) => |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+        (1, 16) => |b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0,
+        (1, 24) => |b| i32::from_le_bytes([0, b[0], b[1], b[2]]) as f32 / 2_147_483_648.0,
+        (1, 32) => |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0,
+        (3, 32) => |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
         _ => {
             return Err(format!(
-                "{} is {bits}-bit format {tag}; Trit reads 16-bit PCM or 32-bit float. Convert it: ffmpeg -i \"{}\" -ar 16000 -ac 1 -c:a pcm_s16le out.wav",
+                "{} is {bits}-bit format {tag}; Trit reads 16, 24, or 32-bit PCM and 32-bit float. Convert it: ffmpeg -i \"{}\" -ar 16000 -ac 1 -c:a pcm_s16le out.wav",
                 path.display(),
                 path.display()
             ))

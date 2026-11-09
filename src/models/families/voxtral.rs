@@ -118,7 +118,7 @@ impl Family for Voxtral {
             tail.extend(self.bpe.encode_plain(&format!("lang:{code}")));
         }
         tail.push(k.transcribe);
-        speech_windows(samples, WINDOW_SAMPLES, |window| {
+        speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             let encoded = self.encoder.encode(&self.mel.compute(window));
             // Each row of the projector's input is `join` encoder frames side by side.
             let n = encoded.len() / (self.join * self.d_encoder);

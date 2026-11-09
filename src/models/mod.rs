@@ -40,6 +40,13 @@ pub trait Family: Send + Sync {
     fn set_dictionary(&self, terms: &[String], _weights: BiasWeights) -> Vec<String> {
         terms.to_vec()
     }
+
+    /// The language codes the model takes, when it has a list of them
+    /// (Whisper's language tokens, Canary's prompt languages). `None`: the
+    /// model takes no language, or any code.
+    fn languages(&self) -> Option<Vec<String>> {
+        None
+    }
 }
 
 type Load =
@@ -50,6 +57,9 @@ type Load =
 pub struct Row {
     pub model_type: &'static str,
     spread: Spread,
+    /// `Device::Auto` selects the GPU: a measurement shows that the family
+    /// runs faster there (see `active_device`).
+    gpu_gain: bool,
     load: Load,
 }
 
@@ -57,17 +67,27 @@ const fn row<F: Family + 'static>(model_type: &'static str, spread: Spread) -> R
     Row {
         model_type,
         spread,
+        gpu_gain: false,
         load: |files, config, precision, device| {
             Ok(Box::new(F::load(files, config, precision, device)?))
         },
     }
 }
 
+/// `row` for a family whose encoder stays on the GPU for a whole take
+/// (the FastConformer of Parakeet).
+const fn gpu_row<F: Family + 'static>(model_type: &'static str, spread: Spread) -> Row {
+    Row {
+        gpu_gain: true,
+        ..row::<F>(model_type, spread)
+    }
+}
+
 /// Every family, by `model_type`. Tall products (Whisper) use every core.
 pub const FAMILIES: [Row; 21] = [
-    row::<parakeet::Parakeet>("parakeet_tdt", Spread::OneCache),
-    row::<parakeet::Parakeet>("parakeet_rnnt", Spread::OneCache),
-    row::<parakeet::Parakeet>("parakeet_ctc", Spread::OneCache),
+    gpu_row::<parakeet::Parakeet>("parakeet_tdt", Spread::OneCache),
+    gpu_row::<parakeet::Parakeet>("parakeet_rnnt", Spread::OneCache),
+    gpu_row::<parakeet::Parakeet>("parakeet_ctc", Spread::OneCache),
     row::<parakeet::Parakeet>("gigaam_rnnt", Spread::OneCache),
     row::<parakeet::Parakeet>("gigaam_ctc", Spread::OneCache),
     row::<parakeet::Parakeet>("medasr", Spread::OneCache),
@@ -127,7 +147,7 @@ impl Model {
                     MODEL_TYPES.join(", ")
                 )
             })?;
-        let device = crate::active_device(device)?;
+        let device = crate::active_device(device, row.gpu_gain)?;
         let _team = crate::cpu::enter(row.spread);
         let family = (row.load)(&files, &config, precision, device)?;
         Ok(Self { row, family })
@@ -150,6 +170,41 @@ impl Model {
     pub fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
         self.family.set_dictionary(terms, weights)
     }
+
+    /// Whether the model can obey `options`: the language is one of the
+    /// model's list, or, for a model with no list, has the form of an
+    /// ISO 639-1 code (`en`, `en-US`). A call with a code that fails here
+    /// runs as if no language was given.
+    pub fn check(&self, options: &Options) -> Result<(), String> {
+        let Some(code) = options.language.as_deref() else {
+            return Ok(());
+        };
+        match self.family.languages() {
+            Some(known) if known.iter().any(|k| k.eq_ignore_ascii_case(code)) => Ok(()),
+            Some(known) => Err(format!(
+                "language `{code}` is not one that this {} model takes; it takes: {}",
+                self.kind(),
+                known.join(", ")
+            )),
+            None if iso_code(code) => Ok(()),
+            None => Err(format!(
+                "language `{code}` is not an ISO 639-1 code: two letters (`en`), or with a region (`en-US`)"
+            )),
+        }
+    }
+}
+
+/// Two letters, or two letters, `-` or `_`, and a region of letters or digits.
+fn iso_code(code: &str) -> bool {
+    let (language, region) = match code.split_once(['-', '_']) {
+        Some((language, region)) => (language, Some(region)),
+        None => (code, None),
+    };
+    language.len() == 2
+        && language.bytes().all(|b| b.is_ascii_alphabetic())
+        && region.is_none_or(|r| {
+            (2..=4).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
 }
 
 /// Drops what recordings longer than the usual built.
@@ -157,35 +212,51 @@ pub fn release_caches() {
     parts::fastconformer::release_positions();
 }
 
-/// One segment per window of at most `max` samples that gives text.
+/// One segment per window of at most `max` samples that gives text. A
+/// cancelled call stops before the next window and gives no segments, as
+/// Parakeet does.
 fn windowed(
     samples: &[f32],
     max: usize,
+    options: &Options,
     mut text_of: impl FnMut(&[f32]) -> String,
 ) -> Vec<Segment> {
     let seconds = |samples: usize| samples as f32 / crate::SAMPLE_RATE as f32;
-    crate::audio::windows(samples, max)
-        .into_iter()
-        .filter_map(|window| {
-            let text = text_of(window);
-            let start = crate::audio::offset(samples, window);
-            (!text.is_empty()).then(|| Segment {
+    let mut segments = Vec::new();
+    for window in crate::audio::windows(samples, max) {
+        if options.cancelled() {
+            break;
+        }
+        let text = text_of(window);
+        let start = crate::audio::offset(samples, window);
+        if !text.is_empty() {
+            segments.push(Segment {
                 start: seconds(start),
                 end: seconds(start + window.len()),
                 text,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    if options.cancelled() {
+        segments.clear();
+    }
+    segments
 }
+
+/// Shorter than a spoken word: 100 ms. A decoder writes a guess for a
+/// window this short (Whisper tiny wrote "you" for one sample, after all
+/// six temperatures: 1.4 s).
+const MIN_SPEECH_SAMPLES: usize = crate::SAMPLE_RATE as usize / 10;
 
 /// `windowed`, without the windows that hold no speech.
 fn speech_windows(
     samples: &[f32],
     max: usize,
+    options: &Options,
     mut text_of: impl FnMut(&[f32]) -> String,
 ) -> Vec<Segment> {
-    windowed(samples, max, |window| {
-        if crate::audio::is_silent(window) {
+    windowed(samples, max, options, |window| {
+        if window.len() < MIN_SPEECH_SAMPLES || crate::audio::is_silent(window) {
             String::new()
         } else {
             text_of(window)

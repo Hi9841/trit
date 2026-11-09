@@ -371,7 +371,9 @@ impl Config {
                 }
             },
         };
-        if !config.hidden.is_multiple_of(config.heads)
+        if config.heads == 0
+            || config.hidden == 0
+            || !config.hidden.is_multiple_of(config.heads)
             || (config.subsampler == SubsamplerKind::Conv2d && !config.mels.is_multiple_of(8))
             || (config.position != Position::Relative && config.attention != Attention::Full)
             || (head == HeadKind::Transducer && config.durations.is_empty())
@@ -451,6 +453,9 @@ fn stacked(
     group: usize,
 ) -> Result<Linear, String> {
     if t.has(&format!("{}.qweight", names[0])) {
+        if group == 0 {
+            return Err("config.json has no ternary_group_size for the ternary layers".into());
+        }
         let mut packed = Vec::new();
         let mut scales = Vec::new();
         for name in names {
@@ -1744,13 +1749,18 @@ impl Parakeet {
         cancel: Option<&Cancel>,
     ) -> Option<(Buf, usize)> {
         let (x, t) = self.subsampling.forward(features, frames, self.config.mels);
-        if self.vad.as_ref().is_some_and(|vad| !vad.speech(&x, t)) {
+        // A take too short for one frame of this subsampler holds no speech.
+        if t == 0 || self.vad.as_ref().is_some_and(|vad| !vad.speech(&x, t)) {
             return None;
         }
         Some(self.encode_subsampled(x, t, cancel))
     }
 
     fn encode_subsampled(&self, mut x: Buf, t: usize, cancel: Option<&Cancel>) -> (Buf, usize) {
+        // No frames: the attention has no rows to split into tasks.
+        if t == 0 {
+            return (x, 0);
+        }
         // A GPU result returns before the speaker kernel, cancel, and out_norm below.
         // `Encoder::record` does not run those steps. `gpu_shape` keeps them off.
         #[cfg(feature = "gpu")]

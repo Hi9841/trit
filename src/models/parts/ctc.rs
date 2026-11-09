@@ -12,13 +12,17 @@ pub fn greedy(
     let mut frames = Vec::new();
     let mut previous = blank;
     for (index, frame) in logits.chunks_exact(vocab).enumerate() {
-        let mut row = frame.to_vec();
-        for &id in banned {
-            if let Some(value) = row.get_mut(id) {
-                *value = f32::NEG_INFINITY;
+        let token = if banned.is_empty() {
+            crate::layers::argmax(frame)
+        } else {
+            let mut row = frame.to_vec();
+            for &id in banned {
+                if let Some(value) = row.get_mut(id) {
+                    *value = f32::NEG_INFINITY;
+                }
             }
-        }
-        let token = crate::layers::argmax(&row);
+            crate::layers::argmax(&row)
+        };
         if token != blank && token != previous {
             tokens.push(token);
             frames.push(index);

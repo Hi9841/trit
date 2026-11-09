@@ -149,8 +149,8 @@ impl Family for Moss {
         Ok(model)
     }
 
-    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
-        speech_windows(samples, WINDOW_SAMPLES, |window| {
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             let (audio, n) = self.audio_rows(window);
             let (ids, positions) = self.prompt(n);
             let d = self.decoder.width();

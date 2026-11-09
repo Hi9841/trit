@@ -27,6 +27,13 @@ use std::sync::Arc;
 
 /// The style vectors of a voice: one row of `2 * style` per phoneme count.
 const PACK_ROWS: usize = 510;
+/// The most frames of one pass, about eight minutes of speech: the buffers
+/// of the vocoder grow with the frames, and a request for memory that fails
+/// ends the process. 510 phonemes at the model's pace give about 4000.
+const MAX_PASS_FRAMES: usize = 20_000;
+/// Voice packs kept (a name, or a blend of names). A caller that makes a new
+/// blend for each call does not fill the memory.
+const MAX_PACKS: usize = 32;
 
 pub struct Kokoro {
     vocab: HashMap<char, usize>,
@@ -167,6 +174,10 @@ impl Kokoro {
         }
         let mut sum = vec![0.0f32; PACK_ROWS * width];
         for name in &names {
+            // A name is a file of the voices folder, not a path.
+            if name.contains(['/', '\\', ':']) || name.contains("..") {
+                return Err(format!("voice {name} is not a voice name"));
+            }
             let path = self.voices_dir.join(format!("{name}.pt"));
             if !path.is_file() {
                 return Err(format!(
@@ -184,7 +195,11 @@ impl Kokoro {
         let n = names.len() as f32;
         sum.iter_mut().for_each(|v| *v /= n);
         let pack = Arc::new(sum);
-        self.packs.lock().insert(voice.to_string(), pack.clone());
+        let mut packs = self.packs.lock();
+        if packs.len() >= MAX_PACKS {
+            packs.clear();
+        }
+        packs.insert(voice.to_string(), pack.clone());
         Ok(pack)
     }
 
@@ -230,13 +245,17 @@ impl Kokoro {
         let x = self.lstm.forward(&d, tokens);
         let mut logits = self.duration_proj.forward(&x, tokens);
         crate::cpu::activation::sigmoid(&mut logits);
-        let repeats: Vec<usize> = logits
+        let lengths: Vec<f32> = logits
             .chunks_exact(self.duration_proj.out_features)
-            .map(|row| {
-                let total = row.iter().sum::<f32>() / speed;
-                total.round_ties_even().max(1.0) as usize
-            })
+            .map(|row| (row.iter().sum::<f32>() / speed).round_ties_even().max(1.0))
             .collect();
+        let total: f64 = lengths.iter().map(|n| f64::from(*n)).sum();
+        if total.is_nan() || total > MAX_PASS_FRAMES as f64 {
+            return Err(format!(
+                "one pass gives more than {MAX_PASS_FRAMES} frames of speech; use a higher speed"
+            ));
+        }
+        let repeats: Vec<usize> = lengths.iter().map(|n| *n as usize).collect();
         let frames: usize = repeats.iter().sum();
 
         // Pitch and energy, two values per frame.

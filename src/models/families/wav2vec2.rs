@@ -342,8 +342,8 @@ impl Family for Wav2Vec2 {
     }
 
     /// The model writes one language (its fine-tuning's); options change nothing.
-    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
-        speech_windows(samples, WINDOW_SAMPLES, |window| {
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             self.transcribe_window(window)
         })
     }

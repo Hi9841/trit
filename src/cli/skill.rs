@@ -29,7 +29,7 @@ fn skill_text() -> String {
     text.push_str("---\nname: trit\ndescription: Transcribe speech from WAV files to text on the CPU, offline, with the Trit engine and a Parakeet, Canary, Whisper, or Moonshine model, in any language the model speaks; clean a raw transcript with S1-mini; speak text into a WAV file with Kokoro (28 English voices) or MMS-TTS. Use when an agent must turn a recording into text or text into speech, or add speech to text or text to speech to an app in Rust, C, C++, Python, C#, Node, or Bun.\n---\n\n");
     text.push_str("# Trit\n\n");
     text.push_str(DESCRIPTION);
-    text.push_str(". `--device gpu` or `--device auto` runs the matrix products on the GPU. `auto` uses the CPU when the computer has no adapter. Build with `--features gpu` for that path.\n\n## Commands\n\n");
+    text.push_str(". `--device gpu` or `--device auto` runs the matrix products on the GPU. `auto` uses the GPU only for the Parakeet models, and the CPU when the computer has no adapter. Build with `--features gpu` for that path.\n\n## Commands\n\n");
     for line in HOME_HELP {
         text.push_str(&format!("- {}\n", line.trim_start_matches("Run ")));
     }

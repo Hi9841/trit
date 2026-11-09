@@ -107,7 +107,8 @@ export class Trit {
    * @param {{precision?: string, device?: string}} options precision: "auto" (default; int8 for layers 384 wide and
    *   more, f16 below; a GGUF file keeps its stored types), "int8" (least memory), "f16", "f32" (as the reference),
    *   or "q8_0" (ggml's Q8_0).
-   *   device: "cpu" (default), "gpu", or "auto" (the GPU, or the CPU when the computer has no adapter).
+   *   device: "cpu" (default), "gpu", or "auto" (the GPU for the Parakeet models when the computer has an adapter;
+   *   the CPU for the other families, which are slower on the GPU).
    *   TRIT_DEVICE overrides device.
    */
   constructor(model = null, { precision = null, device = "cpu" } = {}) {
@@ -135,7 +136,7 @@ export class Trit {
     return this.#samples(samples, options(language, settings)).text;
   }
 
-  /** @param {string} file a 16 kHz WAV file (16-bit PCM or 32-bit float); the rest as for `transcribe`. */
+  /** @param {string} file a 16 kHz WAV file (16, 24, or 32-bit PCM, or 32-bit float); the rest as for `transcribe`. */
   transcribeWav(file, language = null, settings = {}) {
     return this.#wav(file, options(language, settings)).text;
   }
@@ -272,7 +273,7 @@ export class Voice {
    * @param {string} input
    * @param {{voice?: string, speed?: number, noise?: number, noiseDuration?: number, seed?: number, phonemes?: boolean}} settings
    *   voice: Kokoro voice (default af_heart; "af_bella,af_sky" blends two). speed: 1 is the voice's pace,
-   *   1.25 faster. noise: how much the voice varies; noiseDuration: VITS timing. One text and one seed
+   *   1.25 faster, from 0.25 to 4. noise: how much the voice varies; noiseDuration: VITS timing. One text and one seed
    *   give the same audio. phonemes: Kokoro, the text is phonemes.
    * @returns {Float32Array} mono samples in -1..1 at `sampleRate`.
    */

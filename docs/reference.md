@@ -58,14 +58,14 @@ Every integration, in every language, follows these rules.
 
 | Topic | Rule |
 |---|---|
-| Audio | 16 kHz, mono, `f32` samples in -1..1. Trit does not resample. Convert other audio first: `ffmpeg -i in.mp3 -ar 16000 -ac 1 out.wav`. `read_wav` and the CLI read 16 kHz WAV (16-bit PCM or 32-bit float) and mix channels to mono. |
+| Audio | 16 kHz, mono, `f32` samples in -1..1. Trit does not resample. Convert other audio first: `ffmpeg -i in.mp3 -ar 16000 -ac 1 out.wav`. `read_wav` and the CLI read 16 kHz WAV (16, 24, or 32-bit PCM, or 32-bit float; also in the extensible format) and mix channels to mono. |
 | Load once | Loading takes 0.2 s (Redux) to 5 s (the large models). Load one engine when the program starts and keep it. |
 | Threads | `Trit` and `Cleaner` are `Send + Sync`. Share one engine between threads (`Arc` in Rust). Calls from several threads are safe, but they share one worker team, so together they are not faster than one after another. |
 | Model | A model is a Hugging Face folder with `config.json` and `model.safetensors`. Give a folder, a name from the [catalog](#models), or nothing (the default is `parakeet-redux`). |
 | Output | Plain text. An empty string means no speech. `segments` gives timed parts. |
 | Errors | Rust returns `Err(String)` with the cause and the fix. The C ABI returns NULL or -1; read `trit_last_error()`. The bindings raise `TritError` (Python, Node) or `TritException` (C#). |
 | Memory | Trit keeps a buffer pool (up to 16 MB) and scratch per thread for the next call. Call `release_memory()` when the program goes idle. With `LoadOptions::cache`, the weights are a mapped file, not private memory (see "Weight cache"). |
-| Language | `en` for English apps. Without a language, multilingual Whisper detects it. See [Languages](#languages). |
+| Language | `en` for English apps. Without a language, multilingual Whisper detects it. A code that the model does not take fails in the CLI, the C ABI, and the bindings; in Rust, `Trit::check(&Options)` gives the same error. See [Languages](#languages). |
 
 ## Select a model
 
@@ -161,14 +161,16 @@ trit::release_memory();                                  // when the app goes id
 | Item | Meaning |
 |---|---|
 | `Trit::load(dir) -> Result<Trit, String>` | Loads a model folder; the family comes from `config.json` |
-| `Trit::load_with(dir, &LoadOptions { precision, device, cache })` | The same with a `Precision` (`Auto`, `Int8`, `F16`, `F32`), a `Device` (`Cpu` default, `Gpu`, `Auto`), and `cache` (see "Weight cache") |
-| `Trit::load_reporting(dir, &LoadOptions, Option<Arc<dyn Fn(f32) + Send + Sync>>)` | `load_with`; the function gets the fraction loaded, 0 to 1, for a progress bar |
+| `Trit::load_with(dir, &LoadOptions { precision, device, cache })` | The same with a `Precision` (`Auto`, `Int8`, `F16`, `F32`, `Q8_0`), a `Device` (`Cpu` default, `Gpu`, `Auto`), and `cache` (see "Weight cache") |
+| `Trit::load_reporting(dir, &LoadOptions, Option<Arc<dyn Fn(f32) + Send + Sync>>)` | `load_with`; the function gets the fraction loaded, 0 to 1, for a progress bar. The value never goes back. The calls come from the loading thread and from worker threads |
 | `Trit::transcribe(&self, &[f32]) -> String` | Text; the model detects the language |
 | `Trit::transcribe_with(&self, &[f32], &Options) -> String` | Text with `Options { language, task, beam, fallback, cancel }` |
-| `Cancel::new()`, `Cancel::cancel(&self)`, `Cancel::is_cancelled(&self)` | Stops a call from another thread through `Options::cancel`. Parakeet stops between encoder blocks, decoder steps, and windows, and the call returns no text. The other families do not look at the flag yet and run to the end. A flag stays set: use a new one for each call. There is no C ABI for it |
+| `Cancel::new()`, `Cancel::cancel(&self)`, `Cancel::is_cancelled(&self)` | Stops a call from another thread through `Options::cancel`. Parakeet stops between encoder blocks, decoder steps, and windows. The other families stop between windows (30 s to 2 minutes of audio each). A cancelled call returns no text. A flag stays set: use a new one for each call. There is no C ABI for it |
 | `Trit::segments(&self, &[f32], &Options) -> Vec<Segment>` | Timed parts: `start`, `end` in seconds, `text` |
 | `Trit::kind(&self) -> &str` | `parakeet_tdt`, `parakeet_ctc`, `canary`, `whisper`, or `moonshine` |
-| `Trit::set_dictionary(&self, &[String], BiasWeights) -> Vec<String>` | Terms to favor; returns the terms the model cannot spell |
+| `Trit::check(&self, &Options) -> Result<(), String>` | Whether the model takes the language of the options: a code of the model's list (Whisper, Canary), or, for a model with no list, an ISO 639-1 code. `transcribe` does not fail for a code that fails here; it runs as if no language was given |
+| `Trit::set_dictionary(&self, &[String], BiasWeights) -> Vec<String>` | Terms to favor; returns the terms the model does not use (Parakeet: terms it cannot spell; Whisper: the first terms of a list longer than its prompt) |
+| `set_log(Option<Arc<dyn Fn(&str) + Send + Sync>>)` | Sends the engine's messages (a GPU failure and the change to the CPU) to a function. Without it they go to stderr |
 | `release_memory()` | Gives memory that earlier calls freed back to the system, and drops the position tables that recordings over 30 s built (FastConformer models; the next long recording builds them again) |
 | `Cleaner::load(dir)`, `Cleaner::load_with(dir, &LoadOptions)`, `Cleaner::clean(&self, &str, &Style) -> String` | S1-mini transcript cleanup |
 | `find_model(Option<&Path>)`, `find_cleanup_model(Option<&Path>)` | The model search in [Models](#models) |
@@ -210,7 +212,7 @@ trit_free(engine);
 | Function | Returns |
 |---|---|
 | `trit_load(const char *model)` | An engine, or NULL. A folder, a name, or NULL for the default |
-| `trit_load_with(const char *model, const char *precision)` | The same with `"auto"` (or NULL), `"int8"`, `"f16"`, `"f32"`. The device stays `"cpu"` |
+| `trit_load_with(const char *model, const char *precision)` | The same with `"auto"` (or NULL), `"int8"`, `"f16"`, `"f32"`, `"q8_0"`. The device stays `"cpu"` |
 | `trit_load_ex(const char *model, const char *precision, const char *device)` | `trit_load_with` plus `"cpu"` (or NULL), `"gpu"`, or `"auto"` |
 | `trit_gpu_info(void)` | The adapter text, or NULL. Free with `trit_free_text`. `trit_last_error` gives the reason |
 | `trit_kind(engine)` | The `model_type`, static |
@@ -584,9 +586,9 @@ Kokoro speaks phonemes. Trit's phonemizer (`src/tts/english/`) is a port of
 | Setting | Default | Meaning |
 |---|---|---|
 | `voice` | `af_heart` | Kokoro voice; `"af_bella,af_sky"` is the mean of two |
-| `speed` | 1 | Speaking rate: 1.25 is a quarter faster |
-| `noise` | Kokoro 1, VITS 0.667 | Kokoro: the noise of the vocoder's source. VITS: `noise_scale`, how much the voice varies; 0 is the flattest |
-| `noise_duration` | 0.8 | VITS only: how much the timing varies |
+| `speed` | 1 | Speaking rate: 1.25 is a quarter faster. From 0.25 to 4 |
+| `noise` | Kokoro 1, VITS 0.667 | Kokoro: the noise of the vocoder's source. VITS: `noise_scale`, how much the voice varies; 0 is the flattest. From 0 to 4 |
+| `noise_duration` | 0.8 | VITS only: how much the timing varies. From 0 to 4 |
 | `seed` | 0 | The seed of the noise: one text and one seed give the same audio |
 | `phonemes` | false | Kokoro: the text is phonemes, one pass per line |
 
@@ -662,6 +664,12 @@ maps that file. The files of the model stay as published.
 - Text: every load converts the weights and maps a buffer only when the file
   holds the same bytes. A stale or damaged file only costs a rewrite; it
   cannot change a transcript.
+- Files: a load removes the cache files of other Trit versions and kernel
+  paths. The files of the other precisions stay.
+- Keep the model folder on a local disk when you use the cache. If the file
+  goes away while the engine runs (a network folder that disconnects, a
+  removable disk, a tool that truncates the file), the next read of the
+  weights is an access fault that stops the process. No program can catch it.
 
 ## Precision
 
@@ -740,14 +748,21 @@ the same as in the last release.
 |---|---|
 | `cpu` (default) | Every product runs on the CPU |
 | `gpu` | Dense and ternary products run on the GPU. The load fails when the computer has no adapter, or when the build has no `gpu` feature |
-| `auto` | The GPU when an adapter is present. The CPU when the adapter is missing |
+| `auto` | The faster device for the model: the GPU for the Parakeet families when an adapter is present, the CPU for all other families and when the adapter is missing |
 
 `TRIT_DEVICE` (`cpu`, `gpu`, or `auto`) overrides the device of a load.
 `trit doctor` prints the adapter, or the reason there is none.
 `trit_gpu_info` returns the adapter text. It returns NULL, and
 `trit_last_error` gives the reason, when the computer has no adapter.
-A GPU error does not stop a call: Trit runs that call on the CPU and prints
-one line to stderr.
+A GPU error does not stop a call: Trit runs that call on the CPU and writes
+one line to stderr, or to the function of `set_log`. After 3 failures in
+sequence, all later calls of the process use the CPU.
+
+`auto` does not select the GPU for the other families, because each of
+their dense products goes to the GPU and back. On an RTX 4090 (Vulkan)
+against a Ryzen 7950X3D, 3 clips of 5 s (2026-11-09): Whisper tiny 89 ms
+on the GPU and 51 ms on the CPU, base.en 176 and 90 ms, large-v3-turbo
+2030 and 795 ms. `gpu` still puts these families on the GPU.
 
 The GPU sums in another order than the CPU, so some takes differ from the
 CPU text. Parakeet Redux on an RTX 4090 (Vulkan), 46 takes of 0.8 to 39 s, median

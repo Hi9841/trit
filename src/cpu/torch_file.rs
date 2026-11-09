@@ -54,13 +54,22 @@ pub fn tensors_in(file: &File, base: usize, len: usize) -> Result<Vec<Found>, St
         if entry.method != 0 {
             return Err(format!("tensor {name}: its storage is compressed"));
         }
+        // Checked: a shape or an offset from the pickle can be any number,
+        // and a range that wraps asked for a buffer of that size.
         let width = width(tensor.dtype);
-        let count: usize = tensor.shape.iter().product();
-        let start = entry.data + tensor.offset * width;
-        let end = start + count * width;
-        if end > entry.data + entry.size {
+        let range = tensor
+            .shape
+            .iter()
+            .try_fold(1usize, |count, dim| count.checked_mul(*dim))
+            .and_then(|count| count.checked_mul(width))
+            .and_then(|bytes| {
+                let start = entry.data.checked_add(tensor.offset.checked_mul(width)?)?;
+                Some((start, start.checked_add(bytes)?))
+            })
+            .filter(|(_, end)| *end <= entry.data + entry.size);
+        let Some((start, end)) = range else {
             return Err(format!("tensor {name} runs past its storage"));
-        }
+        };
         tensors.push(Found {
             name,
             dtype: tensor.dtype,
@@ -293,6 +302,8 @@ struct Machine {
 impl Machine {
     fn run(mut self, code: &[u8]) -> Result<Value, String> {
         let mut at = 0usize;
+        // Values that memo reads and DUP copied, in nodes.
+        let mut copied = 0usize;
         let bad = |what: &str| format!("the checkpoint's pickle is not one Trit reads ({what})");
         let take = |at: &mut usize, len: usize| -> Result<&[u8], String> {
             let slice = code.get(*at..*at + len).ok_or_else(|| bad("truncated"))?;
@@ -403,7 +414,12 @@ impl Machine {
                     } else {
                         u32le(take(&mut at, 4)?, 0)
                     };
-                    let value = self.memo.get(&key).cloned().ok_or_else(|| bad("memo"))?;
+                    let value = self.memo.get(&key).ok_or_else(|| bad("memo"))?;
+                    copied += nodes(value);
+                    if copied > MAX_COPIED_NODES {
+                        return Err(bad("too many copies of memo values"));
+                    }
+                    let value = value.clone();
                     self.stack.push(value);
                 }
                 b'0' => {
@@ -413,7 +429,12 @@ impl Machine {
                     self.items()?;
                 }
                 b'2' => {
-                    let top = self.stack.last().cloned().ok_or_else(|| bad("DUP"))?;
+                    let top = self.stack.last().ok_or_else(|| bad("DUP"))?;
+                    copied += nodes(top);
+                    if copied > MAX_COPIED_NODES {
+                        return Err(bad("too many copies of stack values"));
+                    }
+                    let top = top.clone();
                     self.stack.push(top);
                 }
                 b't' => {
@@ -530,6 +551,31 @@ impl Machine {
     }
 }
 
+/// The most nodes that memo reads and DUP may copy. A memo read copies its
+/// value, so a pickle of a few hundred bytes can double a value until the
+/// memory is full. A state dict copies names and storages: thousands.
+const MAX_COPIED_NODES: usize = 1 << 24;
+
+/// The values in `value`, itself included. No recursion: a value can nest deep.
+fn nodes(value: &Value) -> usize {
+    let mut count = 0;
+    let mut open = vec![value];
+    while let Some(value) = open.pop() {
+        count += 1;
+        match value {
+            Value::Tuple(items) | Value::List(items) => open.extend(items),
+            Value::Dict(items) => {
+                for (key, item) in items {
+                    open.push(key);
+                    open.push(item);
+                }
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
 fn storage_dtype(kind: &str) -> Result<&'static str, String> {
     Ok(match kind.rsplit('.').next().unwrap_or(kind) {
         "FloatStorage" => "F32",
@@ -562,30 +608,30 @@ fn call(callee: &str, args: Vec<Value>) -> Result<Value, String> {
             else {
                 return Err("a tensor in the checkpoint has an unknown layout".into());
             };
-            let ints = |values: &[Value]| -> Vec<usize> {
+            // A negative size, stride, or offset is not a layout Trit reads.
+            let unknown = || "a tensor in the checkpoint has an unknown layout".to_string();
+            let ints = |values: &[Value]| -> Result<Vec<usize>, String> {
                 values
                     .iter()
-                    .map(|v| {
-                        if let Value::Int(i) = v {
-                            *i as usize
-                        } else {
-                            0
-                        }
+                    .map(|v| match v {
+                        Value::Int(i) => usize::try_from(*i).map_err(|_| unknown()),
+                        _ => Ok(0),
                     })
                     .collect()
             };
-            let (shape, stride) = (ints(&size), ints(&stride));
-            let mut expected = 1;
+            let (shape, stride) = (ints(&size)?, ints(&stride)?);
+            let offset = usize::try_from(offset).map_err(|_| unknown())?;
+            let mut expected = 1usize;
             for (dim, step) in shape.iter().zip(&stride).rev() {
                 if *dim > 1 && *step != expected {
                     return Err("a tensor in the checkpoint is not contiguous".into());
                 }
-                expected *= dim;
+                expected = expected.saturating_mul(*dim);
             }
             Ok(Value::Tensor(Tensor {
                 key,
                 dtype,
-                offset: offset as usize,
+                offset,
                 shape,
             }))
         }

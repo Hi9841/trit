@@ -51,7 +51,7 @@ impl Config {
                 )
             }
         };
-        if !heads.is_multiple_of(kv_heads) {
+        if heads == 0 || kv_heads == 0 || !heads.is_multiple_of(kv_heads) {
             return Err("config.json: the query heads do not share the key heads evenly".into());
         }
         let d = num("hidden_size")?;
@@ -121,7 +121,8 @@ pub struct Prefix {
 
 impl CausalLm {
     pub fn load(files: &Files, precision: Precision, device: Device) -> Result<Self, String> {
-        let device = crate::active_device(device)?;
+        // No measurement shows a gain for a language model on the GPU.
+        let device = crate::active_device(device, false)?;
         let config = Json::parse(&files.read("config.json")?)?;
         let t = files.tensors(precision, device)?;
         Self::from_tensors(&t, &config, ("", ""))

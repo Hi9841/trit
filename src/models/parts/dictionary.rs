@@ -26,7 +26,7 @@ const TERMS_PER_SPAN: usize = 2;
 /// Longer terms are skipped: no name is this long, and the merges of
 /// `Tokenizer::encode` take time with the square of a word's length (one
 /// term of 10,000 letters took 2 s to set).
-const MAX_TERM_CHARS: usize = 100;
+pub(crate) const MAX_TERM_CHARS: usize = 100;
 /// Sound checks per window, the closest spellings first.
 const MAX_CANDIDATES: usize = 16;
 /// The sound cannot tell "rust" from "Rust". A term that adds only a first

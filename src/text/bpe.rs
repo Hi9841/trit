@@ -5,13 +5,17 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Ids that the vocabulary may leave free past twice its entries.
+const MAX_ID_GAP: usize = 1 << 16;
+
 pub struct Bpe {
     /// Token id to its bytes; special tokens keep their text.
     pieces: Vec<Vec<u8>>,
     special: Vec<bool>,
     ids: HashMap<String, usize>,
-    /// Merge rank of each adjacent pair of symbols; lower merges first.
-    merges: HashMap<(String, String), usize>,
+    /// Merge rank of each adjacent pair of symbols, left then right; lower
+    /// merges first. Two maps, so a lookup needs no key built from the pair.
+    merges: HashMap<String, HashMap<String, usize>>,
     /// Special tokens as text, longest first, for `encode`.
     specials: Vec<(String, usize)>,
     split: Split,
@@ -132,7 +136,19 @@ impl Bpe {
             entries.push((id, content.as_bytes().to_vec(), special, content));
         }
         specials.sort_by_key(|(text, _)| std::cmp::Reverse(text.len()));
-        let size = entries.iter().map(|e| e.0 + 1).max().unwrap_or(0);
+        // A real vocabulary has few gaps. The table takes the size of the
+        // largest id, and an allocation that fails ends the process.
+        let largest = entries.iter().map(|e| e.0).max();
+        if largest
+            .is_some_and(|id| id >= entries.len().saturating_mul(2).saturating_add(MAX_ID_GAP))
+        {
+            return Err(format!(
+                "the tokenizer's id {} is far past its {} tokens",
+                largest.unwrap_or(0),
+                entries.len()
+            ));
+        }
+        let size = largest.map_or(0, |id| id + 1);
         let mut pieces = vec![Vec::new(); size];
         let mut special = vec![false; size];
         let mut ids = HashMap::with_capacity(size);
@@ -141,9 +157,9 @@ impl Bpe {
             special[id] = is_special;
             ids.insert(text, id);
         }
-        let mut ranks = HashMap::new();
-        for (rank, pair) in merges.enumerate() {
-            ranks.entry(pair).or_insert(rank);
+        let mut ranks: HashMap<String, HashMap<String, usize>> = HashMap::new();
+        for (rank, (left, right)) in merges.enumerate() {
+            ranks.entry(left).or_default().entry(right).or_insert(rank);
         }
         Ok(Self {
             pieces,
@@ -175,7 +191,7 @@ impl Bpe {
                 bytes.extend_from_slice(&self.pieces[id]);
             }
         }
-        String::from_utf8_lossy(&bytes).into_owned()
+        super::lossy(&bytes)
     }
 
     /// Token ids of `text`. Special tokens written in the text (`<|im_start|>`)
@@ -228,7 +244,8 @@ impl Bpe {
             .collect();
         super::merge_symbols(&mut symbols, |left, right| {
             self.merges
-                .get(&(left.to_string(), right.to_string()))
+                .get(left)
+                .and_then(|rights| rights.get(right))
                 .copied()
         });
         for symbol in symbols {

@@ -364,6 +364,10 @@ pub fn attention_with(
 ) -> Buf {
     let (hd, tk) = (kv.hd, kv.tk);
     assert_eq!(hd * heads, d);
+    // No queries: nothing to split into tasks.
+    if tq == 0 {
+        return Buf::scratch(0);
+    }
     let group = heads / kv.kv_heads;
     let scale = 1.0 / (hd as f32).sqrt();
     // One task per head and block of queries: 20 heads alone would leave

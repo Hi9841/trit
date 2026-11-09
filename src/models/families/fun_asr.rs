@@ -192,8 +192,8 @@ impl Family for FunAsr {
         })
     }
 
-    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
-        speech_windows(samples, WINDOW_SAMPLES, |window| {
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             let (features, frames) = self.frontend.compute(window);
             if frames == 0 {
                 return String::new();

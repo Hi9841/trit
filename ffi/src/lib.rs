@@ -299,6 +299,7 @@ pub unsafe extern "C" fn trit_transcribe_with(
         let engine = engine_arg(engine)?;
         let mut options = options(language)?;
         options.beam = usize::try_from(beam).map_err(|_| format!("beam {beam} is below 0"))?;
+        engine.check(&options)?;
         let samples = samples_arg(samples, count)?;
         Ok(owned_text(engine.transcribe_with(samples, &options)))
     })
@@ -319,6 +320,7 @@ pub unsafe extern "C" fn trit_transcribe_wav(
     guard(std::ptr::null_mut(), || {
         let engine = engine_arg(engine)?;
         let options = options(language)?;
+        engine.check(&options)?;
         let samples = trit::read_wav(Path::new(text_arg(path, "path")?))?;
         Ok(owned_text(engine.transcribe_with(&samples, &options)))
     })
@@ -402,6 +404,7 @@ pub unsafe extern "C" fn trit_transcribe_json(
     guard(std::ptr::null_mut(), || {
         let engine = engine_arg(engine)?;
         let (options, timestamps) = json_options(options)?;
+        engine.check(&options)?;
         let samples = samples_arg(samples, count)?;
         Ok(owned_text(json_result(
             engine, samples, &options, timestamps,
@@ -423,6 +426,7 @@ pub unsafe extern "C" fn trit_transcribe_wav_json(
     guard(std::ptr::null_mut(), || {
         let engine = engine_arg(engine)?;
         let (options, timestamps) = json_options(options)?;
+        engine.check(&options)?;
         let samples = trit::read_wav(Path::new(text_arg(path, "path")?))?;
         Ok(owned_text(json_result(
             engine, &samples, &options, timestamps,

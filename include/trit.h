@@ -11,7 +11,11 @@
  * - Text that a function returns is yours: free it with trit_free_text().
  *   Samples from trit_speak() are yours: free them with trit_free_samples().
  * - One engine is safe to use from several threads; calls share one worker
- *   team, so they do not finish sooner in parallel.
+ *   team, so they do not finish sooner in parallel. Do not free an engine,
+ *   a cleaner, or a voice while another thread is in a call on it.
+ * - The library keeps worker threads for the life of the process. Do not
+ *   unload it (FreeLibrary, dlclose).
+ * - A language code that the model does not take fails; it is not ignored.
  *
  * Example:
  *   Trit *engine = trit_load("whisper-large-v3-turbo");   // folder, name, or NULL
@@ -62,7 +66,10 @@ Trit *trit_load_with(const char *model_dir, const char *precision);
  *   "cpu" or NULL: the processor (default)
  *   "gpu":         the graphics card. The load fails when the computer has
  *                  no adapter, or when the library was built without gpu
- *   "auto":        the graphics card, or the processor when there is no adapter
+ *   "auto":        the faster of the two for the model: the graphics card
+ *                  for the Parakeet models when the computer has an adapter,
+ *                  the processor for the other families (they are slower
+ *                  on the graphics card)
  * TRIT_DEVICE overrides the device. NULL on failure, also for an unknown device. */
 Trit *trit_load_ex(const char *model_dir, const char *precision, const char *device);
 
@@ -96,7 +103,7 @@ char *trit_transcribe(const Trit *engine, const float *samples, size_t count,
 char *trit_transcribe_with(const Trit *engine, const float *samples, size_t count,
                            const char *language, int beam);
 
-/* Transcribes a 16 kHz WAV file (16-bit PCM or 32-bit float, any channels).
+/* Transcribes a 16 kHz WAV file (16, 24, or 32-bit PCM, or 32-bit float; any channels).
  * `language` as for trit_transcribe. Returns the text, or NULL on failure.
  * Free with trit_free_text(). */
 char *trit_transcribe_wav(const Trit *engine, const char *path, const char *language);
@@ -125,8 +132,10 @@ char *trit_transcribe_wav_json(const Trit *engine, const char *path, const char 
 void trit_free_text(char *text);
 
 /* Terms to favor while decoding, one per line ("Kubernetes\nPostgreSQL").
- * "" clears them. Returns how many terms the model cannot spell (skipped),
- * or -1 on failure. Parakeet uses them; other families skip every term. */
+ * "" clears them. Returns how many terms the model does not use (skipped),
+ * or -1 on failure. Parakeet replaces words that sound like a term. Whisper
+ * takes the terms as a prompt, and skips the first terms of a list that is
+ * longer than its prompt. Canary and Moonshine favor the terms' tokens. */
 int trit_set_dictionary(const Trit *engine, const char *terms);
 
 /* Loads the transcript cleaner (Superwhisper S1-mini) from a folder; NULL
@@ -188,9 +197,10 @@ char *trit_phonemes(const TritVoice *voice, const char *text, const char *option
  *   "voice":          Kokoro: a name of trit_voice_list (default "af_heart");
  *                     "af_bella,af_sky" blends two
  *   "phonemes":       Kokoro: true when the text is phonemes, one pass per line
- *   "speed":          speaking rate; 1 is the voice's pace, 1.25 faster
- *   "noise":          how much the voice varies (VITS 0.667, Kokoro 1)
- *   "noise_duration": VITS: how much the timing varies (0.8)
+ *   "speed":          speaking rate; 1 is the voice's pace, 1.25 faster;
+ *                     from 0.25 to 4
+ *   "noise":          how much the voice varies (VITS 0.667, Kokoro 1); 0 to 4
+ *   "noise_duration": VITS: how much the timing varies (0.8); 0 to 4
  *   "seed":           0 (default) or more; one text and one seed give the
  *                     same audio
  * Returns the samples, or NULL on failure. Free with trit_free_samples(). */

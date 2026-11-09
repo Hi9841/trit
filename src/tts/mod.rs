@@ -37,6 +37,13 @@ const SENTENCE_PAUSE: f32 = 0.3;
 /// attention grows with the square of the characters, and the vocoder's
 /// buffers with the length of the audio.
 const MAX_PART_CHARS: usize = 400;
+/// The speeds a voice takes. The frames of a pass grow with `1 / speed`, and
+/// so do the buffers of the vocoder: a speed of 0.000001 asked for more
+/// memory than a computer has, and a request that fails ends the process.
+const SPEED_RANGE: (f32, f32) = (0.25, 4.0);
+/// The noise scales a voice takes (`noise`, `noise_duration`). A VITS
+/// duration is `exp` of a value that grows with `noise_duration`.
+const NOISE_RANGE: (f32, f32) = (0.0, 4.0);
 /// The Kokoro voice when none is named (the `kokoro` package's example).
 const DEFAULT_KOKORO_VOICE: &str = "af_heart";
 
@@ -76,11 +83,12 @@ pub const PHONEMIZER_FALLBACKS: [(&str, &str); 2] = [("us", FALLBACK_US), ("gb",
 
 /// The accent of a Kokoro voice, from the first letters of its name.
 pub fn voice_accent(name: &str) -> &'static str {
-    match &name[..name.len().min(2)] {
-        "af" => "American female",
-        "am" => "American male",
-        "bf" => "British female",
-        "bm" => "British male",
+    let mut letters = name.chars();
+    match (letters.next(), letters.next()) {
+        (Some('a'), Some('f')) => "American female",
+        (Some('a'), Some('m')) => "American male",
+        (Some('b'), Some('f')) => "British female",
+        (Some('b'), Some('m')) => "British male",
         _ => "not English (give phonemes)",
     }
 }
@@ -244,13 +252,14 @@ impl Voice {
     }
 
     /// The speech of `text` with `Voicing::default()`, mono at `sample_rate()`.
+    /// An error gives no samples; `speak_with` gives the error.
     pub fn speak(&self, text: &str) -> Vec<f32> {
         self.speak_with(text, &Voicing::default())
             .unwrap_or_default()
     }
 
     /// The speech of `text`, mono at `sample_rate()`, in -1..1. Fails on a
-    /// speed that is not above 0, a noise below 0, or an unknown voice.
+    /// speed outside 0.25 to 4, a noise outside 0 to 4, or an unknown voice.
     pub fn speak_with(&self, text: &str, voicing: &Voicing) -> Result<Vec<f32>, String> {
         let mut out = Vec::new();
         self.speak_stream(text, voicing, &mut |part| {
@@ -270,17 +279,12 @@ impl Voice {
         voicing: &Voicing,
         on_part: &mut dyn FnMut(&[f32]) -> bool,
     ) -> Result<(), String> {
-        let check = |name: &str, value: f32, above_zero: bool| -> Result<(), String> {
-            let ok = value.is_finite()
-                && if above_zero {
-                    value > 0.0
-                } else {
-                    value >= 0.0
-                };
-            match (ok, above_zero) {
-                (true, _) => Ok(()),
-                (false, true) => Err(format!("{name} {value} must be above 0")),
-                (false, false) => Err(format!("{name} {value} must be 0 or more")),
+        let check = |name: &str, value: f32, (low, high): (f32, f32)| -> Result<(), String> {
+            // NaN fails both comparisons.
+            if value >= low && value <= high {
+                Ok(())
+            } else {
+                Err(format!("{name} {value} must be from {low} to {high}"))
             }
         };
         let _team = crate::cpu::enter(SPREAD);
@@ -293,9 +297,9 @@ impl Voice {
                     noise: voicing.noise.unwrap_or(defaults.noise),
                     noise_duration: voicing.noise_duration.unwrap_or(defaults.noise_duration),
                 };
-                check("speed", settings.speed, true)?;
-                check("noise", settings.noise, false)?;
-                check("noise_duration", settings.noise_duration, false)?;
+                check("speed", settings.speed, SPEED_RANGE)?;
+                check("noise", settings.noise, NOISE_RANGE)?;
+                check("noise_duration", settings.noise_duration, NOISE_RANGE)?;
                 if voicing.phonemes || voicing.voice.is_some() {
                     return Err(
                         "a VITS voice reads letters: it has no phoneme input and one voice".into(),
@@ -309,7 +313,7 @@ impl Voice {
                         continue;
                     }
                     let mut audio = if first { Vec::new() } else { pause.clone() };
-                    audio.extend(model.speak(&ids, &settings, &mut noise));
+                    audio.extend(model.speak(&ids, &settings, &mut noise)?);
                     first = false;
                     if !on_part(&audio) {
                         break;
@@ -321,8 +325,8 @@ impl Voice {
                 let model = &voice.model;
                 let speed = voicing.speed.unwrap_or(1.0);
                 let scale = voicing.noise.unwrap_or(1.0);
-                check("speed", speed, true)?;
-                check("noise", scale, false)?;
+                check("speed", speed, SPEED_RANGE)?;
+                check("noise", scale, NOISE_RANGE)?;
                 if voicing.noise_duration.is_some() {
                     return Err(
                         "noise_duration is a VITS setting; the timing of Kokoro has no noise"

@@ -38,6 +38,11 @@ pub fn dtype(kind: &str) -> Option<&'static str> {
 
 /// Record `bytes` of `kind` as `rows x cols` f32 values.
 pub fn expand(kind: &str, bytes: &[u8], rows: usize, cols: usize) -> Result<Vec<f32>, String> {
+    // A record has values: with no columns, the loops below have no end
+    // that the record's length sets.
+    if rows == 0 || cols == 0 || rows.checked_mul(cols).is_none() {
+        return Err(format!("a Fermion record has the shape {rows}x{cols}"));
+    }
     match kind {
         "five_value" => five_value(bytes, rows, cols),
         "int6" => int_n(bytes, rows, cols, 6),

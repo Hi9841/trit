@@ -317,19 +317,21 @@ pub fn enter(slot: usize) -> Entered {
     let team = team();
     team.steer();
     let domain = team.domain.load(Ordering::Relaxed);
-    keep_full_speed();
     Entered {
         previous,
+        throttle: keep_full_speed(),
         affinity: set_affinity(domain),
         priority: set_priority(ABOVE_NORMAL),
         ideal: set_ideal(ideal_cpu(domain, 0, team.workers + 1)),
     }
 }
 
-/// The caller's previous team, affinity mask (0: nothing to restore),
-/// priority, and ideal processor (`None`: nothing to restore).
+/// The caller's previous team, power throttling (`None`: nothing to
+/// restore), affinity mask (0: nothing to restore), priority, and ideal
+/// processor (`None`: nothing to restore).
 pub struct Entered {
     previous: usize,
+    throttle: Option<Throttle>,
     affinity: usize,
     priority: Option<i32>,
     ideal: Option<u32>,
@@ -342,6 +344,9 @@ impl Drop for Entered {
             set_priority(priority);
         }
         set_affinity(self.affinity);
+        if let Some(throttle) = self.throttle {
+            set_throttle(throttle);
+        }
         CURRENT.set(self.previous);
     }
 }
@@ -514,22 +519,56 @@ const ABOVE_NORMAL: i32 = 1;
 #[cfg(target_os = "macos")]
 const ABOVE_NORMAL: i32 = 0x21;
 
-/// Keeps the calling thread out of Windows power throttling. An app in the
-/// background counts as low importance: Windows can lower the clock of its
-/// threads, and on a hybrid CPU move them to the slow cores, and every step
-/// then waits for them. The state stays with the thread, and a team thread
-/// only runs while there is work.
+/// The power throttling of a thread: the control mask and the state mask
+/// of `THREAD_POWER_THROTTLING_STATE`.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Throttle(u32, u32);
+
+/// Keeps the calling thread out of Windows power throttling, and returns
+/// the state it had (`None` when the system does not say: nothing to
+/// restore). An app in the background counts as low importance: Windows can
+/// lower the clock of its threads, and on a hybrid CPU move them to the slow
+/// cores, and every step then waits for them. The state stays with the
+/// thread: a team thread keeps it (it only runs while there is work), and
+/// the caller's thread gets its own state back when its `Entered` drops.
 #[cfg(windows)]
-fn keep_full_speed() {
+fn keep_full_speed() -> Option<Throttle> {
     use windows::Win32::System::Threading::{
-        GetCurrentThread, SetThreadInformation, ThreadPowerThrottling,
+        GetCurrentThread, GetThreadInformation, ThreadPowerThrottling,
         THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED,
         THREAD_POWER_THROTTLING_STATE,
     };
+    let mut before = THREAD_POWER_THROTTLING_STATE {
+        Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: 0,
+        StateMask: 0,
+    };
+    // SAFETY: the pseudo handle names the calling thread, and `before` lives
+    // through the call with the size given. A failed call leaves it as it is.
+    let known = unsafe {
+        GetThreadInformation(
+            GetCurrentThread(),
+            ThreadPowerThrottling,
+            std::ptr::from_mut(&mut before).cast(),
+            std::mem::size_of_val(&before) as u32,
+        )
+    }
+    .is_ok();
+    set_throttle(Throttle(THREAD_POWER_THROTTLING_EXECUTION_SPEED, 0));
+    known.then_some(Throttle(before.ControlMask, before.StateMask))
+}
+
+#[cfg(windows)]
+fn set_throttle(Throttle(control, state): Throttle) {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadInformation, ThreadPowerThrottling,
+        THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_STATE,
+    };
     let state = THREAD_POWER_THROTTLING_STATE {
         Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
-        ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
-        StateMask: 0,
+        ControlMask: control,
+        StateMask: state,
     };
     // SAFETY: the pseudo handle names the calling thread, and `state` lives
     // through the call with the size given. A failed call changes nothing.
@@ -544,7 +583,12 @@ fn keep_full_speed() {
 }
 
 #[cfg(not(windows))]
-fn keep_full_speed() {}
+fn keep_full_speed() -> Option<Throttle> {
+    None
+}
+
+#[cfg(not(windows))]
+fn set_throttle(_throttle: Throttle) {}
 
 /// Sets this thread's priority and returns the previous one; `None` when
 /// the thread already had it, or the call failed.

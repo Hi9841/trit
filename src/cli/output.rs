@@ -16,7 +16,14 @@ pub(super) fn tilde(path: &Path) -> String {
     let text = slashes(&path);
     let text = text.strip_prefix("//?/").unwrap_or(&text);
     match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-        Ok(home) if !home.is_empty() && text.starts_with(&slashes(Path::new(&home))) => {
+        // The home folder, or a path below it: not a folder beside it
+        // whose name starts the same (`/Users/hi2`).
+        Ok(home)
+            if !home.is_empty()
+                && text
+                    .strip_prefix(&slashes(Path::new(&home)))
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/')) =>
+        {
             format!("~{}", &text[home.len()..])
         }
         _ => text.to_string(),

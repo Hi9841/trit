@@ -9,6 +9,7 @@ use crate::config::Json;
 use crate::cpu::buf::Buf;
 use crate::layers::argmax;
 use crate::models::files::Files;
+use crate::models::parts::dictionary::MAX_TERM_CHARS;
 use crate::models::{speech_windows, Family};
 use crate::text::bpe::Bpe;
 use crate::{BiasWeights, Device, Options, Precision, Segment, Task};
@@ -134,23 +135,59 @@ impl Family for Whisper {
 
     /// Terms to favor, as a prompt of earlier text ("Kubernetes, PostgreSQL"):
     /// Whisper tends to spell words as its context does. Every term can be
-    /// spelled, so none is skipped.
+    /// spelled. The prompt has room for half of the context minus one token
+    /// (as OpenAI keeps): the last terms that fit are used, and the terms
+    /// before them are skipped, as are terms longer than `MAX_TERM_CHARS`
+    /// and, for a model with no `<|startofprev|>` token, every term.
     fn set_dictionary(&self, terms: &[String], _: BiasWeights) -> Vec<String> {
-        let terms: Vec<&str> = terms
+        let (mut skipped, terms): (Vec<&str>, Vec<&str>) = terms
             .iter()
             .map(|t| t.trim())
             .filter(|t| !t.is_empty())
-            .collect();
+            .partition(|t| t.chars().count() > MAX_TERM_CHARS);
         let mut previous = Vec::new();
-        if let (Some(start), false) = (self.tokens.start_of_previous, terms.is_empty()) {
-            let ids = self.bpe.encode(&format!(" {}", terms.join(", ")));
-            // OpenAI keeps the last half of the context minus one.
-            let keep = self.model.config.max_tokens / 2 - 1;
-            previous.push(start);
-            previous.extend_from_slice(&ids[ids.len().saturating_sub(keep)..]);
+        match self.tokens.start_of_previous {
+            None => skipped.extend(&terms),
+            Some(start) => {
+                let keep = (self.model.config.max_tokens / 2).saturating_sub(1);
+                let prompt =
+                    |from: usize| self.bpe.encode(&format!(" {}", terms[from..].join(", ")));
+                // The first term of the longest tail that fits: a longer
+                // tail never has fewer tokens.
+                let (mut first, mut end) = (0, terms.len());
+                while first < end {
+                    let middle = (first + end) / 2;
+                    if prompt(middle).len() <= keep {
+                        end = middle;
+                    } else {
+                        first = middle + 1;
+                    }
+                }
+                skipped.extend(&terms[..first]);
+                if first < terms.len() {
+                    previous.push(start);
+                    previous.extend(prompt(first));
+                }
+            }
         }
         *self.previous.write() = previous;
-        Vec::new()
+        skipped.into_iter().map(str::to_string).collect()
+    }
+
+    /// The codes of the language tokens; `en` alone for an English model.
+    /// `None` for a multilingual model whose files list no languages.
+    fn languages(&self) -> Option<Vec<String>> {
+        let codes: Vec<String> = self
+            .tokens
+            .languages
+            .iter()
+            .map(|(code, _)| code.clone())
+            .collect();
+        match (codes.is_empty(), self.tokens.transcribe) {
+            (false, _) => Some(codes),
+            (true, None) => Some(vec!["en".to_string()]),
+            (true, Some(_)) => None,
+        }
     }
 
     fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
@@ -166,7 +203,7 @@ impl Family for Whisper {
                 .find(|(c, _)| c.eq_ignore_ascii_case(code.trim()))
                 .map(|(_, id)| *id)
         });
-        speech_windows(samples, WINDOW_SAMPLES, |window| {
+        speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             let encoded = self.model.encode(&self.mel.compute(window));
             let mut session = self.model.session(&encoded);
             let logits = self.model.step(&mut session, self.tokens.sot);

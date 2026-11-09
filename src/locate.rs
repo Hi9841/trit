@@ -83,11 +83,21 @@ impl Lookup {
                 self.what,
                 MODEL_FILES.join(", ")
             ),
-            None => format!(
-                "no {} found; get it: {}",
-                self.what,
-                known(self.repos[0]).map_or_else(String::new, Known::download_command)
-            ),
+            None => match std::env::var_os(self.variable) {
+                // `find` reads only the variable when it is set.
+                Some(dir) => format!(
+                    "{}={} is not a {} folder ({}); correct the variable or remove it",
+                    self.variable,
+                    Path::new(&dir).display(),
+                    self.what,
+                    MODEL_FILES.join(", ")
+                ),
+                None => format!(
+                    "no {} found; get it: {}",
+                    self.what,
+                    known(self.repos[0]).map_or_else(String::new, Known::download_command)
+                ),
+            },
         }
     }
 }
@@ -170,7 +180,17 @@ pub fn candidates(repo: &str) -> Vec<PathBuf> {
             .join(format!("models--{}", repo.replace('/', "--")))
             .join("snapshots");
         if let Ok(entries) = std::fs::read_dir(snapshots) {
-            dirs.extend(entries.flatten().map(|entry| entry.path()));
+            // The newest snapshot first: the order of a folder is not fixed,
+            // and two snapshots of one repository can hold two revisions.
+            let mut found: Vec<(std::time::SystemTime, PathBuf)> = entries
+                .flatten()
+                .map(|entry| {
+                    let changed = entry.metadata().and_then(|meta| meta.modified());
+                    (changed.unwrap_or(std::time::UNIX_EPOCH), entry.path())
+                })
+                .collect();
+            found.sort_by(|a, b| b.cmp(a));
+            dirs.extend(found.into_iter().map(|(_, dir)| dir));
         }
     }
     dirs

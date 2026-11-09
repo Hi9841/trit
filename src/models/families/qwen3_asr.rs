@@ -254,7 +254,7 @@ impl Family for Qwen3Asr {
                 .filter(|name| self.languages.iter().any(|l| l == name))
         });
         let context = self.context.read().clone();
-        speech_windows(samples, WINDOW_SAMPLES, |window| {
+        speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             self.transcribe_window(window, &context, language)
         })
     }

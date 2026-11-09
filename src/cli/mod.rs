@@ -1,5 +1,9 @@
 //! The commands of `trit`. A command is one `Command` value in its own file.
 
+// The CLI writes its results to stdout. The library must not print: its
+// messages go through `trit::set_log`.
+#![allow(clippy::print_stdout)]
+
 mod clean;
 mod doctor;
 mod home;

@@ -49,7 +49,7 @@ impl Container {
         crate::cpu::tensors::read_at(&file, &mut length, 0).map_err(error)?;
         let header_len = usize::try_from(u64::from_le_bytes(length))
             .ok()
-            .filter(|len| 8 + len <= total)
+            .filter(|len| len.checked_add(8).is_some_and(|end| end <= total))
             .ok_or_else(|| format!("{}: the header runs past the end", path.display()))?;
         let mut header = vec![0u8; header_len];
         crate::cpu::tensors::read_at(&file, &mut header, 8).map_err(error)?;
@@ -84,8 +84,12 @@ impl Container {
             // A five_value record holds a matrix; an intN record a row per
             // output, whatever the rest of its shape.
             let rows = shape.first().copied().unwrap_or(1);
-            let count: usize = shape.iter().product();
-            if (kind == "five_value" && shape.len() != 2) || rows == 0 {
+            // 0 for a product that does not fit: no record is that large.
+            let count = shape
+                .iter()
+                .try_fold(1usize, |count, dim| count.checked_mul(*dim))
+                .unwrap_or(0);
+            if (kind == "five_value" && shape.len() != 2) || rows == 0 || count == 0 {
                 return Err(format!(
                     "{}: record {name} has shape {shape:?}",
                     path.display()

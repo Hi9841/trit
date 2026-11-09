@@ -137,6 +137,9 @@ fn doctor(_: &Parsed) -> Outcome {
     if model.is_none() {
         problems.push(trit::missing_model(None));
     }
+    if let Some(problem) = trit::isa_problem() {
+        problems.push(problem);
+    }
     if trit::cpu_path() == "scalar" {
         problems.push(
             "This CPU has no AVX2; Trit runs on the slow scalar path (expect about 10x slower)"

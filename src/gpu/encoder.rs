@@ -1008,6 +1008,11 @@ impl Inner {
         encoder.copy_buffer_to_buffer(&out, 0, &self.act.staging, 0, bytes);
         self.queue.submit([encoder.finish()]);
         let values = readback(&self.instance, &self.act.staging, bytes);
+        if values.is_err() {
+            // The map of this buffer can still be pending, and a second map
+            // fails. The next encode makes a new buffer.
+            self.act.staging_bytes = 0;
+        }
         let stamped = stamp_read
             .as_ref()
             .map(|buffer| read_stamps(&self.instance, buffer, stamp_bytes));
@@ -1015,7 +1020,7 @@ impl Inner {
         if let Some(stamped) = stamped {
             match stamped {
                 Ok(ticks) => report_times(self.queue.get_timestamp_period(), &marks.names, &ticks),
-                Err(error) => eprintln!("trit: gpu profile read failed ({error})"),
+                Err(error) => crate::log(&format!("gpu profile read failed ({error})")),
             }
         }
         drop(resolved);
@@ -1415,7 +1420,9 @@ fn build_pipes(gpu: &Gpu) -> Result<Pipes, String> {
     ) {
         Ok(pipe) => (pipe, WIDE),
         Err(error) => {
-            eprintln!("trit: tiled f32 shader failed ({error}). The 16-wide product is used.");
+            crate::log(&format!(
+                "tiled f32 shader failed ({error}). The 16-wide product is used."
+            ));
             (gemm_f32_small.clone(), super::TILE)
         }
     };
@@ -1427,7 +1434,9 @@ fn build_pipes(gpu: &Gpu) -> Result<Pipes, String> {
     ) {
         Ok(pipe) => (pipe, WIDE),
         Err(error) => {
-            eprintln!("trit: tiled ternary shader failed ({error}). The 16-wide product is used.");
+            crate::log(&format!(
+                "tiled ternary shader failed ({error}). The 16-wide product is used."
+            ));
             (ternary_small.clone(), super::TILE)
         }
     };
@@ -1582,7 +1591,7 @@ fn read_stamps(
 
 fn report_times(period_ns: f32, names: &[&str], ticks: &[u64]) {
     if names.len() != ticks.len() || ticks.len() < 2 {
-        eprintln!("trit: gpu profile has {} stamps", ticks.len());
+        crate::log(&format!("gpu profile has {} stamps", ticks.len()));
         return;
     }
     let mut totals: Vec<(&str, f64)> = Vec::new();
@@ -1602,8 +1611,8 @@ fn report_times(period_ns: f32, names: &[&str], ticks: &[u64]) {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let sum: f64 = totals.iter().map(|item| item.1).sum();
-    eprintln!("trit: gpu profile {sum:.1} ms");
+    crate::log(&format!("gpu profile {sum:.1} ms"));
     for (name, ms) in totals {
-        eprintln!("trit: gpu profile {name} {ms:.1} ms");
+        crate::log(&format!("gpu profile {name} {ms:.1} ms"));
     }
 }

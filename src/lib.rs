@@ -34,7 +34,7 @@ pub use audio::wav::{read_wav, write_wav};
 pub use catalog::{known, Known, CATALOG};
 pub use cleanup::{Cleaner, Context, Structure, Style, Styling, UnknownName, CLEANUP_REPO};
 pub use cpu::gemm::Precision;
-pub use cpu::{cpu_path, threads, Spread};
+pub use cpu::{cpu_path, isa_problem, threads, Spread};
 pub(crate) use device::active_device;
 pub use device::{gpu_adapter, gpu_path, gpu_weight_bytes, Device};
 pub use locate::{
@@ -49,6 +49,29 @@ pub use tts::{
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Where the engine writes what a call cannot return: a GPU failure and the
+/// change to the CPU, and the GPU profile.
+type Log = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+static LOG: parking_lot::RwLock<Option<Log>> = parking_lot::RwLock::new(None);
+
+/// Sends the engine's messages to `sink` (a line each, without a line end),
+/// or to stderr again with `None`. A program with no console (a desktop
+/// app, a service) sees GPU failures only this way. `sink` can run on any
+/// thread, and must not call Trit.
+pub fn set_log(sink: Option<Log>) {
+    *LOG.write() = sink;
+}
+
+/// One message of the engine, for `set_log`'s sink or stderr.
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+pub(crate) fn log(message: &str) {
+    match LOG.read().as_ref() {
+        Some(sink) => sink(message),
+        #[allow(clippy::print_stderr)]
+        None => eprintln!("trit: {message}"),
+    }
+}
 /// `transcribe` takes mono samples at this rate.
 pub const SAMPLE_RATE: u32 = 16_000;
 
@@ -96,7 +119,9 @@ impl Trit {
     }
 
     /// `load_with`; `progress` gets the fraction of the load done, from 0
-    /// to 1, from the thread that loads.
+    /// to 1. It never goes back. The calls come from the thread that loads
+    /// and from the worker threads of the team, so `progress` must not
+    /// touch state of one thread.
     pub fn load_reporting(
         model_dir: &Path,
         options: &LoadOptions,
@@ -147,6 +172,15 @@ impl Trit {
     /// Whisper and Moonshine, and 40 s for Canary.
     pub fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         self.model.segments(&audio::sanitized(samples), options)
+    }
+
+    /// Whether the model can obey `options`. Fails for a language that the
+    /// model does not take: a code outside the model's list (Whisper,
+    /// Canary), or, for a model with no list, a code that is not ISO 639-1
+    /// (`eng` for `en`). A call with such a code runs as if no language was
+    /// given, so check the options that come from a user or a config file.
+    pub fn check(&self, options: &Options) -> Result<(), String> {
+        self.model.check(options)
     }
 
     /// Terms to favor while decoding, as written ("Kubernetes", "PostgreSQL").

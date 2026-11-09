@@ -506,7 +506,7 @@ impl Family for Moonshine {
 
     fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         let dictionary = self.dictionary.read();
-        speech_windows(samples, WINDOW_SAMPLES, |window| {
+        speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             // The encoder needs at least one output frame.
             let least = match &self.encoder {
                 Encoder::Conv(_) => 127 + 64 * (6 + 2 * 3),

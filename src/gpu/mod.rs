@@ -21,6 +21,8 @@ const FLAG_BIAS: u32 = 1;
 const FLAG_RELU: u32 = 2;
 /// Kept activation buffers of one size. A forward pass uses two.
 const POOL_PER_SIZE: usize = 4;
+/// Bytes of activation buffers the pool keeps. Above it the pool starts again.
+const POOL_BYTES: u64 = 256 << 20;
 /// Bytes of queued weight writes that wgpu may hold as staging buffers.
 /// Every `write_buffer` makes a staging buffer, and wgpu keeps all of them
 /// until the next submit: a load without a flush holds the whole model twice.
@@ -61,7 +63,9 @@ pub(crate) fn usable() -> bool {
 pub(crate) fn failed(error: &str) {
     log_fallback(error);
     if FAILURES.fetch_add(1, Ordering::Relaxed) + 1 == MAX_FAILURES {
-        eprintln!("trit: the GPU failed {MAX_FAILURES} times. All later calls use the CPU.");
+        crate::log(&format!(
+            "the GPU failed {MAX_FAILURES} times. All later calls use the CPU."
+        ));
     }
 }
 
@@ -86,7 +90,7 @@ pub(crate) fn wait_for_device(what: &str) -> Result<(), String> {
 /// Log the first GPU failure. Later failures stay quiet.
 pub(crate) fn log_fallback(error: &str) {
     if !LOGGED_FALLBACK.swap(true, Ordering::Relaxed) {
-        eprintln!("trit: GPU failed ({error}). This call uses the CPU.");
+        crate::log(&format!("GPU failed ({error}). This call uses the CPU."));
     }
 }
 
@@ -124,6 +128,8 @@ pub struct Gpu {
 
 struct Pool {
     storage: HashMap<u64, Vec<wgpu::Buffer>>,
+    /// Bytes of the buffers in `storage`.
+    held: u64,
     staging: Option<wgpu::Buffer>,
     staging_cap: u64,
 }
@@ -195,10 +201,10 @@ impl Gpu {
         if timestamps {
             required |=
                 wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
-            eprintln!(
-                "trit: gpu profile on, shared memory {} bytes",
+            crate::log(&format!(
+                "gpu profile on, shared memory {} bytes",
                 adapter.limits().max_compute_workgroup_storage_size
-            );
+            ));
         }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("trit"),
@@ -280,6 +286,7 @@ impl Gpu {
             dummy,
             gate: Mutex::new(Pool {
                 storage: HashMap::new(),
+                held: 0,
                 staging: None,
                 staging_cap: 0,
             }),
@@ -370,6 +377,7 @@ impl Gpu {
         {
             let mut pool = self.gate.lock();
             pool.storage.clear();
+            pool.held = 0;
             pool.staging = None;
             pool.staging_cap = 0;
         }
@@ -471,6 +479,13 @@ impl Gpu {
         self.queue.submit([encoder.finish()]);
         let values = readback(&self.instance, &staging, y_bytes);
         let scope_error = pop_scopes(scopes);
+        if values.is_err() {
+            // The map of this buffer can still be pending, and a second map
+            // fails: one timeout then failed every later call, and three
+            // failures turn the GPU off. The next call makes a new buffer.
+            pool.staging = None;
+            pool.staging_cap = 0;
+        }
         pool.give(x_bytes, x_buf);
         pool.give(y_bytes, y_buf);
         drop(pool);
@@ -487,6 +502,7 @@ impl Pool {
     fn take(&mut self, device: &wgpu::Device, size: u64) -> wgpu::Buffer {
         let size = size.max(4);
         if let Some(buffer) = self.storage.get_mut(&size).and_then(Vec::pop) {
+            self.held -= size;
             return buffer;
         }
         device.create_buffer(&wgpu::BufferDescriptor {
@@ -501,9 +517,16 @@ impl Pool {
 
     fn give(&mut self, size: u64, buffer: wgpu::Buffer) {
         let size = size.max(4);
+        // Each take length gives buffers of its own sizes. Without a limit a
+        // program that never calls `release_memory` kept them all.
+        if self.held + size > POOL_BYTES {
+            self.storage.clear();
+            self.held = 0;
+        }
         let slot = self.storage.entry(size).or_default();
-        if slot.len() < POOL_PER_SIZE {
+        if slot.len() < POOL_PER_SIZE && size <= POOL_BYTES {
             slot.push(buffer);
+            self.held += size;
         }
     }
 

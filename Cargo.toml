@@ -54,6 +54,10 @@ missing_debug_implementations = "warn"
 
 [lints.clippy]
 undocumented_unsafe_blocks = "warn"
+# The library does not print: a host with no console loses the text. The
+# messages go through `trit::log`; the CLI allows stdout for itself.
+print_stderr = "warn"
+print_stdout = "warn"
 
 [profile.release]
 codegen-units = 1

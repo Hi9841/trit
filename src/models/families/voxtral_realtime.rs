@@ -339,11 +339,11 @@ impl Family for VoxtralRealtime {
         })
     }
 
-    fn segments(&self, samples: &[f32], _: &Options) -> Vec<Segment> {
+    fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         let per = self.samples_per_token;
         let mut prompt = vec![self.bos];
         prompt.resize(1 + LEFT_PAD + OFFLINE_DELAY, self.pad);
-        speech_windows(samples, WINDOW_SAMPLES, |window| {
+        speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             // Mistral's offline layout: silence, the audio up to whole
             // tokens, silence for the delay, BOS, and a buffer.
             let left = LEFT_PAD * per;

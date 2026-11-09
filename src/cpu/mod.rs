@@ -79,6 +79,30 @@ pub fn threads(spread: Spread) -> usize {
     engine_threads(spread).0
 }
 
+/// The most threads `TRIT_THREADS` gives: a typing error (`TRIT_THREADS=100000`)
+/// must not start that many threads.
+const MAX_THREADS: usize = 256;
+
+/// The values `TRIT_ISA` takes on this kind of CPU.
+#[cfg(target_arch = "x86_64")]
+const ISA_NAMES: [&str; 3] = ["scalar", "avx2", "avxvnni"];
+#[cfg(target_arch = "aarch64")]
+const ISA_NAMES: [&str; 3] = ["scalar", "neon", "dotprod"];
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+const ISA_NAMES: [&str; 1] = ["scalar"];
+
+/// What is wrong with `TRIT_ISA`, when it has a value that selects no path
+/// (a typing error: the engine then runs its fastest path). For `trit doctor`.
+pub fn isa_problem() -> Option<String> {
+    let forced = std::env::var("TRIT_ISA").ok().filter(|v| !v.is_empty())?;
+    (!ISA_NAMES.contains(&forced.as_str())).then(|| {
+        format!(
+            "TRIT_ISA={forced} selects no kernel path and has no effect; valid values: {}",
+            ISA_NAMES.join(", ")
+        )
+    })
+}
+
 /// Team size and the affinity mask of its cores (0: no pinning). The team
 /// has no more threads than the process has CPUs: more threads than CPUs
 /// spin while the task that a step waits for has no CPU.
@@ -89,7 +113,7 @@ fn engine_threads(spread: Spread) -> (usize, usize) {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|t| *t > 0)
     {
-        return (threads, 0);
+        return (threads.min(MAX_THREADS), 0);
     }
     #[cfg(target_os = "android")]
     if let Some(mask) = fast_cores(std::path::Path::new("/sys/devices/system/cpu")) {

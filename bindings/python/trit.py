@@ -161,7 +161,10 @@ def _samples(samples):
     if hasattr(samples, "__array_interface__"):  # numpy, without importing it
         import numpy as np
 
-        buffer = np.ascontiguousarray(samples, dtype=np.float32).ravel()
+        if samples.ndim != 1:
+            # A flat copy of (frames, channels) puts the channels one after the other.
+            raise TritError(f"samples have {samples.ndim} dimensions; give mono samples (mix the channels to one)")
+        buffer = np.ascontiguousarray(samples, dtype=np.float32)
         return buffer.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), buffer.size, buffer
     buffer = samples if isinstance(samples, array) and samples.typecode == "f" else array("f", samples)
     address, count = buffer.buffer_info()
@@ -181,8 +184,9 @@ class Trit:
         `precision`: "auto" (None; int8 for layers 384 wide and more, f16
         below; a GGUF file keeps its stored types), "int8" (least memory),
         "f16", "f32" (as the reference), or "q8_0" (ggml's Q8_0).
-        `device`: "cpu" (default), "gpu", or "auto". "auto" uses the GPU, or
-        the CPU when the computer has no adapter. TRIT_DEVICE overrides it."""
+        `device`: "cpu" (default), "gpu", or "auto". "auto" uses the GPU for
+        the Parakeet models when the computer has an adapter, and the CPU for
+        the other families (they are slower on the GPU). TRIT_DEVICE overrides it."""
         self._handle = None
         handle = _lib.trit_load_ex(_arg(model), _arg(precision), _arg(device))
         if not handle:
@@ -208,7 +212,7 @@ class Trit:
 
     def transcribe_wav(self, path: str | os.PathLike, language: str | None = None, beam: int = 0,
                        task: str | None = None, fallback: bool | None = None) -> str:
-        """A 16 kHz WAV file (16-bit PCM or 32-bit float); options as for `transcribe`."""
+        """A 16 kHz WAV file (16, 24, or 32-bit PCM, or 32-bit float); options as for `transcribe`."""
         return self._wav(path, _options(language, beam, task, fallback, False))["text"]
 
     def segments(self, samples, language: str | None = None, beam: int = 0,
@@ -246,6 +250,7 @@ class Trit:
         return skipped
 
     def close(self) -> None:
+        """Frees the model. Do not call it while another thread is in a call on this engine."""
         if self._handle:
             _lib.trit_free(self._handle)
             self._handle = None
@@ -336,7 +341,7 @@ class Voice:
               noise_duration: float | None = None, seed: int = 0, phonemes: bool = False) -> array:
         """Mono samples in -1..1 at `sample_rate`, as array('f').
         `voice`: Kokoro voice (None: af_heart; "af_bella,af_sky" blends two).
-        `speed`: 1 is the voice's pace, 1.25 faster (None: the voice's own).
+        `speed`: 1 is the voice's pace, 1.25 faster, from 0.25 to 4 (None: the voice's own).
         `noise`: how much the voice varies; `noise_duration`: VITS timing.
         One text and one `seed` give the same audio. `phonemes`: Kokoro,
         the text is phonemes (one pass per line)."""

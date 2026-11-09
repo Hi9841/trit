@@ -5,7 +5,7 @@ description: Transcribe speech from WAV files to text on the CPU, offline, with 
 
 # Trit
 
-Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; 16 kHz WAV in, text out. Text to speech with Kokoro-82M (28 English voices) and MMS-TTS. `--device gpu` or `--device auto` runs the matrix products on the GPU. `auto` uses the CPU when the computer has no adapter. Build with `--features gpu` for that path.
+Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; 16 kHz WAV in, text out. Text to speech with Kokoro-82M (28 English voices) and MMS-TTS. `--device gpu` or `--device auto` runs the matrix products on the GPU. `auto` uses the GPU only for the Parakeet models, and the CPU when the computer has no adapter. Build with `--features gpu` for that path.
 
 ## Commands
 
@@ -33,7 +33,7 @@ usage: trit transcribe <path>... [--model <dir>] [--language <code>] [--dictiona
   --cleanup       clean each transcript with S1-mini (see `trit clean --help`); ms then includes it
   --cleanup-model <dir>, --styling, --structure, --context  as for `trit clean`
   --precision     auto (default: int8 for layers 384 wide and more, f16 below; a GGUF file keeps its stored types), int8 (least memory), f16, f32 (as the reference runtimes), q8_0 (ggml's Q8_0, as llama.cpp and transcribe.cpp run it)
-  --device        cpu (default), gpu, auto. auto uses the GPU, or the CPU when the computer has no adapter. TRIT_DEVICE overrides
+  --device        cpu (default), gpu, auto. auto uses the GPU for the Parakeet models when the computer has an adapter, and the CPU for the other families (slower on the GPU). TRIT_DEVICE overrides
   --beam <n>      beams for Whisper, Moonshine, and Canary (default: 5 for Whisper and Moonshine, 1 (greedy) for Canary; at most 16)
   --format        toon (default), json (full text, for programs), text (one transcript per line)
   --full          do not cut transcripts longer than 500 characters in a list of several files

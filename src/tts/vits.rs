@@ -123,11 +123,19 @@ impl Vits {
         })
     }
 
-    pub fn speak(&self, ids: &[usize], settings: &Settings, noise: &mut Noise) -> Vec<f32> {
+    /// Fails when the durations give more than `MAX_PASS_FRAMES` frames: the
+    /// buffers of the vocoder grow with the frames, and a request for memory
+    /// that fails ends the process.
+    pub fn speak(
+        &self,
+        ids: &[usize],
+        settings: &Settings,
+        noise: &mut Noise,
+    ) -> Result<Vec<f32>, String> {
         let (d, flow) = (self.config.hidden, self.config.flow);
         let tokens = ids.len();
         if tokens == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let scale = (d as f32).sqrt();
         let mut h = Buf::scratch(tokens * d);
@@ -147,10 +155,17 @@ impl Vits {
             .durations
             .reverse(&h, tokens, settings.noise_duration, noise);
         let length_scale = 1.0 / settings.speed;
-        let repeats: Vec<usize> = log_durations
+        let lengths: Vec<f32> = log_durations
             .iter()
-            .map(|w| (w.exp() * length_scale).ceil().max(0.0) as usize)
+            .map(|w| (w.exp() * length_scale).ceil().max(0.0))
             .collect();
+        let total: f64 = lengths.iter().map(|n| f64::from(*n)).sum();
+        if total.is_nan() || total > MAX_PASS_FRAMES as f64 {
+            return Err(format!(
+                "one part of the text gives more than {MAX_PASS_FRAMES} frames of speech; use a higher speed or a lower noise_duration"
+            ));
+        }
+        let repeats: Vec<usize> = lengths.iter().map(|n| *n as usize).collect();
         let frames = repeats.iter().sum::<usize>().max(1);
 
         let mut z = Buf::zeroed(frames * flow);
@@ -170,9 +185,13 @@ impl Vits {
             z.chunks_exact_mut(flow).for_each(<[f32]>::reverse);
             coupling.reverse(&mut z, frames);
         }
-        self.decoder.forward(&z, frames)
+        Ok(self.decoder.forward(&z, frames))
     }
 }
+
+/// The most frames of one pass: about two minutes of speech, five times a
+/// part of `MAX_PART_CHARS` at the model's pace.
+const MAX_PASS_FRAMES: usize = 8000;
 
 struct EncoderLayer {
     q: Conv1d,

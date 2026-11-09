@@ -12,8 +12,9 @@ pub struct Tokenizer {
     pieces: Vec<String>,
     special: Vec<bool>,
     ids: HashMap<String, usize>,
-    /// Merge rank of each adjacent pair of pieces; lower merges first.
-    merges: HashMap<(String, String), usize>,
+    /// Merge rank of each adjacent pair of pieces, left then right; lower
+    /// merges first.
+    merges: HashMap<String, HashMap<String, usize>>,
 }
 
 impl Tokenizer {
@@ -64,15 +65,15 @@ impl Tokenizer {
                 special[id] = true;
             }
         }
-        let mut merges = HashMap::new();
+        let mut merges: HashMap<String, HashMap<String, usize>> = HashMap::new();
         for (rank, merge) in json["model"]["merges"]
             .as_array()
             .into_iter()
             .flatten()
             .enumerate()
         {
-            if let Some(pair) = super::parse_merge(merge) {
-                merges.entry(pair).or_insert(rank);
+            if let Some((left, right)) = super::parse_merge(merge) {
+                merges.entry(left).or_default().entry(right).or_insert(rank);
             }
         }
         Ok(Self {
@@ -155,7 +156,7 @@ impl Tokenizer {
                 None => bytes.extend_from_slice(piece.replace(WORD_START, " ").as_bytes()),
             }
         }
-        let text = String::from_utf8_lossy(&bytes);
+        let text = super::lossy(&bytes);
         text.trim_start_matches(' ').to_string()
     }
 
@@ -170,7 +171,8 @@ impl Tokenizer {
                 .collect();
             super::merge_symbols(&mut symbols, |left, right| {
                 self.merges
-                    .get(&(left.to_string(), right.to_string()))
+                    .get(left)
+                    .and_then(|rights| rights.get(right))
                     .copied()
             });
             for symbol in &symbols {

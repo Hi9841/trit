@@ -80,7 +80,8 @@ public sealed class Trit : IDisposable
     /// <summary>A model folder, a `trit models` name, or null for the default. precision: "auto" (null;
     /// int8 for layers 384 wide and more, f16 below; a GGUF file keeps its stored types), "int8" (least memory),
     /// "f16", "f32" (as the reference), or "q8_0" (ggml's Q8_0).
-    /// device: "cpu" (default), "gpu", or "auto" (the GPU, or the CPU when the computer has no adapter).
+    /// device: "cpu" (default), "gpu", or "auto" (the GPU for the Parakeet models when the computer has an
+    /// adapter; the CPU for the other families, which are slower on the GPU).
     /// TRIT_DEVICE overrides device.</summary>
     public Trit(string? model = null, string? precision = null, string device = "cpu")
     {
@@ -108,7 +109,7 @@ public sealed class Trit : IDisposable
         string? task = null, bool? fallback = null) =>
         Text(Run(samples, Options(language, beam, task, fallback, false)));
 
-    /// <summary>A 16 kHz WAV file (16-bit PCM or 32-bit float); the rest as for <see cref="Transcribe"/>.</summary>
+    /// <summary>A 16 kHz WAV file (16, 24, or 32-bit PCM, or 32-bit float); the rest as for <see cref="Transcribe"/>.</summary>
     public string TranscribeWav(string path, string? language = null, int beam = 0,
         string? task = null, bool? fallback = null) =>
         Text(RunWav(path, Options(language, beam, task, fallback, false)));
@@ -177,11 +178,16 @@ public sealed class Trit : IDisposable
         return skipped < 0 ? throw Native.Error() : skipped;
     }
 
+    /// <summary>Frees the model. Do not call it while another thread is in a call on this engine.</summary>
     public void Dispose()
     {
         Native.trit_free(_handle);
         _handle = IntPtr.Zero;
+        GC.SuppressFinalize(this);
     }
+
+    // A program that does not call Dispose must not keep the model for its whole life.
+    ~Trit() => Native.trit_free(_handle);
 
     IntPtr Handle => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(Trit));
 }
@@ -207,7 +213,10 @@ public sealed class TritCleaner : IDisposable
     {
         Native.trit_cleaner_free(_handle);
         _handle = IntPtr.Zero;
+        GC.SuppressFinalize(this);
     }
+
+    ~TritCleaner() => Native.trit_cleaner_free(_handle);
 
     IntPtr Handle => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(TritCleaner));
 }
@@ -247,7 +256,7 @@ public sealed class TritVoice : IDisposable
         Native.Text(Native.trit_phonemes(Handle, text, Options(voice, null, null, null, 0, false)));
 
     /// <summary>Mono samples in -1..1 at <see cref="SampleRate"/>. voice: Kokoro voice (null: af_heart; "a,b"
-    /// blends two); speed: 1 is the voice's pace, 1.25 faster (null: the voice's own); noise: how much the
+    /// blends two); speed: 1 is the voice's pace, 1.25 faster, from 0.25 to 4 (null: the voice's own); noise: how much the
     /// voice varies; noiseDuration: VITS timing; one text and one seed give the same audio; phonemes: Kokoro,
     /// the text is phonemes.</summary>
     public float[] Speak(string text, string? voice = null, float? speed = null, float? noise = null,
@@ -270,27 +279,48 @@ public sealed class TritVoice : IDisposable
             throw Native.Error();
     }
 
-    [ThreadStatic] static Func<float[], bool>? _onPart;
+    /// <summary>One SpeakStream call: the caller's function, and the exception it threw.</summary>
+    sealed class StreamCall(Func<float[], bool> onPart)
+    {
+        public readonly Func<float[], bool> OnPart = onPart;
+        public Exception? Error;
+    }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    static unsafe int OnPart(float* samples, nuint count, IntPtr userData) =>
-        _onPart!(new ReadOnlySpan<float>(samples, checked((int)count)).ToArray()) ? 1 : 0;
+    static unsafe int OnPart(float* samples, nuint count, IntPtr userData)
+    {
+        var call = (StreamCall)GCHandle.FromIntPtr(userData).Target!;
+        // An exception must not cross the native frames: .NET then stops the
+        // process. Keep it, stop the stream, and throw it after the call.
+        try
+        {
+            return call.OnPart(new ReadOnlySpan<float>(samples, checked((int)count)).ToArray()) ? 1 : 0;
+        }
+        catch (Exception error)
+        {
+            call.Error = error;
+            return 0;
+        }
+    }
 
     /// <summary><see cref="Speak"/>, part by part: onPart gets each part (a sentence for VITS, a line or a
     /// 510-phoneme pass for Kokoro) as soon as it is made; return false to stop.</summary>
     public void SpeakStream(string text, Func<float[], bool> onPart, string? voice = null, float? speed = null,
         float? noise = null, float? noiseDuration = null, ulong seed = 0, bool phonemes = false)
     {
-        _onPart = onPart;
+        var call = new StreamCall(onPart);
+        var handle = GCHandle.Alloc(call);
         try
         {
+            int status;
             unsafe
             {
-                if (Native.trit_speak_stream(Handle, text, Options(voice, speed, noise, noiseDuration, seed, phonemes), &OnPart, IntPtr.Zero) < 0)
-                    throw Native.Error();
+                status = Native.trit_speak_stream(Handle, text, Options(voice, speed, noise, noiseDuration, seed, phonemes), &OnPart, GCHandle.ToIntPtr(handle));
             }
+            if (call.Error != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(call.Error).Throw();
+            if (status < 0) throw Native.Error();
         }
-        finally { _onPart = null; }
+        finally { handle.Free(); }
     }
 
     /// <summary>The options JSON of trit_speak.</summary>
@@ -315,7 +345,10 @@ public sealed class TritVoice : IDisposable
     {
         Native.trit_voice_free(_handle);
         _handle = IntPtr.Zero;
+        GC.SuppressFinalize(this);
     }
+
+    ~TritVoice() => Native.trit_voice_free(_handle);
 
     IntPtr Handle => _handle != IntPtr.Zero ? _handle : throw new ObjectDisposedException(nameof(TritVoice));
 }
