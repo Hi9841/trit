@@ -945,3 +945,27 @@ Gaps of 100 us or more, by the jobs before and after:
   23 of 24 builds: some tens of ms of the 140 ms load of Redux, and about 100 ms of the
   first take over 30 s.
 - Test: the same table goes into the same product of each layer: 0 texts differ.
+- Harness: `oploop/results/s1109/load.py` (a fresh process per run, A and B in turns: the load
+  of Redux, a 5 s take, the first 31.6 s take, the same take again). A against A, 6 runs:
+  load 139.1 and 139.1 ms, first long take 233.3 and 234.5 ms (ratios 1.000 and 1.005).
+- Result (B15 against B17, 14 runs per side): load 141.7 to 137.8 ms (0.972); the first take
+  over 30 s 239.6 to 225.0 ms (0.939; a run of 8 gave 0.930); the same take again 187.7 and
+  189.2 ms (1.008). The text is the same in all runs.
+- Gate (`ab.py`, Redux, 3 rounds, clean and other): 0 of 400 texts differ, errors 81 and 172,
+  per-clip ratio 0.996.
+- Decision: KEEP. The forecast was far too high (4 ms of the load, not tens; 15 ms of the
+  first long take, not 100): `sin` and `cos` run in parallel and are fast. The first long take
+  still costs 37 ms more than the next one: 24 products of 1,501 rows.
+
+### SI-018 ternary product: tiles of 10 frames (AVX-512 VNNI)
+
+- Journey: J4 (Redux; ternary products are 61 % of a take, profile P-9).
+- Hypothesis: `Ternary::vnni_tile` (`src/cpu/kernels.rs`) unpacks the 2-bit codes of each 16
+  inputs with 7 vector operations per block (3 shifts, 4 masks), and a tile of 6 frames then
+  runs 24 `vpdpbusd` with them: 0.58 unpack operation for each product. A tile of 10 frames
+  runs 40 products for the same unpack (0.35), and its 20 integer sums, 8 weight vectors, and
+  2 constants still fit the 32 registers. If the products are bound by the vector ports
+  (2.1 of 2.6 T multiply-adds per second today), the ternary products run about 8 % faster
+  and a take about 4 %.
+- Test: the group sums are integers and the float steps of each output and frame keep their
+  order: every value is the same, so 0 texts differ.

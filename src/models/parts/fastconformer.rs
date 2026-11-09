@@ -1364,6 +1364,7 @@ pub(crate) fn release_positions() {
     for grown in GROWN.lock().drain(..).filter_map(|grown| grown.upgrade()) {
         *grown.write() = None;
     }
+    *SINES.lock() = None;
 }
 
 struct RelRows {
@@ -1420,7 +1421,7 @@ impl RelCache {
             .map_or(0, |r| r.reach);
         let reach = (t - 1).max(POSITION_REACH).max(2 * largest);
         let count = 2 * reach + 1;
-        let projected = project(&relative_positions(reach + 1, d), count);
+        let projected = project(&sines(reach, d), count);
         let hd = d / heads;
         let mut by_head = Buf::scratch(count * d);
         team::chunks_mut(&mut by_head, count * hd, |h, head| {
@@ -1439,6 +1440,25 @@ impl RelCache {
             GROWN.lock().push(Arc::downgrade(&self.grown));
         }
         rows
+    }
+}
+
+/// The sinusoid table of the last reach and width that a position table
+/// asked for. Every layer of a model projects the same table, one after the
+/// other: one table for each layer was 23 of 24 builds too many (2 million
+/// `sin` and `cos` calls each at the load of a model 1,024 wide).
+static SINES: Mutex<Option<(usize, usize, Arc<Vec<f32>>)>> = Mutex::new(None);
+
+/// `relative_positions(reach + 1, d)`, from `SINES` when it holds that one.
+fn sines(reach: usize, d: usize) -> Arc<Vec<f32>> {
+    let mut kept = SINES.lock();
+    match kept.as_ref() {
+        Some((r, width, table)) if (*r, *width) == (reach, d) => Arc::clone(table),
+        _ => {
+            let table = Arc::new(relative_positions(reach + 1, d));
+            *kept = Some((reach, d, Arc::clone(&table)));
+            table
+        }
     }
 }
 
@@ -1795,6 +1815,8 @@ impl Parakeet {
             }
             block.forward(&mut x, t, c);
         }
+        // A take that grew the position tables is done with their sinusoid table.
+        *SINES.lock() = None;
         if let Some(norm) = &self.out_norm {
             x = norm.apply(&x, c.hidden);
         }
@@ -1827,6 +1849,8 @@ impl Parakeet {
                 });
             }
         }
+        // The layers are done with the sinusoid table of the load.
+        *SINES.lock() = None;
     }
 
     /// Tokens of the encoder output `t x hidden`, each with the encoder
