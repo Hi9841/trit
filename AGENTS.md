@@ -129,7 +129,7 @@ There are no unit tests. The checks are:
 2. Reuse the parts in `src/models/parts/` that the config names (a FastConformer checkpoint needs only a new head or none). Put what is new in `parts/` when another family can share it, else in `src/models/families/<family>.rs`, from `layers.rs`, `Dense::load` layers, and `Dense::table` token tables.
 3. Add one row to `FAMILIES` in `src/models/mod.rs` and implement `Family` for the new type in its file.
 4. Add the checkpoints you ran to `src/catalog.rs`, then run `trit skill > skill/SKILL.md` and update the tables in docs/reference.md (and in README.md when the model is in its short table).
-5. Check: the same text as the reference runtime on a few clips of `target/accuracy/tts16`.
+5. Check: the same text as the reference runtime on a few clips of `bench/clips/tts16`.
 
 ### Rules the code does not show
 

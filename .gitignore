@@ -13,6 +13,10 @@ site/node_modules/
 site/dist/
 site/.astro/
 
+# The clips of the accuracy checks (`uv run bench/librispeech.py` gets two sets)
+/bench/clips/
+/bench/clips-src/
+
 # Python bytecode from the bench scripts
 __pycache__/
 

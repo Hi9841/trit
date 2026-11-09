@@ -72,4 +72,11 @@ jobs:
           fi
       - name: Attach
         shell: bash
-        run: gh release upload "$TAG" "$ARCHIVE" --clobber
+        # The checksum file lets a user check the archive after a download.
+        run: |
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          fi
+          gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber

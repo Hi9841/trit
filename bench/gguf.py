@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CLIPS = ROOT / "target" / "accuracy"
+CLIPS = ROOT / "bench" / "clips"
 OUT = ROOT / "target" / "gguf"
 BIN = ROOT / "bench" / "gguf" / "target" / "release"
 SETS = ["clean", "other", "tech", "tts16"]

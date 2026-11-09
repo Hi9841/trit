@@ -7,8 +7,10 @@
 usage: uv run bench/librispeech.py [COUNT]
 
 Run from the repository root. Downloads the test split of openslr/librispeech_asr from
-Hugging Face into target/accuracy-src, then takes every n-th utterance, so the
-clips spread over all speakers. Output: target/accuracy/clean and target/accuracy/other.
+Hugging Face into bench/clips-src, then takes every n-th utterance, so the
+clips spread over all speakers. Output: bench/clips/clean and bench/clips/other.
+The clips are not in git, and not in target/: `cargo clean` must not remove
+the sets of the accuracy checks.
 """
 
 import io
@@ -21,7 +23,7 @@ import pyarrow.parquet as pq
 import soundfile as sf
 
 URL = "https://huggingface.co/datasets/openslr/librispeech_asr/resolve/main/{subset}/test/0000.parquet"
-TARGET = Path(__file__).resolve().parents[1] / "target"
+BENCH = Path(__file__).resolve().parent
 
 
 def extract(src: Path, out: Path, count: int) -> None:
@@ -48,11 +50,11 @@ def extract(src: Path, out: Path, count: int) -> None:
 def main() -> None:
     count = int(sys.argv[1]) if len(sys.argv) > 1 else 200
     for subset in ("clean", "other"):
-        src = TARGET / "accuracy-src" / f"{subset}-test.parquet"
+        src = BENCH / "clips-src" / f"{subset}-test.parquet"
         if not src.exists():
             src.parent.mkdir(parents=True, exist_ok=True)
             urllib.request.urlretrieve(URL.format(subset=subset), src)
-        extract(src, TARGET / "accuracy" / subset, count)
+        extract(src, BENCH / "clips" / subset, count)
 
 
 if __name__ == "__main__":

@@ -54,8 +54,36 @@ jobs:
         run: cargo build --locked --release --workspace
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Without the GPU
+        # In a workspace build, trit-ffi turns the gpu feature of trit on.
+        # The default build of a Rust user and the phone build have it off.
+        run: |
+          cargo clippy --locked -p trit --all-targets -- -D warnings
+          cargo check --locked -p trit-ffi --no-default-features
       - name: Skill
         run: target/release/trit.exe skill --check skill/SKILL.md
+      - name: Python binding
+        shell: bash
+        run: |
+          TRIT_LIB="$PWD/target/release/trit_ffi.dll" python -c "import sys; sys.path.insert(0, 'bindings/python'); import trit; assert trit.version() == '$(target/release/trit.exe --version)', trit.version(); print(trit.version())"
+      - name: Clips
+        shell: pwsh
+        # Three sentences from the Windows voices: the text check needs speech, not a fixed text.
+        run: |
+          "a|The quick brown fox jumps over the lazy dog near the river bank.", "b|Please send the report to the finance team before Friday afternoon.", "c|We moved the database to the new cluster last night." | Set-Content target/smoke.txt -Encoding utf8
+          ./bench/make-clips.ps1 -OutDir target/smoke -Corpus target/smoke.txt
+      - uses: actions/cache@v4
+        with:
+          path: models/moonshine-tiny
+          key: moonshine-tiny
+      - name: Same text on every kernel path
+        shell: bash
+        run: |
+          if [ ! -f models/moonshine-tiny/model.safetensors ]; then
+            python -m pip install --quiet huggingface_hub
+            hf download UsefulSensors/moonshine-tiny config.json tokenizer.json model.safetensors --local-dir models/moonshine-tiny
+          fi
+          python bench/paths.py target/release/trit.exe models/moonshine-tiny target/smoke/*.wav
 
   # Apple Silicon: the NEON, sdot, and smmla kernels, the macOS thread
   # setup, and the Metal GPU code. The home view prints the kernel paths.
@@ -77,6 +105,23 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Kernel paths
         run: target/release/trit
+      - name: Clips
+        run: |
+          mkdir -p target/smoke
+          say -o target/smoke/a.wav --data-format=LEI16@16000 "The quick brown fox jumps over the lazy dog near the river bank."
+          say -o target/smoke/b.wav --data-format=LEI16@16000 "Please send the report to the finance team before Friday afternoon."
+          say -o target/smoke/c.wav --data-format=LEI16@16000 "We moved the database to the new cluster last night."
+      - uses: actions/cache@v4
+        with:
+          path: models/moonshine-tiny
+          key: moonshine-tiny
+      - name: Same text on every kernel path
+        run: |
+          if [ ! -f models/moonshine-tiny/model.safetensors ]; then
+            python3 -m pip install --quiet --break-system-packages huggingface_hub
+            hf download UsefulSensors/moonshine-tiny config.json tokenizer.json model.safetensors --local-dir models/moonshine-tiny
+          fi
+          python3 bench/paths.py target/release/trit models/moonshine-tiny target/smoke/*.wav
 
   # x86-64 Linux: the AVX kernels, the Linux thread setup, and the Vulkan GPU
   # code. The fork has no Linux action, so this job uses the plain cargo.

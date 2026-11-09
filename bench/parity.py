@@ -11,7 +11,7 @@ the upstream model by their publisher (handy-computer).
 usage:
   uv run --no-project --python 3.12 --with whisper-normalizer python bench/parity.py <model folder> <set>... [--lang <code>|auto] [--precision <p>]
 
-<set> is a folder under target/accuracy: parity-en (66 English clips) or
+<set> is a folder under bench/clips: parity-en (66 English clips) or
 native-<lang> (FLEURS clips from transcribe.cpp's samples/, no transcripts).
 Build bench/gguf first. Run it through a low-load wrapper on a computer that
 crashes under full load.
@@ -25,7 +25,7 @@ import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CLIPS = ROOT / "target" / "accuracy"
+CLIPS = ROOT / "bench" / "clips"
 OUT = ROOT / "target" / "parity"
 BIN = ROOT / "bench" / "gguf" / "target" / "release"
 

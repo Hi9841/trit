@@ -59,7 +59,7 @@ def side(model: str, sets: list[str], cleanup: bool) -> None:
 
     normalize = EnglishTextNormalizer()
     engine = trit.Trit(model)
-    clips = [p for s in sets for p in sorted((ROOT / "target" / "accuracy" / s).glob("*.wav"))]
+    clips = [p for s in sets for p in sorted((ROOT / "bench" / "clips" / s).glob("*.wav"))]
     engine.transcribe(read_clip(clips[0]), language="en")
     out = []
     for path in clips:

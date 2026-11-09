@@ -471,7 +471,7 @@ def child(name: str, sets: list[str]) -> None:
     load_s = time.perf_counter() - started
     gc.collect()
     load_mb = psutil.Process().memory_info().rss / 2**20
-    clips = {s: sorted((ROOT / "target" / "accuracy" / s).glob("*.wav")) for s in sets}
+    clips = {s: sorted((ROOT / "bench" / "clips" / s).glob("*.wav")) for s in sets}
     transcribe(read_clip(clips[sets[0]][0]))  # warm-up: first-call allocations, caches, CUDA kernels
     OUT.mkdir(parents=True, exist_ok=True)
     rows = []
