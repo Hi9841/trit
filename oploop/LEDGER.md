@@ -857,3 +857,63 @@ jobs (a gap). CLI, 200 clean clips, one process, one run, not a reported number.
   (`team::here`) should save about 3 ms per tiny clip (5 %) and about 2 ms per Moonshine
   clip, and some CPU time.
 - Test: the same functions run per row and per head, in the same order: 0 texts differ.
+- Result (`ab.py`, B13 against B14, 3 rounds x 200 clean, 0 texts differ, errors equal):
+  Whisper tiny 50.4 and 50.0 ms, ratio 0.998 (p = 0.42). Moonshine tiny 29.7 to 31.8 ms,
+  ratio 1.055 (p = 8.8e-07): slower. Redux ratio 0.991 (the A against A level).
+- Decision: REVERT. The jobs under 5 us are not only hand-out cost: their work runs faster
+  on the team than on one thread (the mean of 2.6 us holds work of several us in total).
+  The forecast of the cost of one thread was too low. `SMALL` and `here_if` are gone.
+
+### Profile P-11 (after SI-013; `oploop/baseline/trace2.exe` names the code around each gap of 100 us or more)
+
+`oploop/results/s1109/trace_patch.py` applies the temporary patch. 200 clean clips, CLI, one run.
+
+| | Whisper tiny | Moonshine tiny |
+|---|---:|---:|
+| Calls, total | 11,436 ms | 8,226 ms |
+| Inside parallel jobs | 9,665 ms (85 %) | 6,469 ms (79 %) |
+| Serial gaps under 100 us (count, time) | 496,173, 953 ms | 725,062, 839 ms |
+| Serial gaps of 100 us or more | 3,993, 1,000 ms | 1,859, 1,016 ms |
+
+Gaps of 100 us or more, by the jobs before and after:
+
+- Whisper tiny: a dense product, then `HeadMajor::new` (`layers.rs:327`): 364 ms, 1,536 times.
+  A norm, then the quantizer of an int8 layer (`kernels.rs:650`): 158 ms, 849 times.
+  `HeadMajor::new`, then `attention_with`: 95 ms, 611 times. In each of them the caller
+  takes a `Buf::scratch` of 2 to 9 MB that the pool does not hold (16 MB limit), and
+  `Vec::resize` fills it with zeros on one thread: 617 ms, 5.4 % of the time.
+- Moonshine tiny: a product, then `HeadMajor::new`: 610 ms, 1,218 times, 0.5 ms each. The code
+  between them is `Rotary::apply` on the queries and the keys (`layers.rs:254`): it calls
+  `sin_cos` for every row, every head, and every pair, and the result does not depend on
+  the head. The decoder steps do the same for one row per beam and layer (in the small gaps).
+
+### SI-015 rotary positions: the turn of a pair once per row, not once per head
+
+- Journey: J3 (Moonshine). Also the language-model families and S1-mini (`causal_lm.rs` calls
+  `Rotary::apply` twice per layer for each token; J5 cannot run here: no S1-mini folder).
+- Hypothesis: `Rotary::apply` (`src/layers.rs:254`) costs at least 610 ms of 8,226 ms (7 %) of
+  Moonshine tiny in the large gaps, and more in the decoder steps (5 beams x 6 layers x 2
+  calls x 8 heads x 18 pairs of `sin_cos` per step). The turn of a pair depends on the row
+  and the pair only. One `sin_cos` per row and pair, kept in a buffer of the thread and
+  used for every head, removes 7 of 8 calls: about 10 % of a Moonshine tiny clip.
+- Test: the same `sin_cos` values rotate the same numbers: 0 texts differ.
+- Result (`ab.py`, B13 against B15, 3 rounds x 200 clean): Moonshine tiny 29.3 ms (28.5-29.9)
+  to 26.9 ms (26.8-27.5), per-clip ratio 0.936, paired p = 1.1e-08; time of a round 7.71 to
+  7.12 s (0.923); CPU time of a round 65.7 to 60.5 s (0.921). 0 of 200 texts differ, errors
+  133 on both sides.
+- Decision: KEEP. Not measured: the language-model families and S1-mini, which call
+  `Rotary::apply` for each token and layer (no model folder here).
+
+### SI-016 the pool keeps the buffers of a call that runs
+
+- Journey: J1, J2 (J4 as a guard, and the peak working set of each side).
+- Hypothesis: in a Whisper tiny clip the caller fills 2 to 9 MB buffers with zeros about
+  15 times (`Buf::scratch`, `src/cpu/buf.rs:50`: the pool holds 16 MB at most, so a pass of
+  1,500 frames finds no buffer and `Vec::resize` writes a new one on one thread): 617 ms
+  of 11,436 ms (5.4 %). The 16 MB limit is there for the memory of an idle program. If the
+  pool keeps every buffer while a call runs, and goes back under 16 MB when the last call
+  ends, a pass finds its buffers again: about 4 % of a Whisper clip, with the same memory
+  after a call.
+- Test: a buffer from the pool holds old values where a new one holds zeros; every user of
+  `scratch` writes all values before it reads them (the rule of `Buf::scratch` today, and
+  the pool already gives old buffers). 0 texts differ on J1, J2, J4.

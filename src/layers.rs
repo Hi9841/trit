@@ -258,24 +258,30 @@ impl Rotary {
         (heads, hd): (usize, usize),
         first: usize,
     ) {
-        for r in 0..rows {
-            let position = (first + r) as f32;
-            for h in 0..heads {
-                let head = &mut x[r * stride + h * hd..][..self.dims];
-                let half = self.dims / 2;
-                for (i, f) in self.inv_freq.iter().enumerate() {
-                    let (sin, cos) = (position * f).sin_cos();
-                    let (ia, ib) = if self.interleaved {
-                        (2 * i, 2 * i + 1)
-                    } else {
-                        (i, i + half)
-                    };
-                    let (a, b) = (head[ia], head[ib]);
-                    head[ia] = a * cos - b * sin;
-                    head[ib] = b * cos + a * sin;
+        let half = self.dims / 2;
+        TURNS.with(|turns| {
+            let mut turns = turns.borrow_mut();
+            for r in 0..rows {
+                let position = (first + r) as f32;
+                // The turn of a pair at this position is the same for every
+                // head. A `sin_cos` per head was 7 % of a Moonshine tiny clip.
+                turns.clear();
+                turns.extend(self.inv_freq.iter().map(|f| (position * f).sin_cos()));
+                for h in 0..heads {
+                    let head = &mut x[r * stride + h * hd..][..self.dims];
+                    for (i, (sin, cos)) in turns.iter().enumerate() {
+                        let (ia, ib) = if self.interleaved {
+                            (2 * i, 2 * i + 1)
+                        } else {
+                            (i, i + half)
+                        };
+                        let (a, b) = (head[ia], head[ib]);
+                        head[ia] = a * cos - b * sin;
+                        head[ib] = b * cos + a * sin;
+                    }
                 }
             }
-        }
+        });
     }
 }
 
@@ -418,6 +424,12 @@ pub fn attention_with(
         });
     });
     out
+}
+
+thread_local! {
+    /// The sine and cosine of each pair of `Rotary::apply` for one row. It
+    /// grows once per thread, so a task allocates nothing.
+    static TURNS: std::cell::RefCell<Vec<(f32, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 thread_local! {
