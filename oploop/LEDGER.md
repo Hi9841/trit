@@ -917,3 +917,31 @@ Gaps of 100 us or more, by the jobs before and after:
 - Test: a buffer from the pool holds old values where a new one holds zeros; every user of
   `scratch` writes all values before it reads them (the rule of `Buf::scratch` today, and
   the pool already gives old buffers). 0 texts differ on J1, J2, J4.
+- Result (`ab.py`, B15 against B16, 3 rounds x 200 clean, two runs, 0 texts differ, errors
+  equal). Another session ran a benchmark on 8 cores in the first run, and the rounds of the
+  second run still spread by 40 % for Whisper (tiny 52.7 to 78.3 ms for one build):
+  - Whisper tiny: per-clip ratio 0.968 (p = 0.29), then 0.995 (p = 0.79); time of a round
+    1.004, then 1.000.
+  - Whisper base.en: 0.746 in the first run (the A rounds were the disturbed ones), then 0.950
+    with a round time ratio of 1.005. The two numbers of the second run do not agree: noise.
+  - Redux: 1.021, then 0.984 (round time 0.982). The A against A level is 0.991.
+  - Peak working set: equal (tiny 273 and 256 MB, base.en 343 and 343, Redux 655 and 636).
+- Decision: REVERT. No gain above the noise in two runs, and the forecast (4 %) did not show
+  in the round times of Whisper tiny. So the zero fill is not proven as the cause of the
+  gaps of P-11. The patch is `oploop/results/s1109/SI-016-pool.patch` for a run on a quiet
+  computer, after a trace that times `Buf::scratch` itself.
+- Harness: `oploop/results/s1109/quiet.ps1` prints the cores that other processes use.
+  Whisper runs on all 16 cores and is the first to show another load; Redux (8 cores of
+  one L3 domain, with steering) is not.
+
+### SI-017 one sinusoid table for all layers of a position table
+
+- Journey: the load of a FastConformer model, and the first take over 30 s after a load or
+  after `release_memory` (J4 as a guard).
+- Hypothesis: `RelCache::rows` (`src/models/parts/fastconformer.rs`) builds the sinusoid
+  table of its reach for each layer (`relative_positions`: 751 x 1,024 values at the load,
+  1,501 x 1,024 for a take over 30 s, with one `sin` and one `cos` per pair), and every
+  one of the 24 layers gets the same table. One table for all layers should save about
+  23 of 24 builds: some tens of ms of the 140 ms load of Redux, and about 100 ms of the
+  first take over 30 s.
+- Test: the same table goes into the same product of each layer: 0 texts differ.
