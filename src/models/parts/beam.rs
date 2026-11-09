@@ -136,10 +136,26 @@ pub fn search<S: Clone>(
                 ended.truncate(width);
             }
         }
-        let mut states: Vec<S> = kept
-            .iter()
-            .map(|(b, _, _)| live[*b].state.clone())
+        // A sequence that goes on in one beam gives its state to that beam.
+        // Only a sequence that splits is copied: a copy of every state at
+        // every step moved all the self-attention caches of all beams.
+        let mut uses = vec![0usize; live.len()];
+        for (b, _, _) in &kept {
+            uses[*b] += 1;
+        }
+        let mut parents: Vec<(Vec<usize>, Option<S>)> = std::mem::take(&mut live)
+            .into_iter()
+            .map(|beam| (beam.tokens, Some(beam.state)))
             .collect();
+        let mut states: Vec<S> = Vec::with_capacity(kept.len());
+        for (b, _, _) in &kept {
+            uses[*b] -= 1;
+            let state = match uses[*b] {
+                0 => parents[*b].1.take(),
+                _ => parents[*b].1.clone(),
+            };
+            states.extend(state);
+        }
         let fed: Vec<usize> = kept.iter().map(|(_, token, _)| *token).collect();
         let logits = if kept.is_empty() {
             Vec::new()
@@ -151,7 +167,7 @@ pub fn search<S: Clone>(
             .zip(states)
             .zip(logits)
             .map(|((&(b, token, score), state), logits)| {
-                let mut tokens = live[b].tokens.clone();
+                let mut tokens = parents[b].0.clone();
                 tokens.push(token);
                 Live {
                     tokens,
