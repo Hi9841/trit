@@ -381,7 +381,8 @@ pub(crate) fn load<M>(
         }
         model
     };
-    let Some(name) = name else {
+    // A mapped file that goes away stops the process (see `local_disk`).
+    let Some(name) = name.filter(|_| local_disk(dir)) else {
         return finished(pass(None, report, (0.0, 1.0), &load).0);
     };
     let folder = dir.join(".trit");
@@ -420,6 +421,43 @@ pub(crate) fn load<M>(
     release();
     let cache = reader(&path);
     finished(pass(cache, report, (0.6, 0.4), &load).0)
+}
+
+/// Whether `dir` is on a disk that stays: not a network folder, and not a
+/// removable disk. When a mapped file goes away, the next read of its pages
+/// is an access fault that no code can catch, so a model on such a disk
+/// loads without the cache. Only Windows can tell here; elsewhere this is true.
+#[cfg(windows)]
+fn local_disk(dir: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    /// DRIVE_REMOVABLE, DRIVE_REMOTE, DRIVE_CDROM.
+    const GOES_AWAY: [u32; 3] = [2, 4, 5];
+    let Ok(full) = dir.canonicalize() else {
+        return true;
+    };
+    // `\\?\C:\models\x` for a disk, `\\?\UNC\server\share\x` for a network folder.
+    let text = full.to_string_lossy();
+    let path = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    if path.starts_with("UNC\\") || path.starts_with(r"\\") {
+        return false;
+    }
+    let Some(root) = path.get(..3).filter(|root| root.ends_with(":\\")) else {
+        return true;
+    };
+    let wide: Vec<u16> = std::ffi::OsStr::new(root)
+        .encode_wide()
+        .chain([0])
+        .collect();
+    // SAFETY: `wide` is a NUL-terminated string that lives through the call.
+    let kind = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
+    !GOES_AWAY.contains(&kind)
+}
+
+#[cfg(not(windows))]
+fn local_disk(_dir: &Path) -> bool {
+    true
 }
 
 /// Removes the cache files of other Trit versions and kernel paths. The

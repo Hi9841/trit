@@ -40,6 +40,7 @@ bytemuck = { version = "1", optional = true, features = ["derive"] }
 windows = { version = "=0.62.0", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

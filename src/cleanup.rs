@@ -173,8 +173,14 @@ impl Cleaner {
         Self::load_with(dir, &crate::LoadOptions::default())
     }
 
+    /// `load`, with a choice of precision, device, and cache (as for `Trit::load_with`).
     pub fn load_with(dir: &Path, options: &crate::LoadOptions) -> Result<Self, String> {
-        crate::cpu::store::in_turn(|| Self::load_now(dir, options))
+        let cache = options
+            .cache
+            .then(|| crate::cpu::store::file_name(options.precision.name()));
+        crate::cpu::store::load(dir, cache, None, crate::release_memory, || {
+            Self::load_now(dir, options)
+        })
     }
 
     fn load_now(dir: &Path, options: &crate::LoadOptions) -> Result<Self, String> {
