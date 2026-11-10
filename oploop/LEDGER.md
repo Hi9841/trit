@@ -1025,3 +1025,83 @@ payload of the review fixes).
   and Moonshine steps). Keep the caches in that layout. It needs S1-mini for J5.
 - Memory: the first take over 30 s adds 148 MB of position tables (the reach doubles to the
   60 s of a full window). A reach in steps of 10 s gives 98 MB for a 31 s take.
+
+## Session 2026-11-10 (the open items of the review; no speed change)
+
+No hypothesis ran. This session changed the file readers, the C ABI, the bindings, and CI,
+not a hot path. The only new work of a call is in `trit-ffi`: `Running::start` and `finish`
+take one lock and keep one list entry for each call.
+
+### Changes
+
+- Readers: the pickle reader of `cpu/torch_file.rs` refuses values nested more than 32 deep
+  (`shallow`); a Moonshine `partial_rotary_factor` must be above 0 and at most 1.
+- C ABI: `trit_load_json` (`precision`, `device`, `cache`), `trit_cancel`, `trit_set_log`.
+  A panic of a worker thread now gives its own message in `trit_last_error`: a panic hook
+  in `trit-ffi` keeps the message of a `trit-speech-*` thread. `run_tasks` did not change
+  (the payload there cost 0.8 % to 1.1 % on 2026-11-05).
+- Bindings: `cache`, `cancel`, and the log function in Python and C#; `cache`, `cancel`,
+  `transcribeAsync`, `transcribeWavAsync`, and a finalizer in Node.
+- Weight cache: `Cleaner::load_with` takes `cache`; on Windows a load from a network,
+  removable, or optical disk uses no cache (`local_disk`).
+- Voices: `noise_duration` is from 0 to 2. MMS-TTS, one sentence: 3.9 s at 0.8, 6.0 s at
+  1.5, 14 s at 2, 47 s at 2.5, and an error above.
+- New check, `bench/hostile.py`: hostile pickles in a NeMo archive, a deep YAML, damaged WAV
+  files, and random damage of `config.json`, `tokenizer.json`, and the safetensors header.
+- CI: the damaged-files step (Windows), the text check and the Python binding on Linux
+  (espeak-ng and sox make the clips), and `audit.yml` (`cargo audit`, each week).
+
+### What `bench/hostile.py` found
+
+- `main` stops with a stack overflow on `pickle-deep` (tuples 200,000 deep) and on
+  `yaml-deep` (5,000 deep). The branch gives an error for both.
+- Random damage, 150 copies of Moonshine tiny: 1 crash. `"partial_rotary_factor":
+  18446744073709551615.9` asked for a position table of that size (`capacity overflow`).
+  After the fix: 450 copies, 0 fail (seed 7).
+
+### A finding of the review that was wrong
+
+The review said that a Parakeet segment ends early (80 ms after the start of its last
+token). Measured on three clips: the old end is 0.34 to 0.40 s after the real end of the
+speech, because the last token starts late. A change that added the token's duration made
+the ends later. Reverted; `docs/engine-review.html` now says so. Measure a timestamp claim
+against the audio before the change.
+
+### Gates of the result (build R3)
+
+- Windows: fmt, clippy `-D warnings --release` (workspace, and `-p trit` with the GPU
+  off), `cargo check -p trit-ffi --no-default-features`, `trit skill --check`, and the
+  header check of CI (34 exports): clean.
+- Text, main against R3 (`ab.py`, 1 round; another session ran `ab.py` on 15 cores, so no
+  time is given): Redux 0 of 400 texts differ (clean 81, other 172); Whisper tiny 0 of 200
+  (231); base.en 0 of 200 (124); Moonshine tiny 0 of 200 (133); S1-mini 0 of 62 (25 and 25).
+- `bench/paths.py`, 3 clips: the same text on each `TRIT_ISA` value and on 1 thread, for
+  Moonshine tiny, Redux, and Whisper tiny.
+- Voices: Kokoro and MMS-TTS write the same bytes as main for one text.
+- `bench/hostile.py --mutate <Moonshine tiny> --runs 150`: 164 of 164 pass. 25 edge-case
+  WAV files: no crash. 6 threads x 8 calls with `release_memory`: 0 wrong texts.
+- Cancel through the C ABI: Redux stops at 0.31 s of 4.15 s, Whisper tiny at 0.36 s of
+  5.19 s; the next call gives the correct text. Node and Bun: 165 ms of 1,670 ms. C#:
+  165 ms of 1,651 ms, 0 build warnings, 89 log lines through `SetLog` (GPU profile on).
+- Cache through `trit_load_json` (Moonshine tiny): first load 482 ms, second 170 ms, the
+  same text.
+- Linux (WSL, Ubuntu 24.04, the same CPU): the workspace builds; both clippy runs and the
+  `trit-ffi` check are clean; `paths.py` gives the same text on every path, and the text of
+  Redux and Moonshine tiny equals the Windows text on 3 clips; `hostile.py` 104 of 104;
+  cancel through the Python binding works. This is the first text check on Linux in this
+  ledger.
+- `cargo audit` on `Cargo.lock`: 105 crates, 0 advisories.
+- Not run: `tech`, `tts16`, and the owner's takes (no clips here), the language-model
+  families other than S1-mini, `bench/tts.py`, macOS, arm64, and a build of TDT against
+  this branch.
+
+### Not done, and why
+
+- A speech check before Whisper and Moonshine: it needs a model or a threshold from data.
+- The head-major cache of the decoder steps: a large change to families with no model here.
+- A shutdown function for the team, and the hybrid-CPU default: the team loop is sensitive
+  to 1 % (2026-11-05), and this computer cannot measure a hybrid CPU.
+- Whisper segments from its timestamp tokens; dictionary weights and load progress in the
+  C ABI; a log function in the Node binding (a callback from another thread).
+- GPU device loss: CPU first. Fuzz targets, Miri, unit tests: `bench/hostile.py` is the
+  check in their place. Actions pinned by SHA, more release targets: the owner's decision.
