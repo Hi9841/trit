@@ -165,6 +165,9 @@ pub struct Int8 {
     weights: Store<i8>,
     /// `[n / rows][k / group][rows]`.
     scales: Store<f32>,
+    /// The layer in the second kernel set (`TRIT_KERNELS=v2`); `weights`
+    /// and `scales` are then empty.
+    v2: Option<Box<super::v2::product::IntProduct>>,
 }
 
 /// Values per block of ggml's Q8_0.
@@ -192,12 +195,31 @@ impl Int8 {
         k.is_multiple_of(group) && n.is_multiple_of(32)
     }
 
+    /// A layer that the second kernel set holds.
+    fn second(isa: Isa, path: Path, layer: super::v2::product::IntProduct) -> Self {
+        Self {
+            isa,
+            path,
+            n: layer.n,
+            k: layer.k,
+            group: layer.group(),
+            half_scales: false,
+            weights: Store::owned(Vec::new()),
+            scales: Store::owned(Vec::new()),
+            v2: Some(Box::new(layer)),
+        }
+    }
+
     /// ggml Q8_0 weights as stored: row-major `n x k` codes and one scale
     /// per block of `Q8_0_BLOCK` (the f16 scale widened to f32). The codes
     /// are packed for this CPU's kernel, not changed.
     pub fn from_q8_0(n: usize, k: usize, codes: &[i8], block_scales: &[f32]) -> Self {
         let choice = super::isa::isa_choice();
         let (isa, path) = (choice.ternary, choice.int8);
+        if super::v2::enabled() {
+            let layer = super::v2::product::IntProduct::int8_from_q8_0(n, k, codes, block_scales);
+            return Self::second(isa, path, layer);
+        }
         let rows = path.rows();
         let groups = k / Q8_0_BLOCK;
         let mut weights = vec![0i8; n * k];
@@ -222,6 +244,7 @@ impl Int8 {
             half_scales: true,
             weights: Store::weights(weights),
             scales: Store::weights(scales),
+            v2: None,
         }
     }
 
@@ -229,6 +252,10 @@ impl Int8 {
     pub fn quantize(n: usize, k: usize, row: impl Fn(usize, &mut [f32]) + Sync) -> Self {
         let choice = super::isa::isa_choice();
         let (isa, path) = (choice.ternary, choice.int8);
+        if super::v2::enabled() {
+            let layer = super::v2::product::IntProduct::int8_from_f32(n, k, row);
+            return Self::second(isa, path, layer);
+        }
         let rows = path.rows();
         let groups = k / GROUP;
         let mut weights = vec![0i8; n * k];
@@ -273,6 +300,7 @@ impl Int8 {
             half_scales: false,
             weights: Store::weights(weights),
             scales: Store::weights(scales),
+            v2: None,
         }
     }
 
@@ -284,6 +312,13 @@ impl Int8 {
         let rows = self.path.rows();
         let flipped = self.path.flipped();
         let mut out = vec![0.0f32; n * k];
+        if let Some(layer) = &self.v2 {
+            for (at, value) in out.iter_mut().enumerate() {
+                let (row, kk) = (at / k, at % k);
+                *value = f32::from(layer.int8_code(row, kk)) * layer.scale(row, kk / group);
+            }
+            return out;
+        }
         for block in 0..n / rows {
             for r in 0..rows {
                 let row = block * rows + r;
@@ -305,6 +340,9 @@ impl Int8 {
 
     /// `x` is `m x k` f32; returns `m x n`.
     pub fn forward(&self, x: &[f32], m: usize) -> Buf {
+        if let Some(layer) = &self.v2 {
+            return layer.forward(x, m);
+        }
         let mut out = Buf::scratch(m * self.n);
         let q = Quantized::grouped(self.isa, x, m, self.k, self.group, self.half_scales);
         let ptr = OutPtr(out.as_mut_ptr());

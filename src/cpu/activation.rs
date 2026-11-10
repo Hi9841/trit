@@ -5,17 +5,17 @@
 
 use super::fgemm::{level, Level};
 
-const LOG2E: f32 = std::f32::consts::LOG2_E;
+pub(super) const LOG2E: f32 = std::f32::consts::LOG2_E;
 /// ln 2 split in two, so `n * LN2_HI` is exact for every `n` in range.
-const LN2_HI: f32 = 0.693_359_4;
-const LN2_LO: f32 = -2.121_944_4e-4;
+pub(super) const LN2_HI: f32 = 0.693_359_4;
+pub(super) const LN2_LO: f32 = -2.121_944_4e-4;
 /// `exp` of these stays a normal f32, and `n` stays in -126..=127.
-const LOW: f32 = -87.3;
-const HIGH: f32 = 88.0;
+pub(super) const LOW: f32 = -87.3;
+pub(super) const HIGH: f32 = 88.0;
 /// `erfc(z) = t * exp(-z^2 + P(t))`, `t = 1 / (1 + z / 2)`, for `z >= 0`:
 /// Numerical Recipes' `erfcc`, within 1.2e-7 relative everywhere, so GELU
 /// stays exact also where `x` is far below 0 and `erfc` is small.
-const ERFC: [f32; 10] = [
+pub(super) const ERFC: [f32; 10] = [
     0.170_872_77,
     -0.822_152_23,
     1.488_515_9,
@@ -27,8 +27,8 @@ const ERFC: [f32; 10] = [
     1.000_023_7,
     -1.265_512_2,
 ];
-const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
-const POLY: [f32; 6] = [
+pub(super) const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
+pub(super) const POLY: [f32; 6] = [
     1.987_569_1e-4,
     1.398_199_9e-3,
     8.333_452e-3,
@@ -38,7 +38,7 @@ const POLY: [f32; 6] = [
 ];
 
 #[derive(Clone, Copy)]
-enum Op {
+pub(super) enum Op {
     Exp,
     Silu,
     Sigmoid,
@@ -82,6 +82,7 @@ fn apply(values: &mut [f32], op: Op) {
         #[cfg(target_arch = "aarch64")]
         // SAFETY: NEON is part of every arm64 CPU.
         Level::Neon => unsafe { neon::apply(values, op) },
+        Level::Scalar if super::v2::float_enabled() => super::v2::activation::apply(values, op),
         Level::Scalar => values.iter_mut().for_each(|v| *v = scalar(*v, op)),
     }
 }

@@ -49,7 +49,7 @@ pub(crate) fn level() -> Level {
 
 /// A weight element: f32, or f16 as its bits. The loads are `inline(always)`
 /// so they compile with the target features of the kernel that calls them.
-pub trait Weight: Copy + Send + Sync + 'static {
+pub trait Weight: Copy + Send + Sync + 'static + super::v2::float::Element {
     /// True for f16: a block of many rows widens its weight panel to f32
     /// once, instead of once per register tile.
     const WIDEN: bool;
@@ -197,6 +197,9 @@ unsafe impl Sync for OutPtr {}
 
 /// `out[i][j] = sum_k x[i][k] * w[j][k]`, parallel over 64 x 64 blocks.
 pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Buf {
+    if super::v2::float_enabled() {
+        return super::v2::float::matmul(x, m, k, w, n);
+    }
     assert!(x.len() >= m * k && w.len() >= n * k);
     let mut out = Buf::scratch(m * n);
     let (row_blocks, col_blocks) = block_counts(m, n);
@@ -227,6 +230,9 @@ pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Bu
 /// is itself one of many parallel tasks. Each value is the one `matmul`
 /// gives: a value's sum does not depend on the tile around it.
 pub fn matmul_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &mut [f32]) {
+    if super::v2::float_enabled() {
+        return super::v2::float::matmul_into(x, m, k, w, n, out);
+    }
     assert!(x.len() >= m * k && w.len() >= n * k && out.len() >= m * n);
     // SAFETY: the block covers `out` exactly; the level was detected from the CPU.
     unsafe { block(level(), x, k, w, n, 0..m, 0..n, OutPtr(out.as_mut_ptr())) };
@@ -243,6 +249,9 @@ pub fn matmul_widened(
     n: usize,
     widen: impl Fn(std::ops::Range<usize>, &mut [f32]) + Sync,
 ) -> Buf {
+    if super::v2::float_enabled() {
+        return super::v2::float::matmul_widened(x, m, k, n, widen);
+    }
     assert!(x.len() >= m * k);
     let mut out = Buf::scratch(m * n);
     let (row_blocks, col_blocks) = block_counts(m, n);
@@ -599,6 +608,9 @@ mod neon {
 /// (AVX-512) or 6 x 16 (AVX2) accumulators, so a short `k` (an attention
 /// head) costs no horizontal sums.
 pub fn matmul_nn_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &mut [f32]) {
+    if super::v2::float_enabled() {
+        return super::v2::nn::matmul_nn_into(x, m, k, w, n, out);
+    }
     assert!(x.len() >= m * k && w.len() >= k * n && out.len() >= m * n);
     match level() {
         #[cfg(target_arch = "x86_64")]

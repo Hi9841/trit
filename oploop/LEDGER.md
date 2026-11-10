@@ -1105,3 +1105,207 @@ against the audio before the change.
   C ABI; a log function in the Node binding (a callback from another thread).
 - GPU device loss: CPU first. Fuzz targets, Miri, unit tests: `bench/hostile.py` is the
   check in their place. Actions pinned by SHA, more release targets: the owner's decision.
+
+## Session 2026-11-10 (the kernels written again, branch `kernels-rewrite`)
+
+A separate job, not an OpLoop iteration: write the product kernels again from nothing, then
+compare them with the first set. Work: a worktree of branch `kernels-rewrite` (from 8494e19).
+The second set is `src/cpu/v2/`, next to the first. `TRIT_KERNELS=v2` (or `v2-int`,
+`v2-float`) selects it for a process; the default is the first set. It runs every CPU of the
+first set (K-006). In Trit 0.11.0.
+
+### Harness: `examples/kernel_bench.rs` (`src/cpu/v2/bench.rs`)
+
+- `kernel_bench peak one|all`: the clock of the team (a chain of dependent shifts, 6 cycles
+  for each step), then `vpdpbusd` alone and `vfmadd231ps` alone, 12 sums in registers.
+- `kernel_bench ternary2|int82|q8_02|f322|f162 one|all <n> <k> <m>...`: the first set against
+  the second on the same input, in turns, with the count of the values that have other bits.
+- Quiet computer: 5.25 to 5.30 GHz with one thread, and one 512-bit `vpdpbusd` and one 512-bit
+  `vfmadd231ps` for each cycle and core. 8 threads: 2.43 T int8 multiply-adds per second.
+  16 threads: 4.86 T int8 and 1.29 T f32.
+
+### Finding: the limit of the ternary product (the limiter that SI-018 did not find)
+
+- Zen 4 (uops.info, measured): `vpdpbusd zmm` uses the pipes FP0 and FP1, one instruction for
+  each cycle. `vmulps` and `vfmadd` use the same two pipes. Shifts use FP2 and FP3, `vpand`
+  any pipe, `vcvtdq2ps` FP2 and FP3.
+- One group (128 inputs) of 16 rows and one frame costs 32 `vpdpbusd`, 1 `vmulps`, and
+  1 `vfmadd` on FP0 and FP1. So the product can reach 32 / 34 = 94 % of the `vpdpbusd` peak.
+  The unpack of the codes and the tile shape do not change that.
+- Measured, first kernel: 0.300 to 0.308 T/s of 0.323 with one thread (93 to 95 %), and 2.22
+  to 2.36 T/s of 2.43 with 8 threads. The "2.1 of 2.6 T" of P-9 used a clock of 5.07 GHz and
+  no float steps.
+- So the ternary product has no gain left on this CPU without a change of its arithmetic,
+  and that changes the text (SI-009).
+
+### K-001 integer product: codes unpacked once into a byte panel, 14 frames side by side
+
+- Hypothesis: the unpack of the 2-bit codes (7 operations for each 16 inputs and block) and the
+  correction step take time from the products. A task that unpacks its rows once into a
+  thread's byte panel, with the frames of a tile stored side by side (one stream), can run
+  tiles of 14 frames that hold only `vpdpbusd`.
+- Result (`kernel_bench ternary2`, one thread, 0 values with other bits): 5 to 7 % slower at
+  90 to 375 frames, 16 to 26 % slower at 14 to 28 frames, 3 times slower at 1 frame. The inner
+  loop was as planned (28 `vpdpbusd`, 14 broadcasts, 2 loads), so the loss is the panel: 4 times
+  the bytes of the codes, written and read again for each call.
+- Decision: REVERT. The unpack in registers uses pipes that the products do not use.
+
+### K-002 integer product: one tile for ternary and int8 (`v2/product.rs`)
+
+- Change: the tile shape of the first kernels (two 16-row blocks by 6 frames, codes unpacked
+  in registers), written once for ternary and int8, for AVX-512 VNNI, 256-bit VNNI, AVX2, and
+  scalar. A dot product starts at `-bias * sum(x)`, so there is no correction step. The scalar
+  path uses the float steps of the SIMD paths (`mul_add`). The last unit of 16 rows can be
+  partial. A layer with few rows splits its frames too.
+- Result (`kernel_bench`, 0 values with other bits on the SIMD paths): ternary 0.97 to 1.01
+  with one thread and 0.99 to 1.00 with 8 threads; int8 0.97 to 1.02 with one thread; Q8_0
+  0.94 to 1.00. With 16 threads and 1,500 frames: 384 x 1536 0.83, 384 x 384 0.90,
+  512 x 2048 0.89 (the frame split), and 1536 x 384 and 2048 x 512 0.98 to 1.00.
+- A full transcription does not show the frame split (Whisper tiny and base.en), as I-002
+  found.
+- 256-bit VNNI for ternary layers (`TRIT_ISA=avxvnni`, EVEX form on this CPU): 0.189 to
+  0.204 T/s, against 0.138 to 0.141 for the AVX2 path that the first kernel uses on a CPU
+  with AVX-VNNI and no AVX-512. Not measured on such a CPU.
+- The scalar path is 1.4 to 1.7 times slower than the first scalar path (`mul_add` without
+  FMA is a library call). It gives the bits of the SIMD paths.
+
+### K-003 float product: f16 widens in the tile, always (`v2/float.rs`)
+
+- Finding: `fgemm::matmul` writes an f32 copy of a 64-row weight panel for each block of 5
+  rows or more (`W::WIDEN && rows.len() > 4`). On Zen 4 `vcvtph2ps` does not use FP0 and FP1:
+  f16 with 4 rows (no copy) runs as fast as f32. With 5 rows (a decoder step with 5 beams) the
+  f16 product ran at 44 % of the `vfmadd` peak.
+- Result (`kernel_bench f162`, one thread, 0 values with other bits): 5 rows 0.61 to 0.65
+  (288 x 288, 1152 x 288, 288 x 1152, 32768 x 288), 8 rows 0.71, 16 rows 0.86, 64 to 300 rows
+  0.92 to 0.98. With 16 threads and 5 rows: 51864 x 384 0.79, 51864 x 512 0.85, 32768 x 288
+  0.75. f32 products: 0.97 to 1.00.
+- This change is one line in the first kernel.
+
+### K-005 float product: the tail of `k` as one masked load
+
+- Finding: when `k` is not a multiple of 16, the AVX-512 tile of `fgemm.rs` writes the last
+  values of each weight row into an array, one value at a time, and loads the array as one
+  vector. The load waits for the small stores, and an f16 value converts in scalar code. The
+  comment there says that `k` is a multiple of 16 in every model. It is not: the first layer
+  of Moonshine has `k` = 127 (`moonshine.rs`, `conv1`, one row for each 64 samples), and the
+  mel filters of Whisper have `k` = 201 (`whisper_mel.rs`).
+- Change (`v2/float.rs`): `vmovups {k}{z}` for f32 and `vmovdqu16 {k}{z}` with `vcvtph2ps` for
+  f16. The values are the same.
+- Result (`kernel_bench`, one thread): 300 x 200 f16 0.50, 300 x 203 f32 0.57.
+
+### K-004 float product: wider tiles for 1, 2, 3, and 5 rows
+
+- Hypothesis: a strip of 1 to 3 rows has 3 to 9 sums in flight, so it waits on the 4 cycles of
+  a fused multiply-add. Tiles 1 x 6, 2 x 6, 3 x 4 keep 12 in flight.
+- Result (one thread): f32 1 x 6 the same as 1 x 3; 2 x 6 1.13 to 1.30; 3 x 4 1.23 to 1.31.
+  f16: 0.89 to 1.00. One row runs at 45 % of the peak with any tile: it waits on the weights
+  (one 64-byte line for each cycle from L2), not on the multiply-add.
+- Decision: REVERT to 3 columns. Kept: 5 rows as one strip (5 x 3); it is level with 4 x 3
+  and then 1 x 3 for f32.
+
+### Finding: the first scalar path gives other text for Whisper tiny
+
+`bench/paths.py` with the first three `clean` clips: Whisper tiny with `TRIT_ISA=scalar` writes
+"arms" where every other path writes "alms" (clip 1089-134686-0009; the build of the `oploop`
+head too). The first scalar int8 path computes `dot * weight scale * frame scale` without the
+fused step of the SIMD paths. With the second set the scalar path gives the same text.
+
+### Transcription, first set against second set
+
+`ab.py <model> K4.dll K4.dll --rounds 3 --env-b TRIT_KERNELS=v2` (one library, the kernel set
+from the environment of side B; `--env-a` and `--env-b` are new in `ab.py`). The computer was
+quiet before and after each run (0.02 to 0.09 cores in use).
+
+| Model | Clips | First | Second | Per-clip ratio | Time of a round | Texts that differ | Errors |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Parakeet Redux | 400 | 29.9 ms | 29.1 ms | 0.992 | 0.989 | 0 | 81 and 172, both sides |
+| Parakeet Ultra | 200 | 34.5 ms | 33.7 ms | 0.989 | 0.989 | 0 | 56 |
+| Whisper tiny | 200 | 50.1 ms | 49.1 ms | 0.962, then 0.972 | 0.961, then 0.976 | 0 | 231 |
+| Whisper base.en | 200 | 88.6 ms | 87.8 ms | 0.980, then 0.972 | 0.987, then 0.962 | 0 | 124 |
+| Moonshine tiny | 200 | 26.3 ms | 20.9 ms | 0.824, then 0.823 | 0.849, then 0.837 | 0 | 133 |
+| Moonshine base | 200 | 50.0 ms | 41.5 ms | 0.889 | 0.912 | 0 | 105 |
+
+- `TRIT_KERNELS=v2-float` alone: Moonshine tiny 0.822, Whisper tiny 0.967. So the gains come
+  from the float product (K-003 and K-005). The integer product gives the same time
+  (`v2-int`, Whisper base.en: 0.995).
+- With the build before K-005: Moonshine tiny 0.933 and 0.952, Moonshine base 0.960, Whisper
+  tiny 1.001, Whisper base.en 0.992. So K-003 gives 4 to 7 % for Moonshine, and K-005 gives
+  the rest for Moonshine and all of the gain for Whisper.
+- Redux and Ultra are under the 1.5 % level of this ledger: the same.
+- `bench/paths.py` with `TRIT_KERNELS=v2` (3 clips; `TRIT_ISA=scalar|avx2|avxvnni`, 1 thread):
+  the same text for Redux, Whisper tiny, and Moonshine tiny.
+- Clippy `-D warnings --release` (workspace): clean but for `type_complexity` in
+  `fastconformer.rs:1450`, which is in the base commit (fixed on `oploop` in bd8b18e). fmt and
+  `trit skill --check`: clean.
+- Not run: `tech`, `tts16`, the owner's takes (no clips here), a CPU with AVX-VNNI and no
+  AVX-512, and an Intel CPU (`vcvtph2ps` and the shifts use other ports there). arm64: see
+  K-006.
+
+### Finding: the first set gives other text on AVX2 than on AVX-512
+
+`bench/paths.py`, Parakeet Ultra, the first three `clean` clips: `TRIT_ISA=avx2` writes "land."
+where AVX-512 writes "land?" (clip 1089-134686-0022). The first float product adds in 16 lanes
+on AVX-512, 8 on AVX2, and 4 on NEON, with the k tail value by value; the f16 matrix-vector
+product (`half.rs`) does the same; `matmul_nn_into` adds the edge columns of AVX2 and NEON
+without fusing; the scalar activations do not fuse. So a CPU without AVX-512 (Intel desktop
+CPUs, Zen 2 and 3, every arm64 CPU) can give other text. `ab.py` on the AVX2 path, first set:
+Whisper tiny 228 errors and Ultra 55, where AVX-512 gives 231 and 56.
+
+### K-006 every CPU: arm64 paths, and one set of bits on every path
+
+- Hypothesis: the second set can run every CPU that the first runs, and give the same bits on
+  all of them, so that the text does not change with the CPU.
+- Change:
+  - Integer product, arm64 (`v2/product.rs`, `arm`): one unit (16 rows) by 4 frames with
+    `sdot`, `smull` (Armv8.0), or `smmla` (i8mm, int8 layers; their bytes are `[k / 8][16][8]`).
+    16 sums in flight; the first arm64 tiles keep 8. NEON quantizer (`v2/quantize.rs`).
+  - Float products: one sum order on every path. 16 lanes, the k tail padded with zeros (what
+    the AVX-512 masked load gives), then the tree of `_mm512_reduce_add_ps` (lane i + i+8,
+    i+4, i+2, then the last two; checked on 200000 random vectors). AVX2 holds the lanes in 2
+    registers (tiles 2 x 3), NEON in 4 (2 x 3, 28 registers), scalar in an array with `mul_add`.
+    The k tails are padded once per block of columns and once per strip of rows.
+  - `half.rs` matrix-vector product: through `v2::float::matmul` with one row.
+  - `v2/nn.rs`: `matmul_nn_into` with fused steps in every column and on every path.
+  - `v2/activation.rs`: the scalar activations with the fused steps of the SIMD paths.
+  - `v2::enabled()` on every target (it was x86-64 only). The arm64 build did not compile
+    before (x86 macros called on every target); fixed.
+- Gate:
+  - `kernel_bench` adds a hash of the second set's output. 40 shapes (ternary, int8, Q8_0,
+    f32, f16; n of 48, 67, 80, 100, 384; k of 96 to 1536, with k = 127 and 201; m of 1 to 400):
+    the same hash on all 9 configurations: x86 default (AVX-512 VNNI), `avxvnni` (256-bit EVEX),
+    `avx2`, `scalar`; QEMU 8.2 user mode `-cpu max` (i8mm), `max` with `dotprod`, `neon`,
+    `scalar`, and `cortex-a53`. First against second, arm64 SIMD paths: 0 values with other
+    bits on 240 of 240 products (the first scalar path differs, as on x86).
+  - Text: `bench/paths.py` with `TRIT_KERNELS=v2`, x86: Redux, Ultra, Whisper tiny, Moonshine
+    tiny: the same text on every path (Ultra on AVX2 and Whisper tiny on scalar too). arm64
+    under QEMU (`max` default, `dotprod`, `neon`, `scalar`, `cortex-a72`): Redux, Ultra, Ultra
+    `--precision q8_0`, Whisper tiny, Moonshine tiny, Moonshine tiny `--precision f32`: one text
+    for each, and that text is word for word the x86 text (AVX-512 and AVX2).
+  - Clippy `-D warnings --release`: x86-64 and `aarch64-unknown-linux-gnu`, clean but for the
+    finding of the base commit.
+- Measure (`ab.py`, `K5.dll` both sides, 3 rounds, 200 `clean` clips; other sessions used 1 to 3
+  cores during the runs, so the AVX2 numbers have more noise):
+
+  | Model | Path | Per-clip ratio | Time of a round | Errors first / second | Texts that differ |
+  |---|---|---:|---:|---|---:|
+  | Moonshine tiny | AVX-512 | 0.854 | 0.857 | 133 / 133 | 0 |
+  | Whisper tiny | AVX-512 | 0.961 | 0.952 | 231 / 231 | 0 |
+  | Parakeet Redux | AVX-512 | 0.967 | 1.005 | 81 / 81 | 0 |
+  | Moonshine tiny | AVX2 | 0.908 | 0.942 | 133 / 133 | 0 |
+  | Whisper tiny | AVX2 (5 rounds) | 1.018 | 1.020 | 228 / 231 | 12 |
+  | Parakeet Ultra | AVX2 | 1.051 | 1.042 | 55 / 56 | 8 |
+
+  On AVX2 the second set gives the AVX-512 text, so its errors are the AVX-512 errors.
+  `kernel_bench`, AVX2, 1 thread: f32 with many rows 1.04 to 1.21 (2 x 3 tiles where the first
+  fits 4 x 3 with 8 lanes), f16 0.73 to 1.05, k = 127 0.70 to 0.80.
+- Not run: arm64 speed (QEMU gives no times), a real arm64 CPU, AVX-VNNI in VEX form (Zen 4
+  does not have it, and QEMU 8.2 does not emulate it: the path differs from the EVEX path in
+  the encoding of one instruction), RISC-V and other targets (scalar path; not built).
+- Decision: KEEP in the second set.
+
+### Next
+
+- Port K-005 and K-003 to `fgemm.rs` as two OpLoop iterations (a masked tail load; no f32
+  panel for f16). Both keep every value.
+- The scalar int8 path of the first set: use the float steps of the SIMD paths, so that
+  `TRIT_ISA=scalar` gives the text of the other paths.

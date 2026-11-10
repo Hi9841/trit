@@ -76,6 +76,15 @@ impl HalfDense {
     pub fn matvec(&self, x: &[f32]) -> Buf {
         assert_eq!(x.len(), self.in_features);
         let (n, k) = (self.out_features, self.in_features);
+        if super::v2::float_enabled() {
+            let mut out = super::v2::float::matmul(x, 1, k, &self.weight, n);
+            if let Some(bias) = &self.bias {
+                for (o, b) in out.iter_mut().zip(bias.iter()) {
+                    *o += b;
+                }
+            }
+            return out;
+        }
         let mut out = Buf::scratch(n);
         let level = level();
         team::chunks_mut(&mut out, ROWS_PER_TASK, |task, rows| {

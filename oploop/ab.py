@@ -104,8 +104,8 @@ def memory() -> tuple[float, float]:
     return counters.private / 2**20, counters.peak_working_set / 2**20
 
 
-def run(lib: str, model: str, sets: list[str], cleanup: bool) -> list[dict]:
-    env = dict(os.environ, TRIT_LIB=lib)
+def run(lib: str, model: str, sets: list[str], cleanup: bool, extra: dict[str, str]) -> list[dict]:
+    env = dict(os.environ, TRIT_LIB=lib, **extra)
     command = [sys.executable, __file__, "--side", model, ",".join(sets)] + (["--cleanup"] if cleanup else [])
     result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8")
     if result.returncode:
@@ -122,10 +122,13 @@ def main() -> None:
     rounds = int(args[args.index("--rounds") + 1]) if "--rounds" in args else 3
     sets = args[args.index("--sets") + 1].split(",") if "--sets" in args else ["clean"]
     cleanup = "--cleanup" in args
+    # --env-a NAME=VALUE and --env-b NAME=VALUE (each can repeat): the environment of one side.
+    extra = {side: dict(args[i + 1].split("=", 1) for i, arg in enumerate(args) if arg == f"--env-{side.lower()}")
+             for side in ("A", "B")}
     runs = {"A": [], "B": []}
     for r in range(rounds):
         for name, lib in (("A", a), ("B", b)):
-            rows = run(lib, model, sets, cleanup)
+            rows = run(lib, model, sets, cleanup, extra[name])
             runs[name].append(rows)
             print(f"round {r + 1} {name}: median {statistics.median(x['ms'] for x in rows):7.1f} ms, "
                   f"errors {sum(x['errors'] for x in rows)}", flush=True)

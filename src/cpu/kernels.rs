@@ -76,6 +76,9 @@ pub struct Ternary {
     codes: Store<u8>,
     /// `[n / rows][k / GROUP][rows]`.
     scales: Store<f32>,
+    /// The layer in the second kernel set (`TRIT_KERNELS=v2`); `codes` and
+    /// `scales` are then empty.
+    v2: Option<Box<super::v2::product::IntProduct>>,
     /// A GPU copy of the codes and scales, present when the load asked for the GPU.
     #[cfg(feature = "gpu")]
     gpu: Option<Box<crate::gpu::Layer>>,
@@ -131,6 +134,20 @@ impl Ternary {
         k: usize,
         row: impl Fn(usize, &mut [u8]),
     ) -> Self {
+        if super::v2::enabled() && k.is_multiple_of(GROUP) {
+            return Self {
+                isa,
+                n,
+                k,
+                codes: Store::owned(Vec::new()),
+                scales: Store::owned(Vec::new()),
+                v2: Some(Box::new(super::v2::product::IntProduct::ternary(
+                    scales, n, k, GROUP, row,
+                ))),
+                #[cfg(feature = "gpu")]
+                gpu: None,
+            };
+        }
         let rows = isa.rows();
         let isa = if k.is_multiple_of(GROUP) && n.is_multiple_of(2 * rows) {
             isa
@@ -176,6 +193,7 @@ impl Ternary {
             k,
             codes: Store::weights(packed),
             scales: Store::weights(packed_scales),
+            v2: None,
             #[cfg(feature = "gpu")]
             gpu: None,
         }
@@ -213,12 +231,18 @@ impl Ternary {
             let block = row / rows;
             let r = row % rows;
             for group in 0..groups {
-                scales[row * groups + group] = self.scales[(block * groups + group) * rows + r];
+                scales[row * groups + group] = match &self.v2 {
+                    Some(layer) => layer.scale(row, group),
+                    None => self.scales[(block * groups + group) * rows + r],
+                };
             }
             for word in 0..words {
                 let mut packed = 0u32;
                 for lane in 0..16 {
-                    let code = u32::from(self.code_at(block, r, word * 16 + lane));
+                    let code = u32::from(match &self.v2 {
+                        Some(layer) => layer.ternary_code(row, word * 16 + lane),
+                        None => self.code_at(block, r, word * 16 + lane),
+                    });
                     packed |= code << (lane * 2);
                 }
                 codes[row * words + word] = packed;
@@ -252,6 +276,9 @@ impl Ternary {
                     Err(error) => crate::gpu::failed(&error),
                 }
             }
+        }
+        if let Some(layer) = &self.v2 {
+            return layer.forward(x, m);
         }
         let mut out = Buf::scratch(m * self.n);
         let q = Quantized::new(self.isa, x, m, self.k);

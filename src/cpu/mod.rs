@@ -17,6 +17,7 @@ pub mod store;
 pub mod team;
 pub mod tensors;
 mod torch_file;
+pub mod v2;
 
 /// The kernels this CPU runs, for example `ternary avx512-vnni, int8
 /// vnni512, float avx512`: the ternary and int8 products (`avx512-vnni`,
@@ -28,8 +29,14 @@ pub fn cpu_path() -> &'static str {
     static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
         let choice = isa::isa_choice();
+        let set = match (v2::enabled(), v2::float_enabled()) {
+            (true, true) => ", kernels v2",
+            (true, false) => ", kernels v2-int",
+            (false, true) => ", kernels v2-float",
+            (false, false) => "",
+        };
         format!(
-            "ternary {}, int8 {}, float {}",
+            "ternary {}, int8 {}, float {}{set}",
             choice.ternary.name(),
             int8::path_name(),
             choice.float_level.name()

@@ -50,6 +50,12 @@ pub use tts::{
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Times the kernels in isolation (`examples/kernel_bench.rs`).
+#[doc(hidden)]
+pub fn kernel_bench(args: &[String]) -> Vec<String> {
+    cpu::v2::bench::run(args)
+}
+
 /// Where the engine writes what a call cannot return: a GPU failure and the
 /// change to the CPU, and the GPU profile.
 type Log = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
