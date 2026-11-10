@@ -41,9 +41,12 @@ const MAX_PART_CHARS: usize = 400;
 /// so do the buffers of the vocoder: a speed of 0.000001 asked for more
 /// memory than a computer has, and a request that fails ends the process.
 const SPEED_RANGE: (f32, f32) = (0.25, 4.0);
-/// The noise scales a voice takes (`noise`, `noise_duration`). A VITS
-/// duration is `exp` of a value that grows with `noise_duration`.
+/// The noise scale a voice takes (`noise`).
 const NOISE_RANGE: (f32, f32) = (0.0, 4.0);
+/// The `noise_duration` a VITS voice takes. A duration is `exp` of a value
+/// that grows with it: MMS-TTS English spoke one sentence in 3.9 s at 0.8
+/// (its own value), 6.0 s at 1.5, 14 s at 2, and 47 s at 2.5.
+const DURATION_NOISE_RANGE: (f32, f32) = (0.0, 2.0);
 /// The Kokoro voice when none is named (the `kokoro` package's example).
 const DEFAULT_KOKORO_VOICE: &str = "af_heart";
 
@@ -259,7 +262,8 @@ impl Voice {
     }
 
     /// The speech of `text`, mono at `sample_rate()`, in -1..1. Fails on a
-    /// speed outside 0.25 to 4, a noise outside 0 to 4, or an unknown voice.
+    /// speed outside 0.25 to 4, a noise outside 0 to 4, a `noise_duration`
+    /// outside 0 to 2, or an unknown voice.
     pub fn speak_with(&self, text: &str, voicing: &Voicing) -> Result<Vec<f32>, String> {
         let mut out = Vec::new();
         self.speak_stream(text, voicing, &mut |part| {
@@ -299,7 +303,11 @@ impl Voice {
                 };
                 check("speed", settings.speed, SPEED_RANGE)?;
                 check("noise", settings.noise, NOISE_RANGE)?;
-                check("noise_duration", settings.noise_duration, NOISE_RANGE)?;
+                check(
+                    "noise_duration",
+                    settings.noise_duration,
+                    DURATION_NOISE_RANGE,
+                )?;
                 if voicing.phonemes || voicing.voice.is_some() {
                     return Err(
                         "a VITS voice reads letters: it has no phoneme input and one voice".into(),

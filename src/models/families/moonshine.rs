@@ -72,6 +72,11 @@ impl Config {
             return Err("config.json describes a Moonshine shape this engine does not run".into());
         }
         let factor = json.float("partial_rotary_factor").unwrap_or(1.0);
+        // The share of a head that turns. A larger number asked for a
+        // position table of that size (found by `bench/hostile.py`).
+        if !(factor > 0.0 && factor <= 1.0) {
+            return Err("config.json: partial_rotary_factor is not above 0 and at most 1".into());
+        }
         Ok(Self {
             d,
             ffn: num("intermediate_size")?,

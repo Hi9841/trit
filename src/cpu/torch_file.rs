@@ -449,10 +449,12 @@ impl Machine {
                         .checked_sub(n)
                         .ok_or_else(|| bad("TUPLE"))?;
                     let items = self.stack.split_off(split);
+                    shallow(&items)?;
                     self.stack.push(Value::Tuple(items));
                 }
                 b'a' => {
                     let item = self.pop()?;
+                    shallow(std::slice::from_ref(&item))?;
                     self.extend(vec![item])?;
                 }
                 b'e' => {
@@ -462,7 +464,9 @@ impl Machine {
                 b's' => {
                     let value = self.pop()?;
                     let key = self.pop()?;
-                    self.set(vec![key, value])?;
+                    let pair = vec![key, value];
+                    shallow(&pair)?;
+                    self.set(pair)?;
                 }
                 b'u' => {
                     let items = self.items()?;
@@ -525,6 +529,7 @@ impl Machine {
             .ok_or("the checkpoint's pickle has no mark")?;
         let items = self.stack.split_off(mark + 1);
         self.stack.pop();
+        shallow(&items)?;
         Ok(items)
     }
 
@@ -555,6 +560,36 @@ impl Machine {
 /// value, so a pickle of a few hundred bytes can double a value until the
 /// memory is full. A state dict copies names and storages: thousands.
 const MAX_COPIED_NODES: usize = 1 << 24;
+
+/// Containers inside each other, at most. A state dict has about 4 levels.
+/// `drop`, `clone`, and `collect` call themselves for each level: a pickle
+/// of 100,000 one-item tuples inside each other used all of the stack.
+const MAX_DEPTH: usize = 32;
+
+/// Fails when a value of `items` holds containers `MAX_DEPTH` deep. Every
+/// container passes here when it gets its items, so no value is deeper.
+fn shallow(items: &[Value]) -> Result<(), String> {
+    let mut open: Vec<(&Value, usize)> = items.iter().map(|value| (value, 1)).collect();
+    while let Some((value, depth)) = open.pop() {
+        let before = open.len();
+        match value {
+            Value::Tuple(items) | Value::List(items) => {
+                open.extend(items.iter().map(|item| (item, depth + 1)));
+            }
+            Value::Dict(items) => {
+                for (key, item) in items {
+                    open.push((key, depth + 1));
+                    open.push((item, depth + 1));
+                }
+            }
+            _ => {}
+        }
+        if open.len() > before && depth >= MAX_DEPTH {
+            return Err("the checkpoint's pickle is nested too deep".into());
+        }
+    }
+    Ok(())
+}
 
 /// The values in `value`, itself included. No recursion: a value can nest deep.
 fn nodes(value: &Value) -> usize {
