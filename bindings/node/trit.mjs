@@ -43,7 +43,8 @@ const SamplesFn = koffi.proto("int TritSamplesFn(const float *samples, size_t co
 const c = {
   version: lib.func("const char *trit_version(void)"),
   lastError: lib.func("const char *trit_last_error(void)"),
-  load: lib.func("void *trit_load_ex(const char *model_dir, const char *precision, const char *device)"),
+  load: lib.func("void *trit_load_json(const char *model_dir, const char *options)"),
+  cancel: lib.func("int trit_cancel(void *engine)"),
   gpuInfo: lib.func("void *trit_gpu_info(void)"),
   releaseMemory: lib.func("void trit_release_memory(void)"),
   kind: lib.func("const char *trit_kind(void *engine)"),
@@ -69,8 +70,19 @@ const c = {
 
 export class TritError extends Error {}
 
-function text(pointer) {
-  if (!pointer) throw new TritError(c.lastError());
+/** Calls `fn` on a worker thread of Node, so the event loop goes on. The error text belongs to that thread. */
+function background(fn, ...args) {
+  return new Promise((resolve, reject) => {
+    fn.async(...args, (error, result) => (error ? reject(error) : resolve(result)));
+  });
+}
+
+/** Frees the model of an object that the program dropped with no `close()`. */
+const dropped = new FinalizationRegistry(({ free, handle }) => free(handle));
+
+function text(pointer, failed = "the call failed; run it with the call that waits to get the reason") {
+  // The reason of a failure is per thread: after a call in the background this thread does not have it.
+  if (!pointer) throw new TritError(c.lastError() || failed);
 
   try {
     return koffi.decode(pointer, "char", -1);
@@ -110,11 +122,19 @@ export class Trit {
    *   device: "cpu" (default), "gpu", or "auto" (the GPU for the Parakeet models when the computer has an adapter;
    *   the CPU for the other families, which are slower on the GPU).
    *   TRIT_DEVICE overrides device.
+   *   cache: true keeps the converted weights in `<model>/.trit/` and maps that file, so they are file memory and
+   *   not private memory (the first load writes it; the model must be on a local disk).
    */
-  constructor(model = null, { precision = null, device = "cpu" } = {}) {
-    this.#handle = c.load(model, precision, device);
+  constructor(model = null, { precision = null, device = "cpu", cache = false } = {}) {
+    const json = { device, cache };
+
+    if (precision !== null) json.precision = precision;
+
+    this.#handle = c.load(model, JSON.stringify(json));
 
     if (!this.#handle) throw new TritError(c.lastError());
+
+    dropped.register(this, { free: c.free, handle: this.#handle }, this);
   }
 
   /** @returns {string} The `model_type` of the model, for example "parakeet_tdt". */
@@ -155,6 +175,33 @@ export class Trit {
     return this.#wav(file, options(language, settings, true)).segments;
   }
 
+  /**
+   * `transcribe` on a worker thread of Node: the event loop goes on, and `cancel()` can stop the call.
+   * @returns {Promise<string>}
+   */
+  async transcribeAsync(samples, language = null, settings = {}) {
+    const floats = samples instanceof Float32Array ? samples : Float32Array.from(samples);
+    const pointer = await background(c.transcribe, this.#live(), floats, floats.length, options(language, settings));
+
+    return JSON.parse(text(pointer, "the call failed or was cancelled")).text;
+  }
+
+  /** `transcribeWav` on a worker thread of Node. @returns {Promise<string>} */
+  async transcribeWavAsync(file, language = null, settings = {}) {
+    const pointer = await background(c.transcribeWav, this.#live(), file, options(language, settings));
+
+    return JSON.parse(text(pointer, "the call failed or was cancelled")).text;
+  }
+
+  /**
+   * Stops the calls that run on this engine now (`transcribeAsync`, `transcribeWavAsync`): each rejects.
+   * Parakeet stops in a part of a second, the other families at the end of their window.
+   * @returns {number} the calls it stopped.
+   */
+  cancel() {
+    return c.cancel(this.#live());
+  }
+
   #samples(samples, json) {
     const floats = samples instanceof Float32Array ? samples : Float32Array.from(samples);
 
@@ -177,9 +224,11 @@ export class Trit {
     return skipped;
   }
 
+  /** Frees the model. Do not call it while a call in the background runs on this engine. */
   close() {
     if (this.#handle) c.free(this.#handle);
     this.#handle = null;
+    dropped.unregister(this);
   }
 
   #live() {
@@ -198,6 +247,8 @@ export class Cleaner {
     this.#handle = c.cleanerLoad(model, precision, device);
 
     if (!this.#handle) throw new TritError(c.lastError());
+
+    dropped.register(this, { free: c.cleanerFree, handle: this.#handle }, this);
   }
 
   /**
@@ -215,6 +266,7 @@ export class Cleaner {
   close() {
     if (this.#handle) c.cleanerFree(this.#handle);
     this.#handle = null;
+    dropped.unregister(this);
   }
 }
 
@@ -245,6 +297,8 @@ export class Voice {
     this.#handle = c.voiceLoad(model);
 
     if (!this.#handle) throw new TritError(c.lastError());
+
+    dropped.register(this, { free: c.voiceFree, handle: this.#handle }, this);
   }
 
   /** @returns {number} the rate of the samples of `speak` (24000 Kokoro, 16000 MMS-TTS). */
@@ -315,6 +369,7 @@ export class Voice {
   close() {
     if (this.#handle) c.voiceFree(this.#handle);
     this.#handle = null;
+    dropped.unregister(this);
   }
 
   #live() {

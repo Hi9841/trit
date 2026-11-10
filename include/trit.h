@@ -73,6 +73,34 @@ Trit *trit_load_with(const char *model_dir, const char *precision);
  * TRIT_DEVICE overrides the device. NULL on failure, also for an unknown device. */
 Trit *trit_load_ex(const char *model_dir, const char *precision, const char *device);
 
+/* trit_load with options as a JSON object; NULL or "" is the default.
+ * Every key is optional:
+ *   "precision": as for trit_load_with
+ *   "device":    as for trit_load_ex
+ *   "cache":     true keeps the converted weights in <model>/.trit/ and maps
+ *                that file: they are file memory, not private memory, and
+ *                the system can drop their pages. The first load writes the
+ *                file. Keep the model on a local disk: on a network or
+ *                removable disk the load uses no cache.
+ * An unknown key or value fails. Example: "{\"cache\": true}".
+ * NULL on failure. */
+Trit *trit_load_json(const char *model_dir, const char *options);
+
+/* Stops the calls that run on `engine` now, on other threads. Each of them
+ * returns NULL, and its trit_last_error() says that it was cancelled.
+ * Parakeet stops in a part of a second; the other families at the end of
+ * their window (30 s to 2 minutes of audio). A call that starts later is not
+ * stopped. Returns the number of calls it stopped, or -1 for NULL. */
+int trit_cancel(const Trit *engine);
+
+/* The function of trit_set_log: one message (valid during the call only)
+ * and your pointer. It can run on any thread, and must not call Trit. */
+typedef void (*TritLogFn)(const char *message, void *user_data);
+
+/* Sends the messages of the engine (a GPU failure and the change to the
+ * CPU) to `callback`. NULL sends them to stderr again, which is the default. */
+void trit_set_log(TritLogFn callback, void *user_data);
+
 /* The GPU adapter, for example "NVIDIA GeForce RTX 4090, Dx12, f16".
  * NULL when there is no adapter. trit_last_error() then gives the reason.
  * Free the text with trit_free_text(). */
@@ -200,7 +228,7 @@ char *trit_phonemes(const TritVoice *voice, const char *text, const char *option
  *   "speed":          speaking rate; 1 is the voice's pace, 1.25 faster;
  *                     from 0.25 to 4
  *   "noise":          how much the voice varies (VITS 0.667, Kokoro 1); 0 to 4
- *   "noise_duration": VITS: how much the timing varies (0.8); 0 to 4
+ *   "noise_duration": VITS: how much the timing varies (0.8); 0 to 2
  *   "seed":           0 (default) or more; one text and one seed give the
  *                     same audio
  * Returns the samples, or NULL on failure. Free with trit_free_samples(). */

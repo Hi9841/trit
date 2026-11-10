@@ -3,10 +3,10 @@
 //! calling thread, which `trit_last_error` returns. No panic crosses the ABI.
 
 use std::cell::RefCell;
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use trit::{
     BiasWeights, Cleaner, Device, LoadOptions, Options, Precision, Task, Trit, Voice, Voicing,
 };
@@ -29,6 +29,7 @@ fn set_error(message: String) {
 /// Runs `body`, turns an `Err` or a panic into the thread's error, and
 /// returns `failed` in that case.
 fn guard<T>(failed: T, body: impl FnOnce() -> Result<T, String>) -> T {
+    keep_worker_panics();
     set_error(String::new());
     match catch_unwind(AssertUnwindSafe(body)) {
         Ok(Ok(value)) => value,
@@ -43,15 +44,50 @@ fn guard<T>(failed: T, body: impl FnOnce() -> Result<T, String>) -> T {
     }
 }
 
-/// The error text of a panic, with its message when it has one.
+/// The message and the place of the last panic on a worker thread of the
+/// engine. The panic that reaches the caller only says that a worker failed.
+static WORKER_PANIC: Mutex<Option<String>> = Mutex::new(None);
+
+/// Keeps the message of a worker's panic for `panic_text`. The engine does
+/// not carry it to the caller (that costs time in its task loop), and a
+/// program with no console never sees what the panic hook prints. This
+/// library has its own copy of `std`, so the hook sees only its own panics;
+/// it calls the hook that was there before.
+fn keep_worker_panics() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let before = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let worker = std::thread::current()
+                .name()
+                .is_some_and(|name| name.starts_with("trit-speech-"));
+            if worker {
+                let mut kept = WORKER_PANIC.lock().unwrap_or_else(|p| p.into_inner());
+                *kept = Some(info.to_string());
+            }
+            before(info);
+        }));
+    });
+}
+
+/// The error text of a panic, with its message when it has one, and with
+/// the message of the worker when the panic came from a worker thread.
 fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
     let message = panic
         .downcast_ref::<&str>()
         .copied()
         .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
-    match message {
-        Some(message) => format!("internal error in trit (panic): {message}"),
-        None => "internal error in trit (panic)".into(),
+    let worker = WORKER_PANIC
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+        .filter(|_| message.is_some_and(|m| m.contains("worker thread panicked")));
+    match (message, worker) {
+        (Some(message), Some(worker)) => {
+            format!("internal error in trit (panic): {message}: {worker}")
+        }
+        (Some(message), None) => format!("internal error in trit (panic): {message}"),
+        (None, _) => "internal error in trit (panic)".into(),
     }
 }
 
@@ -198,6 +234,123 @@ pub unsafe extern "C" fn trit_load_ex(
     })
 }
 
+const LOAD_KEYS: &str = "precision, device, cache";
+
+/// `trit_load` with options as a JSON object; NULL or "" is the default.
+/// Every key is optional: `precision` and `device` (as for `trit_load_ex`),
+/// and `cache` (true keeps the converted weights in `<model>/.trit/` and
+/// maps that file, so they are file memory and not private memory; the
+/// folder must be on a local disk). An unknown key or value fails.
+/// Returns NULL on failure. Free with `trit_free`.
+///
+/// # Safety
+/// `model_dir` and `options` are NULL or NUL-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn trit_load_json(
+    model_dir: *const c_char,
+    options: *const c_char,
+) -> *mut Trit {
+    guard(std::ptr::null_mut(), || {
+        let explicit = path_arg(model_dir, "model_dir")?;
+        let mut load = LoadOptions::default();
+        if let Some(object) = json_object(options, "{\"cache\": true}")? {
+            for (key, value) in &object {
+                let wrong = || format!("options.{key} cannot be {value}");
+                match key.as_str() {
+                    "precision" => {
+                        load.precision = Precision::parse(value.as_str().ok_or_else(wrong)?)?
+                    }
+                    "device" => load.device = Device::parse(value.as_str().ok_or_else(wrong)?)?,
+                    "cache" => load.cache = value.as_bool().ok_or_else(wrong)?,
+                    _ => return Err(format!("unknown option {key}; valid options: {LOAD_KEYS}")),
+                }
+            }
+        }
+        let dir = trit::find_model(explicit).ok_or_else(|| trit::missing_model(explicit))?;
+        let engine = Trit::load_with(&dir, &load)?;
+        trit::release_memory();
+        Ok(Box::into_raw(Box::new(engine)))
+    })
+}
+
+/// The function of `trit_set_log`: one message (valid during the call
+/// only) and the caller's pointer.
+pub type TritLogFn = extern "C" fn(message: *const c_char, user_data: *mut c_void);
+
+/// Sends the messages of the engine (a GPU failure and the change to the
+/// CPU) to `callback`; NULL sends them to stderr again. The callback can
+/// run on any thread, and must not call Trit.
+#[no_mangle]
+pub extern "C" fn trit_set_log(callback: Option<TritLogFn>, user_data: *mut c_void) {
+    // The pointer goes to other threads as a number: the caller says that
+    // its function may use it from any thread.
+    let data = user_data as usize;
+    trit::set_log(callback.map(|callback| -> Arc<dyn Fn(&str) + Send + Sync> {
+        Arc::new(move |message: &str| {
+            if let Ok(text) = CString::new(message.replace('\0', " ")) {
+                callback(text.as_ptr(), data as *mut c_void);
+            }
+        })
+    }));
+}
+
+/// The calls that run now, by engine: `trit_cancel` sets their flags.
+static RUNNING: Mutex<Vec<(usize, trit::Cancel)>> = Mutex::new(Vec::new());
+
+/// One call on an engine that `trit_cancel` can stop, until the value drops.
+struct Running(usize, trit::Cancel);
+
+impl Running {
+    /// Gives `options` a new cancel flag and lists the call under `engine`.
+    fn start(engine: &Trit, options: &mut Options) -> Self {
+        let cancel = trit::Cancel::new();
+        options.cancel = Some(cancel.clone());
+        let key = std::ptr::from_ref(engine) as usize;
+        let mut running = RUNNING.lock().unwrap_or_else(|p| p.into_inner());
+        running.push((key, cancel.clone()));
+        Self(key, cancel)
+    }
+
+    /// `value`, or the error of a call that `trit_cancel` stopped: its text
+    /// is empty, and must not look like silence.
+    fn finish<T>(self, value: T) -> Result<T, String> {
+        match self.1.is_cancelled() {
+            true => Err("the call was cancelled (trit_cancel)".into()),
+            false => Ok(value),
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut running = RUNNING.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(at) = running
+            .iter()
+            .position(|(key, cancel)| *key == self.0 && *cancel == self.1)
+        {
+            running.swap_remove(at);
+        }
+    }
+}
+
+/// Stops the calls that run on `engine` now, on other threads. Each of them
+/// returns NULL, and its `trit_last_error` says that it was cancelled.
+/// Parakeet stops in a part of a second; the other families at the end of
+/// their window (30 s to 2 minutes of audio). A call that starts later is
+/// not stopped. Returns the number of calls it stopped, or -1 for NULL.
+///
+/// # Safety
+/// `engine` is NULL or a pointer from `trit_load` that was not freed.
+#[no_mangle]
+pub unsafe extern "C" fn trit_cancel(engine: *const Trit) -> c_int {
+    guard(-1, || {
+        let key = std::ptr::from_ref(engine_arg(engine)?) as usize;
+        let running = RUNNING.lock().unwrap_or_else(|p| p.into_inner());
+        let mine = running.iter().filter(|(owner, _)| *owner == key);
+        Ok(mine.map(|(_, cancel)| cancel.cancel()).count() as c_int)
+    })
+}
+
 /// The GPU adapter, for example "NVIDIA GeForce RTX 4090, Dx12, f16".
 /// NULL when there is no adapter. `trit_last_error` then gives the reason.
 /// Free the text with `trit_free_text`.
@@ -301,7 +454,9 @@ pub unsafe extern "C" fn trit_transcribe_with(
         options.beam = usize::try_from(beam).map_err(|_| format!("beam {beam} is below 0"))?;
         engine.check(&options)?;
         let samples = samples_arg(samples, count)?;
-        Ok(owned_text(engine.transcribe_with(samples, &options)))
+        let running = Running::start(engine, &mut options);
+        let text = engine.transcribe_with(samples, &options);
+        Ok(owned_text(running.finish(text)?))
     })
 }
 
@@ -319,10 +474,12 @@ pub unsafe extern "C" fn trit_transcribe_wav(
 ) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         let engine = engine_arg(engine)?;
-        let options = options(language)?;
+        let mut options = options(language)?;
         engine.check(&options)?;
         let samples = trit::read_wav(Path::new(text_arg(path, "path")?))?;
-        Ok(owned_text(engine.transcribe_with(&samples, &options)))
+        let running = Running::start(engine, &mut options);
+        let text = engine.transcribe_with(&samples, &options);
+        Ok(owned_text(running.finish(text)?))
     })
 }
 
@@ -403,12 +560,12 @@ pub unsafe extern "C" fn trit_transcribe_json(
 ) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         let engine = engine_arg(engine)?;
-        let (options, timestamps) = json_options(options)?;
+        let (mut options, timestamps) = json_options(options)?;
         engine.check(&options)?;
         let samples = samples_arg(samples, count)?;
-        Ok(owned_text(json_result(
-            engine, samples, &options, timestamps,
-        )))
+        let running = Running::start(engine, &mut options);
+        let json = json_result(engine, samples, &options, timestamps);
+        Ok(owned_text(running.finish(json)?))
     })
 }
 
@@ -425,12 +582,12 @@ pub unsafe extern "C" fn trit_transcribe_wav_json(
 ) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         let engine = engine_arg(engine)?;
-        let (options, timestamps) = json_options(options)?;
+        let (mut options, timestamps) = json_options(options)?;
         engine.check(&options)?;
         let samples = trit::read_wav(Path::new(text_arg(path, "path")?))?;
-        Ok(owned_text(json_result(
-            engine, &samples, &options, timestamps,
-        )))
+        let running = Running::start(engine, &mut options);
+        let json = json_result(engine, &samples, &options, timestamps);
+        Ok(owned_text(running.finish(json)?))
     })
 }
 

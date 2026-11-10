@@ -165,7 +165,7 @@ trit::release_memory();                                  // when the app goes id
 | `Trit::load_reporting(dir, &LoadOptions, Option<Arc<dyn Fn(f32) + Send + Sync>>)` | `load_with`; the function gets the fraction loaded, 0 to 1, for a progress bar. The value never goes back. The calls come from the loading thread and from worker threads |
 | `Trit::transcribe(&self, &[f32]) -> String` | Text; the model detects the language |
 | `Trit::transcribe_with(&self, &[f32], &Options) -> String` | Text with `Options { language, task, beam, fallback, cancel }` |
-| `Cancel::new()`, `Cancel::cancel(&self)`, `Cancel::is_cancelled(&self)` | Stops a call from another thread through `Options::cancel`. Parakeet stops between encoder blocks, decoder steps, and windows. The other families stop between windows (30 s to 2 minutes of audio each). A cancelled call returns no text. A flag stays set: use a new one for each call. There is no C ABI for it |
+| `Cancel::new()`, `Cancel::cancel(&self)`, `Cancel::is_cancelled(&self)` | Stops a call from another thread through `Options::cancel`. Parakeet stops between encoder blocks, decoder steps, and windows. The other families stop between windows (30 s to 2 minutes of audio each). A cancelled call returns no text. A flag stays set: use a new one for each call. The C ABI has `trit_cancel(engine)` |
 | `Trit::segments(&self, &[f32], &Options) -> Vec<Segment>` | Timed parts: `start`, `end` in seconds, `text` |
 | `Trit::kind(&self) -> &str` | `parakeet_tdt`, `parakeet_ctc`, `canary`, `whisper`, or `moonshine` |
 | `Trit::check(&self, &Options) -> Result<(), String>` | Whether the model takes the language of the options: a code of the model's list (Whisper, Canary), or, for a model with no list, an ISO 639-1 code. `transcribe` does not fail for a code that fails here; it runs as if no language was given |
@@ -214,12 +214,14 @@ trit_free(engine);
 | `trit_load(const char *model)` | An engine, or NULL. A folder, a name, or NULL for the default |
 | `trit_load_with(const char *model, const char *precision)` | The same with `"auto"` (or NULL), `"int8"`, `"f16"`, `"f32"`, `"q8_0"`. The device stays `"cpu"` |
 | `trit_load_ex(const char *model, const char *precision, const char *device)` | `trit_load_with` plus `"cpu"` (or NULL), `"gpu"`, or `"auto"` |
+| `trit_load_json(const char *model, const char *options)` | `trit_load` with options. `options` is NULL or a JSON object with any of `precision`, `device`, `cache` (`true`: see "Weight cache"). An unknown key fails |
 | `trit_gpu_info(void)` | The adapter text, or NULL. Free with `trit_free_text`. `trit_last_error` gives the reason |
 | `trit_kind(engine)` | The `model_type`, static |
 | `trit_transcribe(engine, const float *samples, size_t count, const char *language)` | Text, or NULL |
 | `trit_transcribe_with(engine, samples, count, language, int beam)` | The same with beams (0: the model's default, 1: greedy, at most 16) |
 | `trit_transcribe_wav(engine, const char *path, const char *language)` | Text, or NULL |
 | `trit_transcribe_json(engine, samples, count, const char *options)`, `trit_transcribe_wav_json(engine, path, options)` | `{"text", "segments": [{"start", "end", "text"}]}` as JSON, or NULL. `options` is NULL or a JSON object with any of `language`, `task` (`"transcribe"`, `"translate"`), `beam`, `fallback`, `timestamps` |
+| `trit_cancel(engine)` | The number of calls it stopped, or -1. Stops the calls that run on the engine now, on other threads: each returns NULL, and its `trit_last_error` says that it was cancelled. Parakeet stops in a part of a second; the other families between windows. A call that starts later is not stopped |
 | `trit_set_dictionary(engine, const char *terms)` | Terms skipped, or -1. One term per line; a term over 100 characters is skipped |
 | `trit_cleaner_load(const char *model)`, `trit_cleaner_load_with(model, precision)`, `trit_cleaner_load_ex(model, precision, device)` | A cleaner, or NULL. The device values are the same as for `trit_load_ex` |
 | `trit_clean(cleaner, text, styling, structure, context)` | Clean text, or NULL. NULL settings take the default |
@@ -230,6 +232,7 @@ trit_free(engine);
 | `trit_speak_stream(voice, text, options, TritSamplesFn callback, void *user_data)` | 0, or -1. The callback gets each part; it returns 1 to go on, 0 to stop |
 | `trit_speak_wav(voice, text, const char *path, options)` | 0, or -1. A 16-bit mono WAV file |
 | `trit_release_memory(void)` | Gives memory that earlier calls freed back to the system |
+| `trit_set_log(TritLogFn callback, void *user_data)` | Sends the engine's messages (a GPU failure and the change to the CPU) to `callback(const char *message, void *user_data)`. NULL sends them to stderr again. The callback can run on any thread, and must not call Trit |
 | `trit_last_error(void)` | The reason for the last failure on this thread |
 | `trit_free_text(char *)`, `trit_free(Trit *)`, `trit_cleaner_free(TritCleaner *)`, `trit_voice_free(TritVoice *)`, `trit_free_samples(float *, size_t count)` | Free. NULL is a no-op |
 | `trit_version(void)` | `"0.5.0"` |
@@ -238,7 +241,8 @@ Rules: strings are UTF-8. `language` is an ISO 639-1 code or NULL. Free
 every returned text with `trit_free_text`, and the samples of `trit_speak`
 with `trit_free_samples`. An unknown option fails with the
 list of valid ones. No panic crosses the ABI; it
-becomes NULL or -1 and an error text.
+becomes NULL or -1 and an error text. One engine takes calls from several
+threads; `trit_free` must not run while a call uses the engine.
 
 Other languages with a C FFI use the header as it is: Go (cgo), Swift,
 Kotlin and Java (Panama or JNA), Zig, Ruby (FFI gem), Dart (dart:ffi), Lua
@@ -253,7 +257,7 @@ dependencies (ctypes). Copy it next to your code. It finds the library at
 ```python
 import trit
 
-engine = trit.Trit("parakeet-redux")              # folder, name, or None; precision="f16", device="auto"
+engine = trit.Trit("parakeet-redux")              # folder, name, or None; precision="f16", device="auto", cache=True
 print(trit.gpu_info())                            # the adapter, or TritError
 print(engine.kind)                                # "parakeet_tdt"
 print(engine.transcribe_wav("take.wav", language="en"))
@@ -263,6 +267,8 @@ print(engine.transcribe_wav("take.wav", task="translate"))  # into English (Whis
 for s in engine.segments_wav("take.wav", language="en"):    # also segments(samples)
     print(s.start, s.end, s.text)                 # seconds from the start
 engine.set_dictionary(["Kubernetes", "PostgreSQL"])
+engine.cancel()                                   # from another thread: the running calls raise TritError
+trit.set_log(print)                               # the engine's messages, in place of stderr
 trit.release_memory()                             # when the app goes idle
 
 cleaner = trit.Cleaner()                          # S1-mini
@@ -277,7 +283,8 @@ print(voice.voices, voice.phonemes("I read it."))
 ```
 
 Errors raise `trit.TritError` with the cause and the fix. `Trit`,
-`Cleaner`, and `Voice` are context managers.
+`Cleaner`, and `Voice` are context managers. A call releases the GIL, so
+other Python threads run during it, and one of them can call `cancel()`.
 
 ## C# and .NET
 
@@ -288,7 +295,7 @@ to the program. .NET 7 or later.
 ```csharp
 using TritSpeech;
 
-using var engine = new Trit("parakeet-redux");           // precision, then device: "cpu", "gpu", or "auto"
+using var engine = new Trit("parakeet-redux");           // precision, device ("cpu", "gpu", "auto"), cache: true
 Console.WriteLine(Trit.GpuInfo());                       // the adapter, or TritException
 Console.WriteLine(engine.TranscribeWav("take.wav", "en"));
 Console.WriteLine(engine.Transcribe(samples, "en"));     // float[] or Span<float>, 16 kHz mono
@@ -296,6 +303,8 @@ Console.WriteLine(engine.TranscribeWav("take.wav", task: "translate"));  // into
 foreach (var s in engine.SegmentsWav("take.wav", "en"))  // also Segments(samples)
     Console.WriteLine($"{s.Start} {s.End} {s.Text}");    // seconds from the start
 engine.SetDictionary("Kubernetes", "PostgreSQL");
+engine.Cancel();                                         // from another thread: the running calls throw
+Trit.SetLog(line => logger.Warn(line));                  // the engine's messages, in place of stderr
 
 using var cleaner = new TritCleaner();
 Console.WriteLine(cleaner.Clean("so um send it friday no wait thursday"));
@@ -317,7 +326,7 @@ Errors throw `TritException`. The options of each call are `language`,
 ```js
 import { Trit, Cleaner, Voice, gpuInfo, releaseMemory } from "./trit.mjs";
 
-const engine = new Trit("parakeet-redux");             // second argument: { precision: "f16", device: "auto" }
+const engine = new Trit("parakeet-redux");             // second argument: { precision: "f16", device: "auto", cache: true }
 console.log(gpuInfo());                                // the adapter, or TritError
 console.log(engine.transcribeWav("take.wav", "en"));
 console.log(engine.transcribe(samples, "en"));         // Float32Array, 16 kHz mono
@@ -325,6 +334,8 @@ console.log(engine.transcribeWav("take.wav", null, { task: "translate" }));  // 
 for (const s of engine.segmentsWav("take.wav", "en"))  // also segments(samples)
   console.log(s.start, s.end, s.text);                 // seconds from the start
 engine.setDictionary(["Kubernetes", "PostgreSQL"]);
+const pending = engine.transcribeAsync(samples, "en"); // on a worker thread: the event loop goes on
+engine.cancel();                                       // `pending` rejects; also transcribeWavAsync
 engine.close();
 releaseMemory();
 
@@ -339,7 +350,10 @@ voice.speakStream(longText, (part) => { play(part); return true; });
 voice.close();
 ```
 
-Errors throw `TritError`.
+Errors throw `TritError`. `transcribe` and `transcribeWav` hold the event
+loop until the text is there: use `transcribeAsync` and `transcribeWavAsync`
+in a server or a desktop app. An object that the program drops without
+`close()` frees its model when the collector finds it.
 
 ## Models
 
@@ -588,7 +602,7 @@ Kokoro speaks phonemes. Trit's phonemizer (`src/tts/english/`) is a port of
 | `voice` | `af_heart` | Kokoro voice; `"af_bella,af_sky"` is the mean of two |
 | `speed` | 1 | Speaking rate: 1.25 is a quarter faster. From 0.25 to 4 |
 | `noise` | Kokoro 1, VITS 0.667 | Kokoro: the noise of the vocoder's source. VITS: `noise_scale`, how much the voice varies; 0 is the flattest. From 0 to 4 |
-| `noise_duration` | 0.8 | VITS only: how much the timing varies. From 0 to 4 |
+| `noise_duration` | 0.8 | VITS only: how much the timing varies. From 0 to 2 |
 | `seed` | 0 | The seed of the noise: one text and one seed give the same audio |
 | `phonemes` | false | Kokoro: the text is phonemes, one pass per line |
 
@@ -646,9 +660,11 @@ Both runtimes speak; Parakeet Redux transcribes both.
 
 ## Weight cache
 
-`LoadOptions { cache: true, .. }` (Rust API) keeps the converted weights of
-a model in `<model>/.trit/weights-<version>-<precision>-<kernels>.bin` and
-maps that file. The files of the model stay as published.
+`LoadOptions { cache: true, .. }` (Rust; `"cache": true` of
+`trit_load_json`; `cache` in the three bindings) keeps the converted weights
+of a model in `<model>/.trit/weights-<version>-<precision>-<kernels>.bin` and
+maps that file. The files of the model stay as published. `Trit` and
+`Cleaner` take it; a voice does not.
 
 - Memory: the weights count as file memory, shared and not private, and the
   system can drop their pages under memory pressure and read them back from
@@ -670,6 +686,8 @@ maps that file. The files of the model stay as published.
   goes away while the engine runs (a network folder that disconnects, a
   removable disk, a tool that truncates the file), the next read of the
   weights is an access fault that stops the process. No program can catch it.
+  On Windows, a load from a network, removable, or optical disk uses no
+  cache for this reason: it loads as without `cache`.
 
 ## Precision
 

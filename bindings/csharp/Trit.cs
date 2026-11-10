@@ -48,7 +48,9 @@ internal static partial class Native
 
     [LibraryImport(Lib)] public static partial IntPtr trit_version();
     [LibraryImport(Lib)] public static partial IntPtr trit_last_error();
-    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_load_ex(string? model, string? precision, string? device);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial IntPtr trit_load_json(string? model, string? options);
+    [LibraryImport(Lib)] public static partial int trit_cancel(IntPtr engine);
+    [LibraryImport(Lib)] public static unsafe partial void trit_set_log(delegate* unmanaged[Cdecl]<byte*, IntPtr, void> callback, IntPtr userData);
     [LibraryImport(Lib)] public static partial IntPtr trit_gpu_info();
     [LibraryImport(Lib)] public static partial void trit_release_memory();
     [LibraryImport(Lib)] public static partial IntPtr trit_kind(IntPtr engine);
@@ -82,11 +84,45 @@ public sealed class Trit : IDisposable
     /// "f16", "f32" (as the reference), or "q8_0" (ggml's Q8_0).
     /// device: "cpu" (default), "gpu", or "auto" (the GPU for the Parakeet models when the computer has an
     /// adapter; the CPU for the other families, which are slower on the GPU).
-    /// TRIT_DEVICE overrides device.</summary>
-    public Trit(string? model = null, string? precision = null, string device = "cpu")
+    /// TRIT_DEVICE overrides device. cache: keep the converted weights in the folder .trit of the model and
+    /// map that file, so they are file memory and not private memory (the first load writes it; the model
+    /// must be on a local disk).</summary>
+    public Trit(string? model = null, string? precision = null, string device = "cpu", bool cache = false)
     {
-        _handle = Native.trit_load_ex(model, precision, device);
+        using var buffer = new MemoryStream();
+        using (var json = new Utf8JsonWriter(buffer))
+        {
+            json.WriteStartObject();
+            if (precision != null) json.WriteString("precision", precision);
+            json.WriteString("device", device);
+            json.WriteBoolean("cache", cache);
+            json.WriteEndObject();
+        }
+        _handle = Native.trit_load_json(model, System.Text.Encoding.UTF8.GetString(buffer.ToArray()));
         if (_handle == IntPtr.Zero) throw Native.Error();
+    }
+
+    /// <summary>Stops the calls that run on this engine now, on other threads: each throws TritException
+    /// ("the call was cancelled"). Parakeet stops in a part of a second, the other families at the end of
+    /// their window. Returns the number of calls it stopped.</summary>
+    public int Cancel() => Native.trit_cancel(Handle);
+
+    static Action<string>? _log;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    static unsafe void OnLog(byte* message, IntPtr userData)
+    {
+        // An exception must not cross the native frames.
+        try { _log?.Invoke(Marshal.PtrToStringUTF8((IntPtr)message) ?? ""); }
+        catch (Exception) { }
+    }
+
+    /// <summary>Sends the engine's messages (a GPU failure and the change to the CPU) to log; null sends them
+    /// to stderr again. The function can run on any thread, and must not call Trit.</summary>
+    public static void SetLog(Action<string>? log)
+    {
+        _log = log;
+        unsafe { Native.trit_set_log(log == null ? null : &OnLog, IntPtr.Zero); }
     }
 
     /// <summary>The GPU adapter, for example "NVIDIA GeForce RTX 4090, Dx12, f16".

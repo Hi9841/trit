@@ -45,6 +45,7 @@ __all__ = [
     "Voice",
     "gpu_info",
     "release_memory",
+    "set_log",
     "version",
 ]
 
@@ -56,6 +57,7 @@ class TritError(RuntimeError):
 
 
 _SAMPLES_FN = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_float), ctypes.c_size_t, ctypes.c_void_p)
+_LOG_FN = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
 
 
 def _library() -> ctypes.CDLL:
@@ -73,7 +75,10 @@ def _library() -> ctypes.CDLL:
     signatures = {
         "trit_version": ([], text),
         "trit_last_error": ([], text),
+        "trit_load_json": ([text, text], ptr),
         "trit_load_ex": ([text, text, text], ptr),
+        "trit_cancel": ([ptr], ctypes.c_int),
+        "trit_set_log": ([_LOG_FN, ptr], None),
         "trit_gpu_info": ([], ptr),
         "trit_release_memory": ([], None),
         "trit_kind": ([ptr], text),
@@ -97,8 +102,10 @@ def _library() -> ctypes.CDLL:
         "trit_phonemes": ([ptr, text, text], ptr),
     }
     for fn, (args, result) in signatures.items():
-        getattr(lib, fn).argtypes = args
-        getattr(lib, fn).restype = result
+        # An older library has fewer functions (an A/B of two builds, `oploop/ab.py`).
+        if hasattr(lib, fn):
+            getattr(lib, fn).argtypes = args
+            getattr(lib, fn).restype = result
     return lib
 
 
@@ -113,6 +120,19 @@ def release_memory() -> None:
     """Return memory freed by earlier calls to the system; call it when the
     app goes idle, not between calls."""
     _lib.trit_release_memory()
+
+
+_log_callback = None  # the ctypes function must live as long as the library uses it
+
+
+def set_log(function) -> None:
+    """Send the engine's messages (a GPU failure and the change to the CPU) to
+    `function(message: str)`; None sends them to stderr again. The function can
+    run on any thread, and must not call Trit."""
+    global _log_callback
+    callback = _LOG_FN(lambda message, _user: function(message.decode(errors="replace"))) if function else _LOG_FN()
+    _lib.trit_set_log(callback, None)
+    _log_callback = callback
 
 
 def gpu_info() -> str:
@@ -179,6 +199,7 @@ class Trit:
         model: str | os.PathLike | None = None,
         precision: str | None = None,
         device: str = "cpu",
+        cache: bool = False,
     ):
         """`model`: a folder, a `trit models` name, or None for the default.
         `precision`: "auto" (None; int8 for layers 384 wide and more, f16
@@ -186,9 +207,20 @@ class Trit:
         "f16", "f32" (as the reference), or "q8_0" (ggml's Q8_0).
         `device`: "cpu" (default), "gpu", or "auto". "auto" uses the GPU for
         the Parakeet models when the computer has an adapter, and the CPU for
-        the other families (they are slower on the GPU). TRIT_DEVICE overrides it."""
+        the other families (they are slower on the GPU). TRIT_DEVICE overrides it.
+        `cache`: keep the converted weights in `<model>/.trit/` and map that
+        file, so they are file memory and not private memory (the first load
+        writes it; the model must be on a local disk)."""
         self._handle = None
-        handle = _lib.trit_load_ex(_arg(model), _arg(precision), _arg(device))
+        options = {"device": device, "cache": cache}
+        if precision is not None:
+            options["precision"] = precision
+        if hasattr(_lib, "trit_load_json"):
+            handle = _lib.trit_load_json(_arg(model), json.dumps(options).encode())
+        elif cache:
+            raise TritError("this trit-ffi library is older than the cache option; build it again")
+        else:
+            handle = _lib.trit_load_ex(_arg(model), _arg(precision), _arg(device))
         if not handle:
             raise _error()
         self._handle = handle
@@ -248,6 +280,13 @@ class Trit:
         if skipped < 0:
             raise _error()
         return skipped
+
+    def cancel(self) -> int:
+        """Stops the calls that run on this engine now, on other threads: each
+        raises TritError ("the call was cancelled"). Parakeet stops in a part
+        of a second, the other families at the end of their window. Returns
+        the number of calls it stopped."""
+        return _lib.trit_cancel(self._live())
 
     def close(self) -> None:
         """Frees the model. Do not call it while another thread is in a call on this engine."""
