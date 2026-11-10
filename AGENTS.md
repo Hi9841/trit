@@ -74,6 +74,8 @@ Do the steps in order. Each step ends on a check.
 | Skill current? | `./target/release/trit skill --check skill/SKILL.md` |
 | Voices against their references | `python bench/tts.py kokoro <trit.exe> <kokoro dir> <parakeet-redux dir>` and `python bench/tts.py vits <trit.exe> <mms dir> <parakeet-redux dir>`, in the environment that `bench/tts.py` names |
 | Phonemes of a text | `./target/release/trit phonemes "<text>"` (`--british`, `--no-fallback`) |
+| Same text on every kernel path | `python bench/paths.py <trit.exe> <model> <clip.wav>...` (each `TRIT_ISA` value, and 1 thread) |
+| Damaged and hostile files | `python bench/hostile.py <trit.exe> --mutate <small model folder> --runs 150` |
 | Same model on other runtimes | `uv run --no-project --python 3.12 python bench/runtimes.py <engine>` (`--rounds 3` for published numbers: the report gives the median and the spread) |
 | Same GGUF file as transcribe.cpp (Hex's engine) | `uv run --no-project --python 3.12 --with whisper-normalizer python bench/gguf.py run <models dir> --rounds 3`, then `... bench/gguf.py report`; build `bench/gguf` first (CMake) |
 | Release | Bump the version in `Cargo.toml` and `ffi/Cargo.toml`, push the tag, then `gh release create <tag>`. `.github/workflows/release.yml` attaches the Linux, macOS, and Windows builds. For an older tag: `gh workflow run release.yml -f tag=<tag>` |
@@ -104,6 +106,12 @@ There are no unit tests. The checks are:
   to spaCy is separate: 3.0 % of phoneme words on the bench corpus.
 - **Speed:** a change is a gain only when `ab.py` shows p < 0.01 and the
   same text on every clip. Record it in `oploop/LEDGER.md`.
+- **Files:** a change to a reader (`cpu/torch_file.rs`, `models/nemo.rs`,
+  `audio/wav.rs`, `config.rs`, a tokenizer, a family's `Config`) must keep
+  `bench/hostile.py` at exit 0: a damaged or hostile file gives an error,
+  not a crash, a hang, or a full memory. When a run fails, fix the reader
+  and keep the case (last run: 450 damaged copies of Moonshine tiny, 0
+  fail).
 
 ### Architecture
 

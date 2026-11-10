@@ -1,0 +1,26 @@
+name: Audit
+
+# Known vulnerabilities in the crates of Cargo.lock (the RustSec advisory
+# database). A new advisory is not the fault of a pull request, so this runs
+# each week and when the lock file changes, not on every push.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  push:
+    branches: [main]
+    paths: [Cargo.lock]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        run: cargo audit

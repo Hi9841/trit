@@ -84,6 +84,11 @@ jobs:
             hf download UsefulSensors/moonshine-tiny config.json tokenizer.json model.safetensors --local-dir models/moonshine-tiny
           fi
           python bench/paths.py target/release/trit.exe models/moonshine-tiny target/smoke/*.wav
+      - name: Damaged files
+        shell: bash
+        # A hostile checkpoint, a damaged config, tokenizer, or weight header, and a damaged
+        # WAV file must each give an error: no crash, no hang, no full memory.
+        run: python bench/hostile.py target/release/trit.exe --mutate models/moonshine-tiny --runs 60
 
   # Apple Silicon: the NEON, sdot, and smmla kernels, the macOS thread
   # setup, and the Metal GPU code. The home view prints the kernel paths.
@@ -139,3 +144,27 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Kernel paths
         run: target/release/trit
+      - name: Clips
+        # espeak-ng writes 22.05 kHz; Trit takes 16 kHz.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends espeak-ng sox
+          mkdir -p target/smoke
+          say() { espeak-ng -s 150 --stdout "$2" | sox -t wav - -r 16000 -c 1 -b 16 "target/smoke/$1.wav"; }
+          say a "The quick brown fox jumps over the lazy dog near the river bank."
+          say b "Please send the report to the finance team before Friday afternoon."
+          say c "We moved the database to the new cluster last night."
+      - uses: actions/cache@v4
+        with:
+          path: models/moonshine-tiny
+          key: moonshine-tiny
+      - name: Same text on every kernel path
+        run: |
+          if [ ! -f models/moonshine-tiny/model.safetensors ]; then
+            python3 -m pip install --quiet --break-system-packages huggingface_hub
+            hf download UsefulSensors/moonshine-tiny config.json tokenizer.json model.safetensors --local-dir models/moonshine-tiny
+          fi
+          python3 bench/paths.py target/release/trit models/moonshine-tiny target/smoke/*.wav
+      - name: Python binding
+        run: |
+          TRIT_LIB="$PWD/target/release/libtrit_ffi.so" python3 -c "import sys; sys.path.insert(0, 'bindings/python'); import trit; assert trit.version() == '$(target/release/trit --version)', trit.version(); print(trit.version())"
