@@ -116,8 +116,14 @@ impl Ternary {
             k,
             |row, codes| {
                 let packed_row = &packed[row * row_bytes..(row + 1) * row_bytes];
-                for (five, byte) in codes.chunks_mut(5).zip(packed_row) {
-                    five.copy_from_slice(&DIGITS[usize::from(*byte)][..five.len()]);
+                // A copy of exactly 5 bytes for each file byte: a copy of a
+                // length the compiler does not know was most of a load.
+                let (fives, rest) = codes.as_chunks_mut::<5>();
+                for (five, byte) in fives.iter_mut().zip(packed_row) {
+                    *five = DIGITS[usize::from(*byte)];
+                }
+                if let Some(byte) = packed_row.get(fives.len()) {
+                    rest.copy_from_slice(&DIGITS[usize::from(*byte)][..rest.len()]);
                 }
             },
         ))
@@ -168,15 +174,11 @@ impl Ternary {
             if scalar {
                 packed[block * k..(block + 1) * k].copy_from_slice(&codes);
             } else {
-                // Byte j of a row's 16-code span holds codes j, 4 + j, 8 + j, 12 + j.
                 for k16 in 0..k / 16 {
                     for r in 0..rows {
                         let src = &codes[r * k + k16 * 16..][..16];
                         let dst = ((block * (k / 16) + k16) * rows + r) * 4;
-                        for j in 0..4 {
-                            packed[dst + j] =
-                                src[j] | src[4 + j] << 2 | src[8 + j] << 4 | src[12 + j] << 6;
-                        }
+                        packed[dst..dst + 4].copy_from_slice(&pack_span(src));
                     }
                 }
             }
@@ -620,6 +622,15 @@ pub(crate) mod neon {
 /// The five base-3 digits of every packed byte, least significant first.
 /// A table copy per byte replaces a division per code: model load spent
 /// most of its time on those divisions.
+/// The 4 bytes of a 16-code span: byte j holds codes j, 4 + j, 8 + j, and
+/// 12 + j, two bits each. Four codes move as one word: a code is 0 to 2, so
+/// no bit leaves its byte.
+pub(super) fn pack_span(codes: &[u8]) -> [u8; 4] {
+    let word =
+        |at: usize| u32::from_le_bytes([codes[at], codes[at + 1], codes[at + 2], codes[at + 3]]);
+    (word(0) | word(4) << 2 | word(8) << 4 | word(12) << 6).to_le_bytes()
+}
+
 const DIGITS: [[u8; 5]; 243] = {
     let mut table = [[0u8; 5]; 243];
     let mut byte = 0;

@@ -217,10 +217,7 @@ impl IntProduct {
                 for r in 0..UNIT {
                     let src = &codes[r * k + k16 * 16..][..16];
                     let dst = ((unit * (k / 16) + k16) * UNIT + r) * 4;
-                    for j in 0..4 {
-                        packed[dst + j] =
-                            src[j] | src[4 + j] << 2 | src[8 + j] << 4 | src[12 + j] << 6;
-                    }
+                    packed[dst..dst + 4].copy_from_slice(&crate::cpu::kernels::pack_span(src));
                 }
             }
         }
