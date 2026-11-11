@@ -2086,6 +2086,42 @@ contract. Each later entry is judged against it.
   the end of the call before. A pool that keeps more between calls removes them and costs
   idle memory: the owner's trade.
 
+### Journeys, the start build (V11, Trit 0.11.0) against the head (B30, commit 3c9826f)
+
+| Journey | V11 | B30 | Ratio | Run |
+|---|---:|---:|---:|---|
+| J3 Moonshine tiny, a clip | 28.1 ms (rounds 26.5-28.2) | 22.6 ms (22.1-23.6) | per-clip 0.821, p = 6.4e-22; round time 0.828 | 4 x 200 `clean`, counts (spread 6 %) |
+| J3 CPU time of a round | 63.0 s | 49.0 s | 0.777 | the same run |
+| J1 Whisper tiny, a clip | 53.1 ms (50.5-60.1) | 50.7 ms (44.6-67.7) | per-clip 0.937, p = 2e-05 | 4 x 200, does not count (spread 52 %); the two rounds before the other load: 54.6 to 47.7 and 50.5 to 44.6 ms (0.87, 0.88) |
+| J1 CPU time of a round | 196.0 s | 177.8 s | 0.907 | the same run |
+| J4 Redux, a clip | 31.7 ms | 32.2 ms | 0.995 (SI-021), then 0.998 (SI-030) | no change; errors 81 and 172 |
+| J4 CPU time of a Redux round | 138.5 s | 129.9 s | 0.938 | SI-021, quiet |
+| J6 Redux, the load | 149.4 ms | 109.7 ms | 0.734 | SI-023 |
+| J13 one cold `trit transcribe` | 180 ms | 146 ms | 0.812 | SI-023 |
+| J13 48 kHz samples | "" with no error | the right text | | D-001 |
+| Peak working set, Whisper tiny | 278 MB | 217 MB | 0.78 | SI-030, `idle_mem.py` |
+
+0 texts differ between V11 and B30 on the 200 `clean` clips of Moonshine tiny and Whisper tiny.
+
+Kept in part 2: SI-025, SI-026, SI-027, SI-028, SI-030 (with SI-029). Not kept as built:
+the two first forms of SI-029 (they became SI-030).
+
+### Next (after part 2)
+
+- Valid runs on a quiet computer for what this session could only bound: Whisper tiny with
+  SI-027 and SI-030, and J10 with `domain.py`.
+- The softmax of the FastConformer with 8 rows side by side (the helper of SI-027), on J14.
+- The fills that are left: the first use of each large buffer after the trim at the end of a
+  call (Redux 1.1 ms for each clip, Whisper tiny about 1 ms). Keep the pool for some
+  milliseconds after a call, or raise the idle limit: a memory trade for the owner.
+- `HeadMajor::new` with 1,500 keys: 400 ms in 200 Whisper tiny clips after SI-030. A copy in
+  blocks of 16 keys writes whole cache lines.
+- The token table of Whisper (40 MB for each step, bound by memory with 16 threads): fewer
+  threads for this one product, or an int8 table (a WER decision).
+- Whisper tiny with 8 threads on the CCD with the large L3 against 16 threads: one
+  `ab.py --env-b TRIT_THREADS=8` run on a quiet computer says if the spread of the small
+  Whisper models is right.
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine
