@@ -5,7 +5,9 @@
 
 use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, tensors::Tensors};
-use crate::layers::{add_into, attention, attention_with, linear, stacked, HeadMajor, Norm};
+use crate::layers::{
+    add_into, attention, attention_steps, attention_with, linear, stacked, HeadMajor, Norm,
+};
 use crate::models::parts::audio_encoder::{Encoder, EncoderShape, GELU};
 
 pub struct Config {
@@ -193,23 +195,18 @@ impl Whisper {
             let normed = layer.norm_self.apply(&x, d);
             let qkv = layer.self_qkv.forward(&normed, m);
             let mut att = Buf::scratch(m * d);
-            for ((row, out), session) in qkv
-                .chunks_exact(3 * d)
-                .zip(att.chunks_exact_mut(d))
-                .zip(sessions.iter_mut())
-            {
+            for (row, session) in qkv.chunks_exact(3 * d).zip(sessions.iter_mut()) {
                 session.keys[l].extend_from_slice(&row[d..2 * d]);
                 session.values[l].extend_from_slice(&row[2 * d..]);
-                let seen = session.keys[l].len() / d;
-                out.copy_from_slice(&attention(
-                    (&row[..d], d),
-                    (&session.keys[l], d),
-                    (&session.values[l], d),
-                    (1, seen),
-                    (d, c.decoder_heads, c.decoder_heads),
-                    false,
-                ));
             }
+            let caches = &*sessions;
+            attention_steps(
+                (&qkv, 3 * d),
+                |beam| (&caches[beam].keys[l][..], &caches[beam].values[l][..]),
+                m,
+                (d, c.decoder_heads, c.decoder_heads),
+                &mut att,
+            );
             add_into(&mut x, &layer.self_out.forward(&att, m));
             let normed = layer.norm_cross.apply(&x, d);
             let q = layer.cross_q.forward(&normed, m);

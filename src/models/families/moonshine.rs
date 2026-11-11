@@ -6,8 +6,8 @@
 use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team};
 use crate::layers::{
-    add_into, argmax, attention, attention_with, conv_columns, linear, stacked, Gelu, HeadMajor,
-    Norm, Rotary,
+    add_into, argmax, attention, attention_steps, attention_with, conv_columns, linear, stacked,
+    Gelu, HeadMajor, Norm, Rotary,
 };
 use crate::models::files::Files;
 use crate::models::parts::beam;
@@ -292,11 +292,7 @@ impl Moonshine {
             let normed = layer.norm_self.apply(&x, d);
             let mut qkv = layer.self_qkv.forward(&normed, m);
             let mut att = Buf::scratch(m * d);
-            for ((row, out), cache) in qkv
-                .chunks_exact_mut(3 * d)
-                .zip(att.chunks_exact_mut(d))
-                .zip(caches.iter_mut())
-            {
+            for (row, cache) in qkv.chunks_exact_mut(3 * d).zip(caches.iter_mut()) {
                 let position = cache.position;
                 self.rotary
                     .apply(row, (1, 3 * d), (c.heads, d / c.heads), position);
@@ -304,15 +300,15 @@ impl Moonshine {
                     .apply(&mut row[d..], (1, 3 * d), (c.heads, d / c.heads), position);
                 cache.keys[l].extend_from_slice(&row[d..2 * d]);
                 cache.values[l].extend_from_slice(&row[2 * d..]);
-                out.copy_from_slice(&attention(
-                    (&row[..d], d),
-                    (&cache.keys[l], d),
-                    (&cache.values[l], d),
-                    (1, position + 1),
-                    (d, c.heads, c.heads),
-                    false,
-                ));
             }
+            let seen = &*caches;
+            attention_steps(
+                (&qkv, 3 * d),
+                |beam| (&seen[beam].keys[l][..], &seen[beam].values[l][..]),
+                m,
+                (d, c.heads, c.heads),
+                &mut att,
+            );
             add_into(&mut x, &layer.self_out.forward(&att, m));
             let normed = layer.norm_cross.apply(&x, d);
             let q = layer.cross_q.forward(&normed, m);

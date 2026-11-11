@@ -1894,6 +1894,53 @@ of all threads; "wall" is time on the calling thread.
   the time (t = 75: 1 million values); for a window of 60 s it is about 3 % (t = 750: 108
   million values), and part of what a long window costs (SI-022). Not done yet.
 
+### SI-028 the self-attention of a decoder step: one job for all beams
+
+- Written after the code and before the first measurement.
+- Journey: J1 (Whisper tiny), J3 (Moonshine tiny).
+- Profile (P-13): the attention with one query, one call for each beam and layer of a step,
+  costs 895 ms of 15,162 ms of wall time for Whisper tiny (5.9 %) and 710 ms of 11,033 ms for
+  Moonshine tiny (6.4 %), for 0.7 s of arithmetic summed over the threads. Each call is two
+  jobs (`HeadMajor::new` and `attention_with`, one task for each head) and three pool
+  buffers: with 5 beams, 10 of the about 21 jobs of a layer in a step.
+- Hypothesis: `layers::attention_steps` runs the queries of all beams of a layer as one job
+  (one task for each beam and key head). A task makes the head-major copy of its keys and
+  values in the buffer of its thread and then calls the same two products and the same
+  softmax, with the same arguments: the same bits. Expected: 8 of 10 jobs and all the pool
+  buffers of that stage go: Whisper tiny about 0.96, Moonshine tiny about 0.95.
+- Test: 0 texts differ (`ab.py`), and `bench/paths.py` on every path.
+- Result (`ab.py`, B27 against B28, 200 `clean` clips, 4 rounds each, 0 texts differ and equal
+  errors; a game used 5 to 7 cores):
+
+  | Model | Per-clip ratio | Paired p | Time of a round | CPU time of a round |
+  |---|---:|---:|---:|---:|
+  | Whisper tiny | 0.947 | 2.3e-31 | 0.929 | 0.923 |
+  | Moonshine tiny | 0.948 | 3.1e-18 | 0.942 | 0.924 |
+  | Moonshine tiny, B28 first | 0.952 for B28 | 8.2e-17 | 0.928 | 0.942 |
+
+- Decision: KEEP. The forecast held (0.96 and 0.95).
+- Gates: fmt, clippy `-D warnings --release` (workspace, and `-p trit`). `bench/paths.py` with
+  B28: Moonshine tiny and Redux the same text on every path, Whisper tiny with its known
+  scalar text. SI-027 and SI-028 together on the other paths, B26 against B28, 200 clips:
+  0 texts differ for Moonshine tiny with `TRIT_ISA=avx2` and `scalar`, and for Whisper tiny
+  with `avx2` (228 errors on both sides).
+- Not changed: the one-query calls of Canary, the causal language model, and the greedy step
+  of Moonshine still use `attention`. S1-mini: one job less for each layer and token would
+  be about 1 % of a token (15 ms), which this computer cannot show.
+
+### Next, from P-13 and this part of the session
+
+- The zero fill of pool buffers: 843 ms of 15,162 ms for Whisper tiny (5.6 %). SI-016 keeps
+  the buffers while a call runs (`oploop/results/s1109/SI-016-pool.patch`). Its two runs were
+  on a busy computer. Run it again with the stage timer of P-13 as the direct check.
+- `HeadMajor::new` with 1,500 keys (867 ms for Whisper tiny, the fill above included): the
+  keys go to their transposed place one value at a time, each to another cache line.
+- The softmax of the FastConformer (see SI-027), with J14 (the long sets) as the journey.
+- The token table of Whisper (40 MB for each step) is bound by memory with 16 threads. An
+  int8 table is 20 MB and fits each L3, but it changes the logits: a WER decision.
+- Decoder steps as one task for each beam were not built: each beam would read the weights
+  of every layer for itself (5 times the traffic), where a batch reads them once.
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine

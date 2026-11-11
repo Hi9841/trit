@@ -416,6 +416,63 @@ pub fn attention_with(
     out
 }
 
+/// The self-attention of one decoder step: sequence `b` asks its one query
+/// (row `b` of `q`, stride `qs`) over its own keys and values (`cache(b)`:
+/// one row of `kv_heads * hd` values for each token so far). `attention`
+/// for each sequence gives the same values, but it took two jobs and two
+/// pool buffers for each sequence and layer: 10 of the 21 jobs of a layer
+/// in a Whisper step with 5 beams. This is one job, and the head-major
+/// copy of the keys and values stays in the buffer of the thread. `out` is
+/// `sequences x d`.
+pub fn attention_steps<'a>(
+    (q, qs): (&[f32], usize),
+    cache: impl Fn(usize) -> (&'a [f32], &'a [f32]) + Sync,
+    sequences: usize,
+    (d, heads, kv_heads): (usize, usize, usize),
+    out: &mut [f32],
+) {
+    let hd = d / heads;
+    let group = heads / kv_heads;
+    let stride = kv_heads * hd;
+    let scale = 1.0 / (hd as f32).sqrt();
+    assert!(out.len() >= sequences * d);
+    let out_ptr = team::SendPtr::new(out);
+    team::for_each(sequences * kv_heads, |task| {
+        let (b, g) = (task / kv_heads, task % kv_heads);
+        let (keys, values) = cache(b);
+        let tk = keys.len() / stride;
+        SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            let need = 2 * hd * tk + tk + 2 * hd;
+            if scratch.len() < need {
+                scratch.resize(need, 0.0);
+            }
+            let (kt, rest) = scratch.split_at_mut(hd * tk);
+            let (vh, rest) = rest.split_at_mut(tk * hd);
+            let (probs, rest) = rest.split_at_mut(tk);
+            let (qh, rest) = rest.split_at_mut(hd);
+            let head_out = &mut rest[..hd];
+            // The layout of `HeadMajor`: K transposed (hd x tk), V as it is.
+            for j in 0..tk {
+                for (e, value) in keys[j * stride + g * hd..][..hd].iter().enumerate() {
+                    kt[e * tk + j] = *value;
+                }
+                vh[j * hd..(j + 1) * hd].copy_from_slice(&values[j * stride + g * hd..][..hd]);
+            }
+            for h in g * group..(g + 1) * group {
+                for (o, x) in qh.iter_mut().zip(&q[b * qs + h * hd..][..hd]) {
+                    *o = x * scale;
+                }
+                fgemm::matmul_nn_into(qh, 1, hd, kt, tk, probs);
+                softmax_rows(probs, tk, |_| tk);
+                fgemm::matmul_nn_into(probs, 1, tk, vh, hd, head_out);
+                // SAFETY: head h of sequence b belongs to this task only; `out` outlives the step.
+                unsafe { out_ptr.slice_mut(b * d + h * hd, hd) }.copy_from_slice(head_out);
+            }
+        });
+    });
+}
+
 /// The rows that `softmax_rows` takes together. The maximum and the sum of
 /// a row are chains: each step waits for the one before it. A CPU runs
 /// about 8 such chains at once.
