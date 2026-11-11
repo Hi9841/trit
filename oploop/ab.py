@@ -1,7 +1,7 @@
 """Interleaved A/B of two Trit libraries on one model: time per clip and errors.
 
 usage (from the repository root):
-  uv run --no-project --python 3.12 --with numpy --with whisper-normalizer --with scipy \\
+  uv run --no-project --python 3.12 --with numpy --with whisper-normalizer==0.1.12 --with scipy \\
       python oploop/ab.py <model> <A trit_ffi.dll> <B trit_ffi.dll> [--rounds 3] [--sets clean]
       [--cleanup]
 

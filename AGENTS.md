@@ -77,9 +77,12 @@ Do the steps in order. Each step ends on a check.
 | Same text on every kernel path | `python bench/paths.py <trit.exe> <model> <clip.wav>...` (each `TRIT_ISA` value, and 1 thread) |
 | Damaged and hostile files | `python bench/hostile.py <trit.exe> --mutate <small model folder> --runs 150` |
 | Same model on other runtimes | `uv run --no-project --python 3.12 python bench/runtimes.py <engine>` (`--rounds 3` for published numbers: the report gives the median and the spread) |
-| Same GGUF file as transcribe.cpp (Hex's engine) | `uv run --no-project --python 3.12 --with whisper-normalizer python bench/gguf.py run <models dir> --rounds 3`, then `... bench/gguf.py report`; build `bench/gguf` first (CMake) |
+| Same GGUF file as transcribe.cpp (Hex's engine) | `uv run --no-project --python 3.12 --with whisper-normalizer==0.1.12 python bench/gguf.py run <models dir> --rounds 3`, then `... bench/gguf.py report`; build `bench/gguf` first (CMake) |
 | Release | Bump the version in `Cargo.toml` and `ffi/Cargo.toml`, push the tag, then `gh release create <tag>`. `.github/workflows/release.yml` attaches the Linux, macOS, and Windows builds. For an older tag: `gh workflow run release.yml -f tag=<tag>` |
-| Speed of one change | `uv run --no-project --python 3.12 --with numpy --with whisper-normalizer --with scipy python oploop/ab.py <model> <A.dll> <B.dll>` (interleaved A/B of two `trit_ffi` builds) |
+| Speed of one change | `uv run --no-project --python 3.12 --with numpy --with whisper-normalizer==0.1.12 --with scipy python oploop/ab.py <model> <A.dll> <B.dll>` (interleaved A/B of two `trit_ffi` builds) |
+| Stability of one model | `uv run --no-project --python 3.12 --with numpy --with scipy --with whisper-normalizer==0.1.12 python oploop/steady.py <model> <A.dll> [<B.dll>]` (one clip many times, after an idle time, by length, said another way; `--tests load` adds busy threads) |
+| Cost to attach | `uv run --no-project --python 3.12 --with numpy --with scipy python oploop/attach.py <model> <trit.exe> <trit_ffi.dll>` (one cold call, the first text from Python, audio that is not 16 kHz) |
+| Long recordings | `uv run bench/long_clips.py` writes `bench/clips/long-clean` and `long-other` (40 recordings each, 45 to 130 s); then `ab.py <model> A B --sets long-clean,long-other` |
 
 There are no unit tests. The checks are:
 
@@ -106,6 +109,12 @@ There are no unit tests. The checks are:
   to spaCy is separate: 3.0 % of phoneme words on the bench corpus.
 - **Speed:** a change is a gain only when `ab.py` shows p < 0.01 and the
   same text on every clip. Record it in `oploop/LEDGER.md`.
+- **Long recordings:** a change to `audio::windows`, to a window length, or
+  to a join must not raise the errors of `long-clean` and `long-other`
+  (Redux, 60 s windows: 187 and 479). Windows of 30 s gave 17 % less time
+  and 510 errors on `long-other`.
+- **Error counts:** use `whisper-normalizer` 0.1.12, as the commands say.
+  Version 1.0.1 counts 77 errors for the texts that 0.1.12 counts as 81.
 - **Files:** a change to a reader (`cpu/torch_file.rs`, `models/nemo.rs`,
   `audio/wav.rs`, `config.rs`, a tokenizer, a family's `Config`) must keep
   `bench/hostile.py` at exit 0: a damaged or hostile file gives an error,

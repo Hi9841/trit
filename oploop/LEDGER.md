@@ -1309,3 +1309,321 @@ Whisper tiny 228 errors and Ultra 55, where AVX-512 gives 231 and 56.
   panel for f16). Both keep every value.
 - The scalar int8 path of the first set: use the float steps of the SIMD paths, so that
   `TRIT_ISA=scalar` gives the text of the other paths.
+
+## Session 2026-11-11 (speed, stability, dynamicality: a review and new journeys)
+
+Work: branch `oploop`, moved forward to `origin/main` f8e3bf9 (Trit 0.11.0). A =
+`oploop/baseline/V11.dll` and `V11.exe` (a build of f8e3bf9). The models are in
+`C:\Users\hi\Desktop\Work\TDT\models` (Whisper tiny, Moonshine tiny, Parakeet v3 and others) and
+`%LOCALAPPDATA%\TDT\models` (Redux, Ultra); Whisper base.en and Moonshine base are not on this
+computer. `tech`, `tts16`, and the owner's takes are absent, as on 2026-11-09.
+
+The owner named three metrics, and asked for more:
+
+| Metric | What it is | Journey | Harness |
+|---|---|---|---|
+| Speed | The time from the audio to the text | J1 to J6 | `ab.py`, `load.py` |
+| Stability | The same time for the same words: call after call, after an idle time, while the computer is busy, and when the speaker says the words another way | J9 to J12 (new) | `oploop/steady.py` (new) |
+| Dynamicality | How little work it is to put Trit into a program, to attach it at run time, and to do a test of it | J13 (new) | `oploop/attach.py` (new) |
+| CPU load (other) | The CPU time of one call, all threads: what other programs and the battery lose | with J1 to J4 | `ab.py`, "CPU time of a round" |
+| Memory (other) | Private memory after a call and after `release_memory`, peak working set | with J1 to J4 | `ab.py` |
+| Same text on every CPU (other) | One text for one clip on AVX-512, AVX2, NEON, scalar | `bench/paths.py` | first set: not equal (K-006); second set: equal |
+
+### Load on the computer during this session
+
+Not quiet. Another session ran `cargo` and `rustc` builds (1 to 5 cores) from the start. From
+about 20:45 a game used 9 to 12 cores. `quiet.ps1` gave 2.3 cores before the first run of
+`steady.py`, and 12.1 cores during the load test and the Whisper and Moonshine runs. So each
+time below is a time on a busy computer. A and B always ran in turns.
+
+### Baseline J9 to J12, Redux (`steady.py parakeet-redux V11.dll --procs 2`, 2.3 cores of other load)
+
+- Load 219 ms (with the Python import and the library). First call 34.0 ms, second 30.2 ms.
+- J9, one clip 40 times in sequence (2 processes):
+
+  | Clip | p50 | p95 | max | p95 / p50 | max / p50 |
+  |---|---:|---:|---:|---:|---:|
+  | 2.2 s | 13.4 ms | 16.2 | 17.6 | 1.21 | 1.32 |
+  | 5.7 s | 31.7 ms | 38.2 | 40.5 | 1.20 | 1.28 |
+  | 20.1 s | 119.4 ms | 136.5 | 146.1 | 1.14 | 1.22 |
+
+  One text for each clip in all 80 calls.
+- J10, the 5.7 s clip after an idle time (8 calls x 2 processes): 0.2 s 32.2 ms; 1 s 37.1 ms;
+  3 s 37.5 ms; 3 s with `release_memory` 41.1 ms. A dictation is always a call after an idle
+  time, so the time that a user gets is 17 % above the time of a batch, and 30 % above it when
+  the app released the memory.
+- J11, the time for each second of audio (best of 3): 1 s 8.8 ms; 2 to 40 s 5.6 to 7.3 ms;
+  55 s 8.4 ms; 59 s 8.7 ms (514 ms); 61 s 8.8 ms (two windows); 90 s 7.7 ms. A take of 59 s costs
+  46 % more than two takes of 29 s (176 ms each): the attention grows with the square of the
+  frames, and one window holds up to 60 s.
+- J12, the same words said another way, 20 clips (errors against the reference, texts that
+  differ from the plain clip, median ms):
+
+  | Variant | Errors | Texts that differ | Median ms | ms for each second |
+  |---|---:|---:|---:|---:|
+  | plain | 2 | 0 | 41.0 | 7.52 |
+  | quiet (-20 dB) | 2 | 0 | 44.1 | 7.39 |
+  | loud (+10 dB, clipped) | 2 | 0 | 43.5 | 7.41 |
+  | pause 1 s before | 2 | 0 | 50.6 | 7.17 |
+  | pause 2 s after | 2 | 0 | 57.8 | 7.24 |
+  | room noise 1 s before, 2 s after | 2 | 0 | 64.7 | 7.25 |
+  | noise at 20 dB SNR | 2 | 0 | 47.5 | 6.79 |
+  | moved by 5 ms | 2 | 0 | 50.8 | 7.10 |
+  | 10 % faster | 2 | 0 | 43.8 | 7.15 |
+  | 10 % slower | 2 | 0 | 50.2 | 7.35 |
+
+  The text of Redux does not change with the level, a pause, noise, a 5 ms move, or the pace.
+  The time follows the length of the audio: a pause of 3 s around a 5.5 s clip adds 58 %.
+  Trit does not cut the pauses; TDT cuts the end of a take before the call (`read_clip` of
+  the bench does the same).
+- Load (`--tests load --loads 0,8,16`, 12 calls x 2 processes, 0.5 s between calls). The game
+  ran during this test (9 to 12 cores), so "0" is not a quiet computer:
+
+  | Other busy threads | Clip | p50 | p95 | max | p95 / p50 |
+  |---|---|---:|---:|---:|---:|
+  | game only | 2.2 s | 20.9 ms | 25.8 | 39.9 | 1.23 |
+  | game only | 5.7 s | 48.6 ms | 59.5 | 60.7 | 1.23 |
+  | game + 8 | 2.2 s | 23.6 ms | 43.1 | 71.5 | 1.83 |
+  | game + 8 | 5.7 s | 51.6 ms | 66.9 | 88.8 | 1.30 |
+  | game + 16 | 2.2 s | 59.3 ms | 130.0 | 317.5 | 2.19 |
+  | game + 16 | 5.7 s | 166.6 ms | 721.1 | 882.8 | 4.33 |
+
+  The game alone costs 1.5 times the quiet time (13.4 and 31.7 ms). With 16 more busy threads
+  about 28 of the 32 processors are busy, the 8 team threads have no free core, and the tail
+  grows to 23 times the quiet median. More than 16 was not run: the ledger of 2026-11-04 says
+  that this computer is not stable with every processor busy.
+
+### Baseline J9, J10, J12, Whisper tiny and Moonshine tiny (V11, 1 process, the game ran)
+
+| | Whisper tiny | Moonshine tiny |
+|---|---:|---:|
+| J9 p50, clips of 2.2 / 5.7 / 20.1 s | 63.8 / 91.7 / 140.4 ms | 19.8 / 43.2 / 127.0 ms |
+| J9 p95 / p50 | 1.14 / 1.18 / 1.10 | 1.39 / 1.12 / 1.10 |
+| J10, after 0.2 / 1 / 3 s of idle time | 93.8 / 95.1 / 107.0 ms | 42.6 / 45.2 / 48.9 ms |
+| J12 errors, plain | 10 | 5 |
+| J12 texts that differ from plain (of 20): quiet, loud | 2, 2 | 1, 1 |
+| pause 1 s before, pause 2 s after | 3, 0 | 2, 3 (8 errors) |
+| room noise 1 s before and 2 s after | 2 | 4 (9 errors) |
+| noise at 20 dB SNR | 4 (14 errors) | 4 (10 errors) |
+| moved by 5 ms | 2 (13 errors) | 2 |
+| 10 % faster, 10 % slower | 2, 1 | 2, 2 |
+
+The two decoder models change their text when the speaker changes the level, adds a pause, or
+moves by 5 ms; Redux does not (0 of 20 in each variant). Moonshine writes 60 to 80 % more
+errors when 2 to 3 s of pause or room noise follow the words. Trit gives the audio to the
+model as it comes; a cut of the quiet ends before the decoder families is a candidate (the
+gate: the error totals of `clean`, `other`, and the J12 variants).
+
+### Baseline J13, the cost to attach (`attach.py parakeet-redux`, 5.9 s clip, 5 runs, 1.2 cores of other load)
+
+- One `trit transcribe <clip> --format json`: 198 ms, with 35 ms of engine time inside. A
+  program with no FFI pays the other 163 ms (start, find, load, release) for each call.
+  `trit doctor`: 304 ms.
+- A fresh Python process: import 25 ms, load 127 ms, first text 34 ms, second text 34 ms.
+- Audio that is not 16 kHz mono f32:
+
+  | Input | Result |
+  |---|---|
+  | 48 kHz WAV file, 44.1 kHz WAV file | An error that names the rate and gives the `ffmpeg` command |
+  | 16 kHz stereo WAV file | Right text |
+  | 48 kHz samples | Empty text, no error |
+  | 44.1 kHz samples | "Of color" (wrong text), no error |
+  | int16-scale samples, int16 numpy array | Right text |
+
+  A caller that gives microphone samples at 44.1 or 48 kHz gets a wrong or empty text and
+  cannot see why. `AGENTS.md` names this as the rule that integrations get wrong most.
+- `trit.exe` 13.3 MB, `trit_ffi.dll` 13.3 MB, 34 C functions. A build from source takes about
+  1 minute 50 s here (fat LTO); the releases hold built files for 3 systems.
+
+### Review: where the three metrics can improve (2026-11-11)
+
+Speed:
+
+- The second float kernel set is 18 % faster for Moonshine tiny and 3 % for Whisper tiny with
+  the same text on AVX-512, and it is off by default (see SI-019).
+- A recording of 45 to 130 s costs 7.0 ms for each second, and 5.8 ms with 30 s windows, but
+  30 s windows cost words (SI-022). The cause of the cost of a 60 s window is not found.
+- The load of Redux is 127 ms and is most of a cold call (J13). It was not profiled.
+
+Stability:
+
+- Quiet: p95 / p50 is 1.1 to 1.3 for the three models. Busy: the game alone gave 1.5 times the
+  quiet time, and with 16 more busy threads the p95 was 23 times the quiet median (J9L). The
+  team has 8 threads and then has no free core: the size of the team does not follow the load.
+- The time follows the length of the audio, so a pause costs time (J12): 3 s of pause add
+  58 % to a 5.5 s clip. Trit cuts no pause.
+- The text of Whisper and Moonshine changes with the delivery (J12). The text of Redux does not.
+- The first set of kernels gives other text on AVX2 than on AVX-512 (K-006): the same words
+  on two computers can give two texts. The second set removes that.
+
+Dynamicality:
+
+- Audio at another rate (J13): no way to give the rate, so no error and no resample.
+- No function tells a host what a loaded engine is: its languages, its threads, its
+  precision, the rate it wants. `trit_kind` is the only one.
+- A host cannot detach: the worker threads never stop, so a host that unloads the library
+  while they live can crash (2026-11-10, "Not done").
+- A program with no FFI loads the model for each call (198 ms against 35 ms). The CLI has no
+  mode that stays open and takes requests.
+- A test of an integration needs a clip and a model that the integrator must get first. No
+  command says "this computer transcribes one known clip in N ms" (`trit doctor` checks the
+  files, not a transcription).
+- The bindings are files to copy, and the library is a build or a release download. No
+  package of pip, npm, or NuGet.
+
+### SI-019 float product: the tail of `k` as one masked load (K-005 in the first set)
+
+- Journey: J3 (Moonshine tiny; `conv1` has k = 127), J1 (Whisper tiny; the mel filters have
+  k = 201). J4 as a guard (Redux: every k is a multiple of 16).
+- Hypothesis: `avx512::tile` in `src/cpu/fgemm.rs` writes the last `k % 16` weights of each
+  column into an array, one value at a time, and loads the array: the load waits for the small
+  stores, and an f16 value converts in scalar code. K-005 measured the second kernel set, where
+  the tail is one masked load: Moonshine tiny 0.82 with K-003, about 0.87 from K-005 alone;
+  Whisper tiny 0.967. `Weight` already has `Element::wide16_first`. The same change in the first
+  set should give Moonshine tiny about 0.88 and Whisper tiny about 0.97, and nothing for Redux.
+- Test: a masked load gives zeros in the lanes that the array left at zero, and `vcvtph2ps`
+  gives the value of `f16_to_f32`: every value is the same, so 0 texts differ.
+- Result (`ab.py`, V11 against B19, 200 clean clips, 6 to 7 cores of other load; 0 texts differ
+  and equal errors in each run):
+  - Moonshine tiny, 3 rounds: 31.9 to 34.4 ms, per-clip ratio 1.051 (p = 5.2e-09), round time
+    1.096. With the sides in the opposite order, 4 rounds: the candidate 32.2 ms, the baseline
+    31.6 ms, ratio of the candidate 1.033 (p = 0.0001), round time 1.019.
+  - Whisper tiny, 3 rounds: 87.5 to 83.7 ms, per-clip ratio 0.956 (p = 5.5e-09), round time 0.945.
+- Decision: REVERT. Moonshine is slower in both orders, and the gain of Whisper is one run on
+  a busy computer.
+- Why the forecast was wrong: K-005 compared two states of the second set. Before K-005 the
+  second set had its own slow tail. In the first set an f16 layer with more than 4 rows goes
+  through the f32 panel, and `conv1` of Moonshine (1,425 x 288 x 127 for a 5.7 s clip) is
+  about 1 % of a clip, so the tail can give 1.5 % at most. Do not carry a ratio from one
+  kernel set to the other.
+- What this means for speed: the measured gain of the decoder families is the whole second
+  float set (`TRIT_KERNELS=v2-float`: Moonshine tiny 0.82, Whisper tiny 0.967, the same text on
+  AVX-512), not one of its parts. It is behind an environment variable. To make it the default
+  on the AVX-512 level is the owner's decision: it was not run on an Intel CPU with AVX-512,
+  where `vcvtph2ps` uses the ports of the multiply-add, and `tech`, `tts16`, and the owner's
+  takes were not run.
+- The model folders of this session give 129 errors for Moonshine tiny and 226 for Whisper
+  tiny on `clean` (the ledger had 133 and 231 with the folders of the Hugging Face cache,
+  which is gone). Both sides of each run use the same folder.
+
+### SI-021 the workers park when the call ends
+
+- Journey: the CPU load of J1 to J4 ("CPU time of a round" of `ab.py`). The time of a clip is
+  the guard.
+- Profile: `work` in `src/cpu/team.rs` spins for `SPIN_FOR` (3 ms) after the last job before it
+  parks. That is right inside a call (the gaps between the steps are short). After the last
+  step of a call it is waste: 7 workers x 3 ms = 21 ms of CPU for each Redux or Moonshine call,
+  15 x 3 = 45 ms for each Whisper call. Redux uses about 250 ms of CPU for a 31 ms clip (ledger
+  2026-11-09), and about 104 ms for a 2.2 s clip.
+- Hypothesis: when the guard of `enter` drops, it stores the job number of that moment in
+  `Shared::rest`. A worker that spins with no job after that number parks at once. The next
+  job wakes it as today (one wake-up for each call, about 20 us). Expected: CPU time of a
+  round 0.92 for Redux, 0.94 for Moonshine tiny, 0.95 for Whisper tiny; 0.83 for 2 s takes. The
+  time of a clip does not change. No change in the task loop (`run_tasks`), which is sensitive
+  to 1 % (2026-11-05).
+- Test: the same tasks run in the same order: 0 texts differ.
+- Did it happen (`oploop/results/s1111/idle_cpu.py`, a 2.4 s clip, 150 calls, 2 processes for
+  each build): CPU time of the process in the 20 ms after a call: V11 27.8 and 27.7 ms, B21
+  0.0 and 0.1 ms. CPU time inside the call: 133 to 136 ms and 140 to 154 ms (the game ran).
+- Result (`ab.py`, 200 clean clips, 0 texts differ and equal errors in each run; 2.5 to 6
+  cores of other load, so the rounds spread widely):
+
+  | Model | Order | Rounds | Time of a clip, B21 / V11 | Paired p | CPU time of a round, B21 / V11 |
+  |---|---|---:|---:|---:|---:|
+  | Redux | V11 first | 4 | 0.962 | 1.7e-05 | 0.876 |
+  | Redux | B21 first | 4 | 0.930 | 4.6e-21 | 0.853 |
+  | Whisper tiny | V11 first | 3 | 0.987 | 0.18 | 0.971 |
+  | Moonshine tiny | V11 first | 3 | 1.023 | 0.28 | 1.004 (lowest rounds: 0.916) |
+
+- Guard (`steady.py parakeet-redux V11.dll B21.dll --tests repeat,gap --procs 3`): 40 calls
+  with no pause, p50 13.5 and 13.4 ms (2.2 s clip), 32.5 and 32.1 ms (5.7 s), 115.0 and
+  112.2 ms (20.1 s); p95 17.7 and 17.0, 41.2 and 39.4, 138.8 and 132.5 ms. After an idle time
+  of 0.2 to 3 s: 34.8 to 39.5 ms and 38.1 to 39.0 ms. The two builds start such a call in the
+  same state (parked), so that difference is the noise of this test: about 3 ms.
+- Gates: fmt, clippy `-D warnings --release` (workspace), `trit skill --check`, and
+  `bench/paths.py` (Redux, 3 clips: the same text on `scalar`, `avx2`, `avxvnni`, 1 thread).
+- Decision: KEEP (commit 4ff9c9a). The claim is the CPU time of a Redux call: 0.86 (the
+  forecast was 0.92: the spin is 27.8 ms, not 21 ms). The clip time of Redux was 4 to 7 %
+  lower in both orders. That is not a claim: the forecast was no change, and the computer was
+  busy. A possible cause: `steer` no longer sees the team's own spin as load on its domain
+  (2026-11-05: 28 moves in 7 s on a quiet computer). Measure it on a quiet computer.
+- Not shown: the CPU gain for Moonshine tiny (its rounds spread by 8 %; the median of 3 rounds
+  cannot show 6 %).
+- Quiet computer (the game stopped; 1.2 cores of other load before and after), V11 against
+  B21, 4 rounds x 400 clips (`clean`, `other`), `whisper-normalizer` 0.1.12: 0 of 400 texts
+  differ, errors 81 and 172 on both sides. Time of a clip 31.7 and 32.2 ms, per-clip ratio
+  0.995 (paired p = 0.33): no change, as forecast. CPU time of a round 138.5 to 129.9 s
+  (0.938): 21.5 ms less for each call, as forecast (7 workers x 3 ms). So the quiet numbers
+  are: CPU time 0.94 on these 400 clips, time the same. The 0.86 and the lower clip time are
+  the numbers of the busy computer.
+
+### Open: the cost of an idle time before a call (J10), and the moves of the team
+
+- J10 gave 37 ms after 1 to 3 s of idle time against 32 ms with no pause (5.7 s clip). A second
+  test (`oploop/results/s1111/gap.py`, B21, 3 processes) did not repeat it: 35.1 ms with no
+  pause, 34.7 ms after 1 s, 30.8 ms after 10 ms. The calls fall in two groups, near 30 ms and
+  near 35 ms. A 0.5 s clip is no warm-up call: it returns in 0.4 ms (no speech).
+- Guess, not tested: the team moves between the two L3 domains because `steer` counts the
+  team's own work as load (2026-11-05: 28 moves in 7 s). `oploop/results/s1111/domain.py` runs
+  the clip with the process on the first domain, on the second, and free. Its one run is not
+  valid: another session started a test suite, and every case went to 46 ms.
+- Next: run `domain.py` and `steady.py --tests repeat,gap` on a quiet computer.
+
+### SI-022 Parakeet: windows of 30 s for a long recording
+
+- Journey: J11 (the time for each second of audio), and the memory of a long recording.
+- Profile (J11, V11): 29 s 176 ms (6.1 ms for each second), 59 s 514 ms (8.7), 61 s 536 ms,
+  90 s 689 ms. One window holds up to 60 s (`WINDOW_SAMPLES` in
+  `src/models/families/parakeet.rs`). The attention of the 24 blocks grows with the square of
+  the frames (750 frames at 60 s), and a take over 30 s builds a position table of 148 MB
+  (`RelCache`, reach 750) with 24 products of 1,501 rows.
+- Hypothesis: with windows of 30 s (375 frames: the reach of the table of the load), a
+  recording of 45 to 120 s costs 6.1 to 6.5 ms for each second, so 25 to 30 % less time than
+  today, and the 148 MB table never comes. The cost is one or two more cuts in a recording
+  (at the quietest 100 ms of the last third of a window). Expected: the errors grow by less
+  than 1 % of the errors (2026-10-23, I-005: parts of 10 s gave 295 errors against 293).
+- Test: 0 texts differ for clips of 30 s and less (`clean`, `other`: the longest is 35 s, so a
+  few clips can change). For long recordings the text changes at the cuts: the gate is the
+  error count on two new sets, `long-clean` and `long-other`
+  (`oploop/results/s1111/long_set.py`: utterances of one LibriSpeech chapter that follow each
+  other, joined to 45 to 120 s, from `bench/clips-src`).
+- This changes the text of each recording over 30 s. So a keep needs the owner's word: it is
+  a trade of errors against time, with the numbers below.
+- Result (`ab.py parakeet-redux B21.dll B22.dll --rounds 3 --sets long-clean,long-other`,
+  80 recordings of 40 to 133 s, 108 minutes, about 17,700 words; 2.4 cores of other load):
+
+  | | 60 s windows (B21) | 30 s windows (B22) | B22 / B21 |
+  |---|---:|---:|---:|
+  | Median time of a recording | 560.3 ms (rounds 523.9-737.6) | 463.5 ms (448.7-525.7) | per-clip 0.833, p = 9.2e-13 |
+  | Time for each second of audio | 6.9 to 7.2 ms | 5.76 to 5.90 ms | 0.80 to 0.84 in each length group |
+  | CPU time of a round | 372.7 s | 310.2 s | 0.832 |
+  | Peak working set | 779 MB | 517 MB | 262 MB less |
+  | Errors, `long-clean` | 187 | 180 | 5 recordings worse, 5 better, 30 the same |
+  | Errors, `long-other` | 479 | 510 | 21 worse, 9 better, 10 the same |
+
+- Decision: REVERT. The time and the memory went as forecast in direction (17 %, not 25 %:
+  the 60 s build already cuts the recordings over 60 s into windows of 40 to 60 s). The error
+  forecast was wrong: 6.5 % more errors on the noisy set, spread over 21 recordings (not one
+  lost window), where the forecast was less than 1 %. A cut costs words when the speech is
+  hard, and 30 s windows make about 1.4 more cuts in each recording. Accuracy comes first.
+- Kept from this iteration: `bench/long_clips.py` and the floor of the two sets for Redux
+  with 60 s windows: `long-clean` 187, `long-other` 479 (`whisper-normalizer` 0.1.12). A change
+  to `audio::windows`, to `WINDOW_SAMPLES`, or to a join now has a gate on this computer.
+- What stays open: the 60 s window costs 7.0 ms for each second where 30 s costs 5.8 ms. The
+  attention arithmetic alone gives about 40 ms of the 160 ms between one window of 59 s and
+  two of 29 s. The rest is not found: a profile of one 59 s take by stage is the next step.
+
+### Finding: the error counts move with the version of `whisper-normalizer`
+
+- Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine
+  tiny 129 for 133, Whisper tiny 226 for 231, on both sides of each run.
+- Cause: the commands said `--with whisper-normalizer` with no version, and `uv` took the new
+  1.0.1. The saved texts of Redux (`ab-021-redux.json`), counted again
+  (`oploop/results/s1111/recount.py`): 77 errors with 1.0.1, 81 with 0.1.12 and with 0.0.10.
+  So the texts did not change, and the floor of 81 holds. The model file is the same in both
+  folders (sha256 78ec2573...).
+- Change: `whisper-normalizer==0.1.12` in `AGENTS.md`, `bench/runtimes.py` (`BASE`),
+  `bench/gguf.py`, `bench/parity.py`, `bench/tts.py`, `oploop/ab.py`, and `oploop/steady.py`.
+  The error counts in the tables of this session before this entry came from 1.0.1.
+- TDT has its own harness (`bench/accuracy.py` in the TDT repository). If it has no pin, its
+  counts go down by 4 with no change of the engine, and the ratchet then hides 4 new errors.

@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "target" / "runtimes"
 CPU_THREADS = os.cpu_count() // 2  # physical cores; SMT siblings only add contention
 
-BASE = ["numpy", "psutil", "whisper-normalizer", "huggingface_hub"]
+BASE = ["numpy", "psutil", "whisper-normalizer==0.1.12", "huggingface_hub"]
 CUDA = ["nvidia-cublas-cu12", "nvidia-cudnn-cu12==9.*"]
 TORCH = ["torch==2.9.*"]  # from the CUDA 12.8 index, see ENV_ARGS
 ENV_ARGS = {"torch": ["--index", "https://download.pytorch.org/whl/cu128", "--index-strategy", "unsafe-best-match"]}

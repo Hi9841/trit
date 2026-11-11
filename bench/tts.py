@@ -12,7 +12,7 @@ needs torch and transformers; Kokoro needs the kokoro package (misaki,
 spaCy en_core_web_sm). On Windows, spaCy 3.8 fails to load its model; this
 works:
 
-  uv run --no-project --python 3.11 --with torch --with kokoro --with scipy --with whisper-normalizer \\
+  uv run --no-project --python 3.11 --with torch --with kokoro --with scipy --with whisper-normalizer==0.1.12 \\
     --with "spacy==3.7.5" --with "preshed==3.0.9" --with "cymem==2.0.8" --with "murmurhash==1.0.10" \\
     --with "thinc==8.2.5" --with "numpy<2" \\
     --with https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl \\

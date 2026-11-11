@@ -9,7 +9,7 @@ the model as transcribe.cpp does; transcribe.cpp's files are checked against
 the upstream model by their publisher (handy-computer).
 
 usage:
-  uv run --no-project --python 3.12 --with whisper-normalizer python bench/parity.py <model folder> <set>... [--lang <code>|auto] [--precision <p>]
+  uv run --no-project --python 3.12 --with whisper-normalizer==0.1.12 python bench/parity.py <model folder> <set>... [--lang <code>|auto] [--precision <p>]
 
 <set> is a folder under bench/clips: parity-en (66 English clips) or
 native-<lang> (FLEURS clips from transcribe.cpp's samples/, no transcripts).

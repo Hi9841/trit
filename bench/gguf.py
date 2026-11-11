@@ -7,8 +7,8 @@ transcribe.cpp is built as Hex 3.2.0 builds its Windows release
 TDT runs it, with the file's stored types (`Precision::Auto`).
 
 usage:
-  uv run --no-project --python 3.12 --with whisper-normalizer python bench/gguf.py run <models dir> [--rounds 3] [--only unified-q8_0,...]
-  uv run --no-project --python 3.12 --with whisper-normalizer python bench/gguf.py report
+  uv run --no-project --python 3.12 --with whisper-normalizer==0.1.12 python bench/gguf.py run <models dir> [--rounds 3] [--only unified-q8_0,...]
+  uv run --no-project --python 3.12 --with whisper-normalizer==0.1.12 python bench/gguf.py report
 
 <models dir> holds one folder per file, `gguf-<model>-<quant>`, with the one
 `.gguf` file of that name from Hugging Face (handy-computer/parakeet-*-gguf).
