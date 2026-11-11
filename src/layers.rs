@@ -402,20 +402,10 @@ pub fn attention_with(
                 }
             }
             fgemm::matmul_nn_into(qh, m, hd, kt, tk, probs);
-            for (i, row) in rows.clone().zip(probs.chunks_exact_mut(tk)) {
-                let visible = if causal { tk - tq + i + 1 } else { tk };
-                row[visible..]
-                    .iter_mut()
-                    .for_each(|x| *x = f32::NEG_INFINITY);
-                let max = row[..visible]
-                    .iter()
-                    .copied()
-                    .fold(f32::NEG_INFINITY, f32::max);
-                row.iter_mut().for_each(|x| *x -= max);
-                activation::exp(row);
-                let inv = 1.0 / row.iter().sum::<f32>();
-                row.iter_mut().for_each(|x| *x *= inv);
-            }
+            softmax_rows(probs, tk, |local| match causal {
+                true => tk - tq + rows.start + local + 1,
+                false => tk,
+            });
             fgemm::matmul_nn_into(probs, m, tk, vh, hd, heads_out);
             for (part, i) in heads_out.chunks_exact(hd).zip(rows.clone()) {
                 // SAFETY: row i, head h belongs to this task only; `out` outlives the step.
@@ -424,6 +414,64 @@ pub fn attention_with(
         });
     });
     out
+}
+
+/// The rows that `softmax_rows` takes together. The maximum and the sum of
+/// a row are chains: each step waits for the one before it. A CPU runs
+/// about 8 such chains at once.
+const SOFTMAX_ROWS: usize = 8;
+
+/// Softmax of each row of `scores` (rows of `width` values), in place. Row
+/// `r` sees its first `visible(r)` keys; the others get no weight. One row
+/// at a time, the maximum and the sum were 6.5 cycles for each value, as
+/// much as a matrix product of the attention. Here 8 rows go side by side,
+/// and each row still takes its values in order: the same bits.
+pub(crate) fn softmax_rows(scores: &mut [f32], width: usize, visible: impl Fn(usize) -> usize) {
+    for (g, group) in scores.chunks_mut(SOFTMAX_ROWS * width).enumerate() {
+        for (r, row) in group.chunks_exact_mut(width).enumerate() {
+            row[visible(g * SOFTMAX_ROWS + r)..].fill(f32::NEG_INFINITY);
+        }
+        // A key with no weight is minus infinity and leaves a maximum as it is.
+        let max = fold_rows(group, width, f32::NEG_INFINITY, f32::max);
+        for (row, max) in group.chunks_exact_mut(width).zip(max) {
+            row.iter_mut().for_each(|x| *x -= max);
+            activation::exp(row);
+        }
+        let sum = fold_rows(group, width, 0.0, |sum, x| sum + x);
+        for (row, sum) in group.chunks_exact_mut(width).zip(sum) {
+            let inv = 1.0 / sum;
+            row.iter_mut().for_each(|x| *x *= inv);
+        }
+    }
+}
+
+/// `step` over the values of each row of `group` (up to `SOFTMAX_ROWS` rows
+/// of `width`), from `start`: for each column, one step of each row.
+#[inline(always)]
+fn fold_rows(
+    group: &[f32],
+    width: usize,
+    start: f32,
+    step: impl Fn(f32, f32) -> f32,
+) -> [f32; SOFTMAX_ROWS] {
+    let mut folded = [start; SOFTMAX_ROWS];
+    let rows = group.len() / width;
+    if rows == SOFTMAX_ROWS {
+        for column in 0..width {
+            for (r, value) in folded.iter_mut().enumerate() {
+                // SAFETY: `group` holds `SOFTMAX_ROWS` rows of `width`, and
+                // `r` and `column` are inside them.
+                *value = step(*value, unsafe { *group.get_unchecked(r * width + column) });
+            }
+        }
+    } else {
+        for column in 0..width {
+            for (r, value) in folded.iter_mut().enumerate().take(rows) {
+                *value = step(*value, group[r * width + column]);
+            }
+        }
+    }
+    folded
 }
 
 thread_local! {

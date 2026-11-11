@@ -1828,6 +1828,72 @@ marked and does not count.
   96 MB L3, so the token time is the time to read the weights from memory. The key and value
   copies of a step (28 layers x about 250 tokens x 1,024 values) are about 0.5 ms of the 15.
 
+### Profile P-13 (attention and decoder steps by stage; `oploop/baseline/trace13.exe`, a temporary build)
+
+`oploop/results/s1111/prof_patch.py` adds the timers. CLI, 200 `clean` clips, one process, one
+run. Other work used 1.3 cores at the start and 8.4 at the end, so the totals are high
+(Whisper tiny 75.8 ms for each clip, quiet about 53). "Thread" is time summed over the tasks
+of all threads; "wall" is time on the calling thread.
+
+| Stage | Whisper tiny | Moonshine tiny |
+|---|---:|---:|
+| The calls, wall | 15,162 ms | 11,033 ms |
+| Attention with more than one query (`attention_with`), thread: scores | 17,765 ms | 2,132 ms |
+| softmax | 15,473 ms | 3,002 ms |
+| values | 14,273 ms | 2,622 ms |
+| query scale and copy out | 694 ms | 115 ms |
+| Attention with one query (a decoder step, one for each beam and layer), thread: all stages | 722 ms | 708 ms |
+| The same calls, wall: `HeadMajor::new` (up to 64 keys) and `attention_with` | 895 ms (104,168 calls) | 710 ms (165,396 calls) |
+| `HeadMajor::new` with more than 64 keys, wall | 867 ms (4,968 calls) | 122 ms |
+| `Buf::scratch` fill of 64 KB and more, wall | 843 ms (5,459 fills) | 124 ms |
+| Decoder steps of the beam search, wall | 6,518 ms | 5,276 ms |
+| Score job of the beam search, wall | 768 ms | 709 ms |
+
+- The softmax is 32 % of the attention time of Whisper and 39 % of Moonshine's, as much as
+  one of the two matrix products. Whisper: 58.7 million values for each clip in 77 ms of
+  thread time, 6.5 cycles for each value. The cause is in `layers.rs:410-416`: the maximum
+  is a scalar `fold` and the sum is a scalar `sum`, so each value waits for the one before
+  it (3 to 4 cycles), where `exp` and the two scale passes are vector code.
+- The one-query attention of a decoder step does 0.7 s of arithmetic in 0.9 s (Whisper) of
+  wall time: two jobs of 6 tasks for each beam and layer, with two pool buffers each.
+- The zero fill of pool buffers is 5.6 % of the wall time of Whisper again (P-11: 5.4 %).
+
+### SI-027 softmax: the maximum and the sum of 8 rows side by side
+
+- Journey: J1 (Whisper tiny), J3 (Moonshine tiny). Every family that calls
+  `layers::attention_with` gets it. J4 as a guard (the FastConformer has its own attention).
+- Hypothesis: the order of a row's sum must stay (SI-009), but the chains of different rows
+  do not depend on each other. If a task takes 8 rows together (for each key, one step of
+  the maximum of each of the 8 rows, then the same for the sum), the CPU runs 8 chains at
+  once, and each row still adds its values in the same order: the same bits. Expected: the
+  softmax from 6.5 to about 2.5 cycles for each value; Whisper tiny about 0.95 (3 ms of
+  53 ms), Moonshine tiny about 0.95.
+- Test: every value is the same (`f32::max` with a blocked key of minus infinity leaves the
+  maximum as it is, so the maximum can run over the whole row): 0 texts differ, also with
+  `TRIT_ISA=avx2` and `scalar` against the same build of before.
+- Did it happen (`trace27.exe`, the timers of P-13 on the candidate, the same 200 clips, a
+  game on the computer in both runs): softmax thread time, Whisper tiny 15,473 to 9,886 ms
+  (0.64), with the scores at 17,765 and 18,609 ms; Moonshine tiny 3,002 to 1,711 ms (0.57),
+  with the scores at 2,132 and 1,938 ms. The forecast was 0.38: `exp` is now most of what is
+  left.
+- Result (`ab.py`, B26 against B27, 200 `clean` clips, 0 texts differ and equal errors; a
+  game used 5.8 to 6.8 cores):
+
+  | Model | Rounds | Per-clip ratio | Paired p | Time of a round | CPU time of a round |
+  |---|---:|---:|---:|---:|---:|
+  | Whisper tiny | 4 | 0.975 | 1.7e-05 | 0.932 | 0.954 |
+  | Moonshine tiny | 4 | 0.969 | 4.6e-06 | 0.984 | 0.983 |
+  | Moonshine tiny, B27 first | 3 | 0.997 for B27 | 0.59 | 0.998 | 1.03 |
+
+- Decision: KEEP, with this limit on the claim: the softmax stage takes 36 to 43 % less
+  thread time (measured in the stage), which is about 3 % of a clip. End to end, two runs
+  give 0.97 and one gives no difference, on a busy computer. Measure it again on a quiet one.
+- Gates: fmt, clippy `-D warnings --release`. The path check runs with SI-028.
+- The FastConformer has the same pattern (`fastconformer.rs:1084-1101`: the maximum in the
+  loop that adds the position scores, and a scalar sum). For a take of 6 s it is about 1 % of
+  the time (t = 75: 1 million values); for a window of 60 s it is about 3 % (t = 750: 108
+  million values), and part of what a long window costs (SI-022). Not done yet.
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine
