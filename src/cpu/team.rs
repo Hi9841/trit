@@ -66,6 +66,10 @@ struct Shared {
     done: AtomicUsize,
     panicked: AtomicBool,
     parked: AtomicUsize,
+    /// The generation when the last call ended (`Entered` stores it). A
+    /// worker with no job after it parks at once: the 3 ms of spin after the
+    /// last step of a call were 21 ms of CPU for each Parakeet call.
+    rest: AtomicUsize,
     lock: Mutex<()>,
     wake: Condvar,
 }
@@ -102,6 +106,8 @@ impl Team {
             done: AtomicUsize::new(0),
             panicked: AtomicBool::new(false),
             parked: AtomicUsize::new(0),
+            // No generation has this value, so no worker rests before a call ends.
+            rest: AtomicUsize::new(usize::MAX),
             lock: Mutex::new(()),
             wake: Condvar::new(),
         });
@@ -277,7 +283,9 @@ fn work(s: &Shared) {
                 break;
             }
             spins = spins.wrapping_add(1);
-            if spins.is_multiple_of(256) && idle_since.elapsed() > SPIN_FOR {
+            if spins.is_multiple_of(256)
+                && (s.rest.load(Ordering::Relaxed) == seen || idle_since.elapsed() > SPIN_FOR)
+            {
                 let mut lock = s.lock.lock();
                 s.parked.fetch_add(1, Ordering::SeqCst);
                 while s.generation.load(Ordering::SeqCst) == seen {
@@ -339,6 +347,12 @@ pub struct Entered {
 
 impl Drop for Entered {
     fn drop(&mut self) {
+        // The call is over: its workers park now, not after `SPIN_FOR`. A
+        // call of another thread that still runs wakes them with its next step.
+        if let Some(team) = TEAM[CURRENT.get()].get() {
+            let ended = team.shared.generation.load(Ordering::Relaxed);
+            team.shared.rest.store(ended, Ordering::Relaxed);
+        }
         set_ideal(self.ideal);
         if let Some(priority) = self.priority {
             set_priority(priority);
