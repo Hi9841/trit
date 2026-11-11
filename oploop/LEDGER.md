@@ -1613,6 +1613,54 @@ Dynamicality:
   attention arithmetic alone gives about 40 ms of the 160 ms between one window of 59 s and
   two of 29 s. The rest is not found: a profile of one 59 s take by stage is the next step.
 
+### Profile P-12 (the load of Redux by phase; `oploop/baseline/trace-load.exe`, a temporary build, not kept)
+
+Timers in `Parakeet::load` and around the load in `trit transcribe`. 4 warm runs, 2 to 3 cores
+of other load (the quiet load is 127 ms; here 143 to 165 ms):
+
+| Phase | ms | Share |
+|---|---:|---:|
+| `model::Parakeet::load`: 24 blocks in parallel, each reads and packs its layers | 110 to 125 | 77 % |
+| `warm_positions`: 24 products of 751 rows | 24 to 28 | 17 % |
+| The tokenizer (1.16 MB of JSON) | 6.6 to 9.0 | 5 % |
+| Open the tensors, config, front end | 1.3 to 1.9 | 1 % |
+| `release_memory` after the load | 3.9 to 6.4 | (after the load) |
+
+The ternary layers are most of `Parakeet::load`. `Ternary::from_base3`
+(`src/cpu/kernels.rs:91`) reads 5 codes from each byte of the file with
+`copy_from_slice(&DIGITS[byte][..five.len()])`: a copy of a length that the compiler does
+not know, for each 5 of about 600 million codes. `from_rows` (`kernels.rs:172`) then packs
+16 codes into 4 bytes, one byte and one code at a time.
+
+### SI-023 the load of a ternary model: copies of 5 known bytes, and 4 bytes packed as one word
+
+- Journey: J6 (the load of Redux), J13 (a cold `trit transcribe`). J4 as a guard: the same text.
+- Hypothesis: the two loops above cost about 70 of the 115 ms of `Parakeet::load` (about 120
+  million small copies, and 600 million byte steps, on 8 threads). A copy of exactly 5 bytes
+  for each file byte (`as_chunks_mut::<5>`), and a pack of a 16-code span as four 32-bit
+  words (`w0 | w1 << 2 | w2 << 4 | w3 << 6`: a code is 0 to 2, so no bit leaves its byte),
+  should give the same bytes in less than half the time: the load of Redux about 0.70
+  (127 to about 90 ms), and a cold `trit transcribe` about 0.82 (198 to about 162 ms).
+- Test: the packed bytes are the same, so 0 texts differ (`ab.py`, `clean` and `other`), and
+  `bench/paths.py` gives the same text on every path. The second kernel set has the same
+  pack loop: both use one function.
+- Result, B21 against B23 (2 cores of other load):
+  - `oploop/results/s1109/load.py`, 14 fresh processes for each side, in turns: load 149.4 ms
+    (137.3-343.6) to 109.7 ms (101.4-122.2), 0.734. The first 5 s take 31.5 and 29.1 ms, the
+    first 31.6 s take 228.3 and 225.8 ms. The same text in all runs.
+  - `oploop/results/s1111/cold.py`, one `trit transcribe` of a 5.9 s clip, 15 runs for each
+    side, in turns: 180 ms (177-209) to 146 ms (142-175), 0.812. The same text.
+- Gates: `ab.py`, 2 rounds, `clean` and `other`: 0 of 400 texts differ, errors 81 and 172,
+  per-clip ratio 1.002 (the time of a clip does not change). With `TRIT_KERNELS=v2` on both
+  sides: 0 of 200. `bench/paths.py` (Redux, 3 clips): the same text on every path. fmt,
+  clippy `-D warnings --release`, and `trit skill --check`: clean.
+- Decision: KEEP (commit 6df55a9). Both forecasts held (0.70 and 0.82).
+- Limiter after the change (from P-12, not measured again): `warm_positions` (about 25 ms, at
+  the peak of its arithmetic), the rest of `Parakeet::load` (about 70 ms: the digit table
+  still writes 600 million code bytes before the pack), and the tokenizer (7 ms).
+- Not run: `bench/hostile.py` (its small model has no ternary layer; the size and digit
+  checks of `from_base3` did not change), and a ternary model other than Redux (none exists).
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine
