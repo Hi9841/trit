@@ -1724,6 +1724,110 @@ not know, for each 5 of about 600 million codes. `from_rows` (`kernels.rs:172`) 
   arm64 (the filter uses the second kernel set, which K-006 ran under QEMU), and a build of
   TDT (the change only adds `trit::resample`).
 
+## Session 2026-11-11, part 2 (low-level performance: the brief of the owner)
+
+The owner gave a brief with four goals: lower latency, more compute for each cycle, less
+memory traffic, and the same accuracy. Its list of places: the second float kernels in the
+default path, the key and value cache of the decoders, FastConformer, beam search, and the
+team. The rule of this ledger stays: one hypothesis, `ab.py`, keep or revert.
+
+### SI-025 float product: f16 weights with no f32 panel, and a masked tail (K-003 and K-005 together, AVX-512 level)
+
+- Journey: J3 (Moonshine tiny: every layer is f16), J1 (Whisper tiny: the f16 token table of
+  51,864 x 384 with 5 rows for each beam step). J4 as a guard (Redux: no f16 product with
+  more than 4 rows changes its path? measure).
+- Why SI-019 failed and this is another test: SI-019 took K-005 alone. In the first set an
+  f16 layer with more than 4 rows first writes an f32 copy of its 64-column weight panel
+  (`fgemm::matmul`, `W::WIDEN && rows.len() > 4`), so the tail of `k` was already f32 and
+  cheap. K-003 is the larger part: on Zen 4 `vcvtph2ps` does not use the pipes of the
+  multiply-add, so the tile can widen the f16 weights itself, and the copy (a store and a
+  load again of each weight, for each block and call) is waste. `kernel_bench f162`
+  (2026-11-10): 5 rows 0.61 to 0.65, 8 rows 0.71, 16 rows 0.86, 64 to 300 rows 0.92 to 0.98.
+  Without the panel the tail of `k` is f16 again, and then K-005 matters (Moonshine `conv1`,
+  k = 127).
+- Hypothesis: on the AVX-512 level, `matmul` with f16 weights runs the tiles on the f16
+  weights (no panel), and the tail of `k` is one masked load. Every value stays the same
+  (the widen is exact, and the masked lanes are zero as before). Expected, from the second
+  set (`TRIT_KERNELS=v2-float`: Moonshine tiny 0.82, Whisper tiny 0.967): Moonshine tiny
+  about 0.85, Whisper tiny about 0.97, Redux the same.
+- Not known: an Intel CPU with AVX-512, where `vcvtph2ps` shares a port with the
+  multiply-add. The AVX2 and NEON levels keep the panel.
+- Test: 0 texts differ (`ab.py`), `kernel_bench f162` with 0 values with other bits, and
+  `bench/paths.py`.
+- `kernel_bench f162` and `f322`, the first set after the change against the second (one
+  thread; 4.3 cores of other load): 0 values with other bits in every shape.
+
+  | Shape (n x k, rows) | Second / first before (2026-11-10) | Second / first now |
+  |---|---:|---:|
+  | f16 288 x 288, 5 rows | 0.61 to 0.65 | 0.857 |
+  | f16 288 x 288, 8 / 16 / 64 / 300 rows | 0.71 / 0.86 / 0.92 to 0.98 | 0.97 / 0.96 to 0.98 / 0.97 to 0.98 / 0.99 to 1.02 |
+  | f16 288 x 127, 5 / 300 rows | 0.50 (300 x 200) | 0.86 / 1.00 |
+  | f16 32768 x 288, 5 rows | 0.75 (16 threads) | 0.865 |
+  | f16 51864 x 384, 5 rows, 16 threads | 0.79 | 0.92 to 0.945 |
+  | f32 80 x 201, 300 rows | 0.57 (300 x 203) | 0.97 |
+
+  So the first set is level with the second from 8 rows. At 5 rows the second set still has
+  14 %: it runs 5 rows as one strip (SI-026).
+
+### SI-026 float product: 5 rows as one strip on the AVX-512 level
+
+- Journey: J3 (Moonshine: each decoder step has one row for each of the 5 beams, and every
+  layer is f16), J1 (Whisper: the token table for 5 rows).
+- Profile: `kernel_bench f162` after SI-025, 5 rows: the second set is at 0.857 of the first
+  (288 x 288, 288 x 127, 32768 x 288) and 0.92 to 0.945 (51864 x 384, 16 threads). The first
+  set runs 5 rows as a 4 x 3 tile and a 1 x 3 tile: the fifth row loads and widens each
+  weight vector again, and one row waits on the weights, not on the multiply-add (K-004).
+- Hypothesis: `avx512::block` in `src/cpu/fgemm.rs` takes 5 rows that remain as one 5 x 3
+  tile (15 sums, 3 weight vectors, 1 input row: 19 of 32 registers). A value's sum does not
+  depend on its tile, so every value stays. Expected: the f16 products of a decoder step
+  about 0.87; Moonshine tiny about 0.95 (its decoder is about half of a clip), Whisper tiny
+  about 0.99.
+- Test: `kernel_bench f162` with 0 values with other bits and second / first near 1.0 at 5
+  rows; `ab.py` with 0 texts differ.
+- `kernel_bench` after the change (quiet computer), second / first at 5 rows: f16 288 x 288
+  1.000, 288 x 127 1.000, 32768 x 288 1.005 to 1.010, 51864 x 384 with 16 threads 1.012 to
+  1.023, f32 384 x 384 1.000; 9 rows 0.97, 10 rows 0.98 to 1.00. 0 values with other bits.
+
+### Result of SI-025 and SI-026 (builds B24 = head, B25 = SI-025, B26 = SI-025 and SI-026)
+
+`ab.py`, 200 `clean` clips for each model, 0 texts differ and equal errors in every run. Other
+sessions used 1 to 7 cores at times; a run with rounds that spread by more than 20 % is
+marked and does not count.
+
+| Step | Model | Rounds | Per-clip ratio | Paired p | Time of a round | Note |
+|---|---|---:|---:|---:|---:|---|
+| SI-025 | Moonshine tiny | 3 | 0.883 | 2.7e-24 | 0.889 | 29.6 to 25.4 ms, rounds 28.4-30.1 and 25.3-26.3 |
+| SI-025 | Whisper tiny, 8 threads | 4 | 0.945 | 9.2e-27 | 0.942 | `TRIT_THREADS=8` on both sides |
+| SI-025 | Whisper tiny, 16 threads | 3 | 1.053 | | 1.028 | does not count: rounds of A 59.8 to 78.7 ms |
+| SI-025 | Whisper tiny, 16 threads, B25 first | 3 | 1.013 for B25 | 0.0017 | 1.012 | inside the second-side effect |
+| SI-026 | Moonshine tiny | 3 | 0.963 | 0.074 | 0.973 | |
+| SI-026 | Moonshine tiny, B26 first | 4 | 0.961 for B26 | 1.4e-06 | 0.971 | |
+| SI-026 | Moonshine tiny | 6 | 1.059 | | 1.001 | does not count: rounds of B 25.7 to 41.3 ms |
+| both | Whisper tiny, 16 threads | 4 | 0.986 | 1.4e-08 | 0.972 | B24 against B26 |
+| both | Redux (guard) | 5 | 0.975 | 0.019 | 0.950 | B24 against B26; errors 81 and 81 |
+| both | Redux, `clean` and `other` (guard) | 2 and 3 | 1.033, then 0.872 | | | do not count: 4.7 cores of other load, then rounds 31.5 to 42.8 ms; 0 of 400 texts differ, 81 and 172 |
+| both | S1-mini, 62 cases (guard) | 2 and 2 | 1.07, then 0.93 for B26 | | | the side that runs second is slower in both orders; 0 texts differ, 25 errors |
+
+- Decision: KEEP both. Moonshine tiny: 0.883 from SI-025 and 0.96 from SI-026, about 0.85
+  together (the forecast was 0.85 and 0.95). Whisper tiny: 0.986 with 16 threads and 0.945
+  with 8 (the forecast was 0.97). Redux and S1-mini: no change shown.
+- Why Whisper gains less with 16 threads: its 5-row product is the token table, 51,864 x 384
+  f16 values, 40 MB for each decoder step. That is more than the 32 MB L3 of the second CCD,
+  so 8 of the 16 threads read it from memory, and memory, not arithmetic, sets the time. With
+  8 threads on the CCD with 96 MB of L3 the table stays in the cache, and the saved copy shows.
+- Gates: fmt and clippy `-D warnings --release` clean. `bench/paths.py` with B26: Moonshine
+  tiny and Redux the same text on every path; Whisper tiny differs on `TRIT_ISA=scalar` in one
+  text, the same as with B24 (the finding of 2026-11-10, not new). Kokoro and MMS-TTS write
+  the same bytes with B24 and B26 for one sentence (their f32 products have k tails).
+- Not run: an Intel CPU with AVX-512 (`vcvtph2ps` shares a port with the multiply-add there:
+  the tile can be slower than the panel for many rows), Moonshine base and Whisper base.en
+  (not on this computer), `tech`, `tts16`.
+- J5 baseline from the guard: S1-mini takes 260 to 285 ms for a median case and about 15 ms
+  for each output token. Estimate, not measured: each token reads the 28 layers (352 MB of
+  int8 weights) and the int8 head (151,936 x 1,024: 155 MB) once, and 507 MB do not fit a
+  96 MB L3, so the token time is the time to read the weights from memory. The key and value
+  copies of a step (28 layers x about 250 tokens x 1,024 values) are about 0.5 ms of the 15.
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine

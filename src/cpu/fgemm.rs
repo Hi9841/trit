@@ -39,6 +39,17 @@ impl Level {
             Level::Neon => "neon",
         }
     }
+
+    /// Whether the tiles of this level widen f16 weights as they load them,
+    /// for a block of any height. The other levels widen a 64-column panel
+    /// to f32 once for a block of more than 4 rows.
+    fn widens_in_tile(self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        if self == Level::Avx512 {
+            return true;
+        }
+        false
+    }
 }
 
 /// The widest float path this CPU runs. `TRIT_ISA=scalar|avx2` forces a slower one;
@@ -207,7 +218,10 @@ pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Bu
     let level = level();
     team::for_each(row_blocks * col_blocks, |task| {
         let (rows, cols) = block_span(task, col_blocks, m, n);
-        if W::WIDEN && rows.len() > 4 {
+        // On the AVX-512 level the tile widens f16 weights itself: the
+        // conversion does not wait for the multiply-add (Zen 4), and the
+        // f32 copy of the panel cost 35 % of a 5-row product.
+        if W::WIDEN && rows.len() > 4 && !level.widens_in_tile() {
             PANEL.with(|panel| {
                 let mut panel = panel.borrow_mut();
                 panel.resize(cols.len() * k, 0.0);
@@ -339,7 +353,7 @@ mod avx512 {
     use super::Weight;
     use std::arch::x86_64::*;
 
-    #[target_feature(enable = "avx512f,avx2,fma,f16c")]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,fma,f16c")]
     pub unsafe fn block<W: Weight>(
         x: &[f32],
         k: usize,
@@ -351,7 +365,12 @@ mod avx512 {
     ) {
         let mut i = rows.start;
         while i < rows.end {
-            let r = (rows.end - i).min(4);
+            // 5 rows are one tile: a decoder step has one row for each beam,
+            // and a tile of one row waits on the weights it loads again.
+            let r = match rows.end - i {
+                left @ (1..=3 | 5) => left,
+                _ => 4,
+            };
             let mut j = cols.start;
             while j < cols.end {
                 let c = (cols.end - j).min(3);
@@ -359,6 +378,9 @@ mod avx512 {
                 let wp = w.as_ptr().add(j * k);
                 let op = out.add(i * n + j);
                 match (r, c) {
+                    (5, 3) => tile::<5, 3, W>(xp, wp, k, op, n),
+                    (5, 2) => tile::<5, 2, W>(xp, wp, k, op, n),
+                    (5, 1) => tile::<5, 1, W>(xp, wp, k, op, n),
                     (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n),
                     (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n),
                     (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n),
@@ -379,7 +401,7 @@ mod avx512 {
     }
 
     /// R x C dot products of length k; the k tail uses masked loads.
-    #[target_feature(enable = "avx512f,avx2,fma,f16c")]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,fma,f16c")]
     #[allow(clippy::needless_range_loop)]
     unsafe fn tile<const R: usize, const C: usize, W: Weight>(
         x: *const f32,
@@ -407,13 +429,9 @@ mod avx512 {
             let mask: __mmask16 = (1u32 << (k - kk)) as u16 - 1;
             let mut wv = [_mm512_setzero_ps(); C];
             for (c, v) in wv.iter_mut().enumerate() {
-                // The tail is short and rare (k is a multiple of 16 in
-                // every model), so widen it value by value.
-                let mut tail = [0.0f32; 16];
-                for (t, value) in tail.iter_mut().enumerate().take(k - kk) {
-                    *value = (*w.add(c * k + kk + t)).to_f32();
-                }
-                *v = _mm512_loadu_ps(tail.as_ptr());
+                // One masked load: Moonshine's first layer has k = 127 and
+                // Whisper's mel filters k = 201, so the tail is not rare.
+                *v = W::wide16_first(w.add(c * k + kk), k - kk);
             }
             for (r, row) in acc.iter_mut().enumerate() {
                 let xv = _mm512_maskz_loadu_ps(mask, x.add(r * k + kk));
