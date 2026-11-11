@@ -673,15 +673,20 @@ impl Quantized {
     ) -> Self {
         let _span = crate::prof::span(crate::prof::Stage::Quantize);
         let groups = k / group;
-        // Reuse this thread's buffer: a fresh one would fault in new pages.
-        let mut values = QUANTIZED.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        // Reuse this thread's buffers: a fresh one would fault in new pages,
+        // and two new vectors for each product were 3 of 4 allocations of a
+        // Parakeet call.
+        let (mut values, mut scales, mut sums) =
+            QUANTIZED.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
         // The quantizer writes every value of the first m x k, so a buffer that
         // is long enough is used as it is: no fill on the calling thread.
         if values.len() < m * k {
             values.resize(m * k, 0);
         }
-        let mut scales = vec![0.0f32; m * groups];
-        let mut sums = vec![0i32; m * groups];
+        // Exactly one scale and one sum for each row and group; the
+        // quantizer writes each of them.
+        scales.resize(m * groups, 0.0);
+        sums.resize(m * groups, 0);
         let (all_values, all_scales, all_sums) = (
             team::SendPtr::new(&mut values),
             team::SendPtr::new(&mut scales),
@@ -739,14 +744,21 @@ impl Quantized {
 /// Rows per quantization task: a short take still splits, a row is never shared.
 const QUANTIZE_ROWS: usize = 8;
 
+/// The values, scales, and sums of the last `Quantized` of this thread.
+type Reused = (Vec<i8>, Vec<f32>, Vec<i32>);
+
 thread_local! {
-    static QUANTIZED: RefCell<Vec<i8>> = const { RefCell::new(Vec::new()) };
+    static QUANTIZED: RefCell<Reused> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new())) };
 }
 
 impl Drop for Quantized {
     fn drop(&mut self) {
-        let values = std::mem::take(&mut self.values);
-        QUANTIZED.with(|cell| *cell.borrow_mut() = values);
+        let reused = (
+            std::mem::take(&mut self.values),
+            std::mem::take(&mut self.scales),
+            std::mem::take(&mut self.sums),
+        );
+        QUANTIZED.with(|cell| *cell.borrow_mut() = reused);
     }
 }
 

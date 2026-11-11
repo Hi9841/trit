@@ -2122,6 +2122,110 @@ the two first forms of SI-029 (they became SI-030).
   `ab.py --env-b TRIT_THREADS=8` run on a quiet computer says if the spread of the small
   Whisper models is right.
 
+## Session 2026-11-12 (root causes and counts: a profile build, allocations, the beam scores)
+
+The owner asked for the work to go on with two more rules: get the foundations right first,
+and correct a fault where it starts. Other sessions used up to 26 cores during this part, so
+each claim here rests on a count or on a stage timer in one process, not on wall time.
+
+### Scaffold: a profile build in the repository (`--features profile`, `src/prof.rs`)
+
+- Why first: P-10 to P-13 each used a patch script that had to be written again when the
+  code changed. Each later step of this work needs stage times and counts.
+- What: `prof::span(Stage)` and `prof::count`, empty in a normal build. With the feature,
+  `trit transcribe` prints on stderr one line for each call (ms, allocations, bytes, team
+  jobs, team moves) and a table: wall time of the main stages, thread time of the attention
+  stages, the count of jobs and moves, and the allocations of the process by size (the CLI
+  wraps its allocator).
+- Cost in a normal build: none. `trit_ffi.dll` has 13,929,472 bytes with and without it.
+
+### P-14 census (the profile build, 200 `clean` clips, counts for each call)
+
+| | Redux | Whisper tiny | Moonshine tiny |
+|---|---:|---:|---:|
+| Heap allocations, median | 517 | 2,236 | 1,356 |
+| Allocated bytes, median | 11.7 MB | 45.2 MB | 19.6 MB |
+| Team jobs, median | 802 | 1,267 | 1,812 |
+
+- Redux: 384 of the 517 allocations were the scale and sum vectors of `Quantized::grouped`,
+  two for each ternary product. Its bytes are large buffers: about 12 allocations of 128 KB
+  to 32 MB for each call (the first use of each pool buffer after the trim at the end of the
+  call before, the mel features, the CLI's file).
+- Whisper tiny and Moonshine tiny: about 340 and 280 allocations of 8 to 131 KB for each
+  call, 12 and 11 MB: the key and value history of a beam, copied when the beam splits.
+- Team moves on a quiet computer: 16 in the first 80 Redux calls, about one for each 250 ms,
+  and none after another session's build began to load both domains. So the team does move
+  because of its own work (the finding of 2026-11-05 still holds after SI-021). What a move
+  costs a single call is still not measured: no quiet period was long enough.
+
+### Root causes named, with what was done
+
+- "A new buffer filled with zeros at each call" has one cause: the pool goes back to 16 MB at
+  the end of each call, so "the call ended" stands for "the program is idle". The signal for
+  idle is `release_memory`, which clears the pool. To keep the buffers of the last call
+  until then would remove the fills that are left (Redux 0.8 ms for each call) and would
+  change the memory that the reference promises (16 MB). Not changed: the owner chose 16 MB
+  on 2026-10-22 with numbers.
+- "The team moves away from its own work": `steer` reads the busy time of each processor,
+  and that holds the team's own time. The change of 2026-11-05 that took the process's own
+  time out gave 0 moves and was rejected on a batch mean. The right test is a single call
+  after an idle time (J10) on a quiet computer.
+
+### Rejected with a measurement: one shared key and value history for all beams
+
+- Guess from the census: a split copies 8 to 12 vectors of up to 131 KB, 12 MB for each call,
+  so a history that beams share (rows in one arena, a list of row numbers for each beam)
+  saves 2 % (Whisper tiny) to 5 % (Moonshine tiny).
+- Measured with a span on the copy (`Stage::BeamClone`): 63.5 ms of 10,508 ms (0.6 %) for
+  Whisper tiny, 54.7 ms of 6,144 ms (0.9 %) for Moonshine tiny. A copy of 100 KB from the L2
+  cache is fast. Not built: the gain is under 1 % for a change of both decoders.
+
+### SI-031 the quantizer keeps its scale and sum vectors
+
+- Journey: the allocations of a call (a count: the same on a busy computer).
+- Hypothesis: `Quantized::grouped` makes two zeroed vectors for each product. The thread
+  already keeps the byte buffer between products; it can keep these two the same way. The
+  quantizer writes each scale and sum, so no value changes. Expected: Redux 517 to about 130
+  allocations for each call, Whisper tiny 2,236 to about 830; time about 0.3 %, too small to
+  show.
+- Result (the profile build before and after, 200 clips each): Redux 517 to 130 allocations
+  (107,900 to 31,098 in total), 11.66 to 10.14 MB; Whisper tiny 2,236 to 1,047 (505,899 to
+  223,957), 45.2 to 43.8 MB; Moonshine tiny 1,356 and 1,356 (no int8 layer). 0 of 600 texts
+  differ.
+- Decision: KEEP as a cleanup proven by count. No time claim.
+
+### SI-032 beam scores: the maximum of the logits in 16 lanes
+
+- Journey: J1 and J3, the stage "beam search: score job" (759 ms of 10,508 ms for Whisper
+  tiny, 7.2 %; 411 ms of 6,144 ms for Moonshine tiny, 6.7 %).
+- Profile: one task for each beam makes three scalar passes over its logits (51,864 or
+  32,768): the maximum (`fold` with `f32::max`), the sum of the exponentials, and the top
+  tokens. The maximum and the sum are chains, as in SI-027, but here a task has one row.
+- Hypothesis: a maximum does not depend on the order of its values, so 16 lanes give the
+  value of the fold (a zero of the other sign changes nothing after `exp`). The sum must keep
+  its order and stays. Expected: the score job about 0.8 of its time, 1.5 % of a clip.
+- Test: 0 texts differ; the stage time in the profile build before and after.
+- Result (profile builds before and after, two pairs in turns, 200 clips, 2 cores of other
+  load): score job of Whisper tiny 822 to 676 ms and 645 to 600 ms (0.82 and 0.93); Moonshine
+  tiny 398 to 390 ms and 402 to 394 ms (0.98). 0 texts differ.
+- Decision: REVERT. That is 0.5 to 1.4 % of a Whisper tiny clip and 0.1 % of a Moonshine tiny
+  clip, under the 2 % of the contract, and the forecast (0.8 of the stage for both) did not
+  hold for Moonshine. The maximum is not what limits the job: the sum of the exponentials
+  (a chain of 3 cycles for each of 51,864 values, about 31 us) and `exp` are, and the sum
+  must keep its order.
+
+### Gates of the head (B32: the profile scaffold and SI-031)
+
+- `ab.py`, B30 against B32: Redux 0 of 400 texts differ (81 and 172), Whisper tiny 0 of 200
+  (231), Moonshine tiny 0 of 200 (133). Per-clip ratios 0.968 and 1.011 with B32 as the
+  second side: no time claim.
+- 4 threads x 20 calls on one engine: 0 wrong texts (Redux, Whisper tiny). Private memory
+  after `release_memory`: Redux 489 MB (B30: 487), Whisper tiny 225 and 221 MB (B30: 217): the
+  kept scale and sum vectors of each thread stay, inside the 2 % guard at the second reading.
+- fmt; clippy `-D warnings --release` for the workspace and for `-p trit --features profile`;
+  `trit skill --check`; `bench/paths.py` (Redux the same text on every path, Whisper tiny
+  with its known scalar text).
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine
