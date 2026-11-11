@@ -181,6 +181,7 @@ impl Team {
     }
 
     fn move_to(&self, domain: usize) {
+        crate::prof::count(crate::prof::Stage::Moves, 1);
         self.domain.store(domain, Ordering::Relaxed);
         let threads = self.workers + 1;
         for (index, handle) in self.threads.iter().enumerate() {
@@ -200,6 +201,7 @@ impl Team {
             }
             return;
         }
+        crate::prof::count(crate::prof::Stage::Jobs, 1);
         let _one_caller = self.submit.lock();
         INSIDE.set(true);
         // SAFETY: a thread calls `run` only for a task it claimed while

@@ -46,6 +46,7 @@ impl MelFrontend {
 
     /// `frames x mels`, frames = samples / 160. Empty for less than one hop.
     pub fn compute(&self, audio: &[f32]) -> (Vec<f32>, usize) {
+        let _span = crate::prof::span(crate::prof::Stage::Features);
         let frames = audio.len() / HOP;
         if frames < 2 {
             return (Vec::new(), 0);

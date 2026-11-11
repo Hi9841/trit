@@ -323,6 +323,7 @@ impl HeadMajor {
         tk: usize,
         (hd, kv_heads): (usize, usize),
     ) -> Self {
+        let _span = crate::prof::span(crate::prof::Stage::HeadMajor);
         // From the pool, on the calling thread: the workers allocate nothing,
         // so their allocator heaps do not grow with every clip.
         let (mut kt, mut vh) = (
@@ -368,6 +369,7 @@ pub fn attention_with(
     (d, heads): (usize, usize),
     causal: bool,
 ) -> Buf {
+    let _span = crate::prof::span(crate::prof::Stage::Attention);
     let (hd, tk) = (kv.hd, kv.tk);
     assert_eq!(hd * heads, d);
     // No queries: nothing to split into tasks.
@@ -401,11 +403,16 @@ pub fn attention_with(
                     *o = x * scale;
                 }
             }
+            let scores = crate::prof::span(crate::prof::Stage::Scores);
             fgemm::matmul_nn_into(qh, m, hd, kt, tk, probs);
+            scores.end();
+            let softmax = crate::prof::span(crate::prof::Stage::Softmax);
             softmax_rows(probs, tk, |local| match causal {
                 true => tk - tq + rows.start + local + 1,
                 false => tk,
             });
+            softmax.end();
+            let _values = crate::prof::span(crate::prof::Stage::Values);
             fgemm::matmul_nn_into(probs, m, tk, vh, hd, heads_out);
             for (part, i) in heads_out.chunks_exact(hd).zip(rows.clone()) {
                 // SAFETY: row i, head h belongs to this task only; `out` outlives the step.
@@ -431,6 +438,7 @@ pub fn attention_steps<'a>(
     (d, heads, kv_heads): (usize, usize, usize),
     out: &mut [f32],
 ) {
+    let _span = crate::prof::span(crate::prof::Stage::StepAttention);
     let hd = d / heads;
     let group = heads / kv_heads;
     let stride = kv_heads * hd;

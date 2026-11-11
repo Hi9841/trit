@@ -267,6 +267,7 @@ impl Ternary {
 
     /// `x` is `m x k` f32; returns `m x n`.
     pub fn forward(&self, x: &[f32], m: usize) -> Buf {
+        let _span = crate::prof::span(crate::prof::Stage::Ternary);
         #[cfg(feature = "gpu")]
         if let Some(layer) = &self.gpu {
             if !crate::gpu::host_products() && crate::gpu::usable() {
@@ -670,6 +671,7 @@ impl Quantized {
         group: usize,
         half_scales: bool,
     ) -> Self {
+        let _span = crate::prof::span(crate::prof::Stage::Quantize);
         let groups = k / group;
         // Reuse this thread's buffer: a fresh one would fault in new pages.
         let mut values = QUANTIZED.with(|cell| std::mem::take(&mut *cell.borrow_mut()));

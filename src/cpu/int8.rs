@@ -340,6 +340,7 @@ impl Int8 {
 
     /// `x` is `m x k` f32; returns `m x n`.
     pub fn forward(&self, x: &[f32], m: usize) -> Buf {
+        let _span = crate::prof::span(crate::prof::Stage::Int8);
         if let Some(layer) = &self.v2 {
             return layer.forward(x, m);
         }

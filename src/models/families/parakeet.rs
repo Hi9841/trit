@@ -141,9 +141,11 @@ impl Parakeet {
             return (Vec::new(), Vec::new());
         }
         // Redux's speech head: no speech, no text.
+        let encoder = crate::prof::span(crate::prof::Stage::Encoder);
         let Some((encoded, t)) = self.model.encode_speech(&features, frames, cancel) else {
             return (Vec::new(), Vec::new());
         };
+        encoder.end();
         // An encoder that stopped early has no valid output.
         if options.cancelled() {
             return (Vec::new(), Vec::new());
@@ -156,6 +158,7 @@ impl Parakeet {
             .is_some_and(|code| code.trim().eq_ignore_ascii_case("en"));
         let terms = self.terms.read();
         let blocked: &[usize] = if english { &terms.blocked } else { &[] };
+        let _span = crate::prof::span(crate::prof::Stage::Decoder);
         self.model
             .decode(&encoded, t, terms.dictionary.as_ref(), blocked, cancel)
     }

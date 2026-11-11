@@ -25,6 +25,8 @@ mod layers;
 mod locate;
 mod models;
 mod options;
+#[doc(hidden)]
+pub mod prof;
 mod text;
 mod tts;
 

@@ -19,6 +19,8 @@ path = "src/main.rs"
 [features]
 # Matrix products and the Parakeet encoder on a GPU (Vulkan, DX12, or Metal). Off by default.
 gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+# Stage timers and counters (`src/prof.rs`); `trit transcribe` prints them on stderr. Off by default: no cost.
+profile = []
 
 [dependencies]
 parking_lot = "0.12"

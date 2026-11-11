@@ -82,6 +82,7 @@ pub fn search<S: Clone + Send>(
         // One task per sequence: each reads its own logits (three passes
         // over the vocabulary). One after the other on the caller, 5 beams
         // took 0.65 ms of each Whisper step, with all other threads idle.
+        let scores = crate::prof::span(crate::prof::Stage::BeamScores);
         crate::cpu::team::chunks_mut(&mut live, 1, |_, beam| {
             let beam = &mut beam[0];
             // log softmax(x) = (x - max) - log sum exp(x - max); the order of
@@ -103,6 +104,7 @@ pub fn search<S: Clone + Send>(
                 *logit = score + ((*logit - max) - log_sum);
             }
         });
+        scores.end();
         let mut candidates: Vec<(f32, usize, usize)> = Vec::with_capacity(live.len() * offered);
         for (b, beam) in live.iter().enumerate() {
             candidates.extend(beam.offers.iter().map(|(token, score)| (*score, b, *token)));
@@ -171,7 +173,10 @@ pub fn search<S: Clone + Send>(
             uses[*b] -= 1;
             let state = match uses[*b] {
                 0 => parents[*b].1.take(),
-                _ => parents[*b].1.clone(),
+                _ => {
+                    let _span = crate::prof::span(crate::prof::Stage::BeamClone);
+                    parents[*b].1.clone()
+                }
             };
             states.extend(state);
         }
@@ -179,6 +184,7 @@ pub fn search<S: Clone + Send>(
         let logits = if kept.is_empty() {
             Vec::new()
         } else {
+            let _span = crate::prof::span(crate::prof::Stage::BeamStep);
             step(&mut states, &fed)
         };
         live = kept

@@ -208,6 +208,7 @@ unsafe impl Sync for OutPtr {}
 
 /// `out[i][j] = sum_k x[i][k] * w[j][k]`, parallel over 64 x 64 blocks.
 pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Buf {
+    let _span = crate::prof::span(crate::prof::Stage::Float);
     if super::v2::float_enabled() {
         return super::v2::float::matmul(x, m, k, w, n);
     }

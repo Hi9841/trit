@@ -160,9 +160,13 @@ fn run(parsed: &Parsed) -> Outcome {
                 continue;
             }
         };
+        #[cfg(feature = "profile")]
+        let before = profile::Marks::now();
         let started = Instant::now();
         let (mut text, segments) =
             engine.transcript(&samples, &options, parsed.switch("--timestamps"));
+        #[cfg(feature = "profile")]
+        before.line(samples.len(), started);
         if let Some(cleaner) = &cleaner {
             text = cleaner.clean(&text, &style);
         }
@@ -175,6 +179,8 @@ fn run(parsed: &Parsed) -> Outcome {
         });
     }
 
+    #[cfg(feature = "profile")]
+    profile::table(&rows);
     match format {
         Format::Text => {
             for row in &rows {
@@ -202,6 +208,51 @@ fn run(parsed: &Parsed) -> Outcome {
         Ok(ExitCode::SUCCESS)
     } else {
         Err(ExitCode::FAILURE)
+    }
+}
+
+/// The lines of a profile build, on stderr: stdout stays the result.
+#[cfg(feature = "profile")]
+#[allow(clippy::print_stderr)]
+mod profile {
+    use std::sync::atomic::Ordering::Relaxed;
+    use trit::prof::{counted, Stage, ALLOCATED_BYTES, ALLOCATIONS};
+
+    /// The counters before one call.
+    pub struct Marks(u64, u64, u64, u64);
+
+    impl Marks {
+        pub fn now() -> Self {
+            Self(
+                ALLOCATIONS.load(Relaxed),
+                ALLOCATED_BYTES.load(Relaxed),
+                counted(Stage::Moves),
+                counted(Stage::Jobs),
+            )
+        }
+
+        /// One line for the call that ran since `now`.
+        pub fn line(&self, samples: usize, started: std::time::Instant) {
+            let after = Self::now();
+            eprintln!(
+                "call {:.2} s {:.2} ms allocations {} bytes {} moves {} jobs {}",
+                samples as f64 / f64::from(trit::SAMPLE_RATE),
+                started.elapsed().as_secs_f64() * 1000.0,
+                after.0 - self.0,
+                after.1 - self.1,
+                after.2 - self.2,
+                after.3 - self.3
+            );
+        }
+    }
+
+    pub fn table(rows: &[super::Row]) {
+        let busy: f64 = rows.iter().map(|row| row.ms).sum();
+        eprint!(
+            "profile: {} calls, {busy:.1} ms\n{}",
+            rows.len(),
+            trit::prof::report()
+        );
     }
 }
 

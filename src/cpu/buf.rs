@@ -129,6 +129,7 @@ impl Buf {
         let reused = POOL.lock().take(len);
         let mut data = reused.unwrap_or_else(|| Vec::with_capacity(len));
         if data.len() < len {
+            let _span = crate::prof::span(crate::prof::Stage::BufFill);
             data.resize(len, 0.0);
         }
         Buf { data, len }
