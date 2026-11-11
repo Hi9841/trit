@@ -5,6 +5,7 @@
 //   Console.WriteLine(engine.Kind);                          // "whisper"
 //   Console.WriteLine(engine.TranscribeWav("take.wav"));      // the model detects the language
 //   Console.WriteLine(engine.Transcribe(samples, "de"));      // float[] at 16 kHz mono
+//   Console.WriteLine(engine.Transcribe(mic, "en", sampleRate: 48000));  // another rate: Trit resamples
 //   Console.WriteLine(engine.TranscribeWav("take.wav", task: "translate"));  // into English
 //   foreach (var s in engine.SegmentsWav("take.wav")) Console.WriteLine($"{s.Start}-{s.End} {s.Text}");
 //
@@ -137,15 +138,18 @@ public sealed class Trit : IDisposable
     /// <summary>The `model_type` of the model, for example "parakeet_tdt".</summary>
     public string Kind => Marshal.PtrToStringUTF8(Native.trit_kind(Handle))!;
 
-    /// <summary>16 kHz mono samples in -1..1; language is an ISO 639-1 code or null to detect it; beam: beams
+    /// <summary>Mono samples in -1..1; language is an ISO 639-1 code or null to detect it; beam: beams
     /// for Whisper, Moonshine, and Canary (0: the model's default, 5 for Whisper and Moonshine; 1: greedy);
     /// task: "transcribe" (null), or "translate" into English (multilingual Whisper, Canary); fallback:
-    /// Whisper decodes a window again at higher temperatures when its text repeats itself (null: on).</summary>
+    /// Whisper decodes a window again at higher temperatures when its text repeats itself (null: on);
+    /// sampleRate: the rate of the samples in Hz (0: 16000). Trit resamples another rate, such as the 44100
+    /// or 48000 of a microphone. Samples at another rate with no sampleRate give wrong text.</summary>
     public string Transcribe(ReadOnlySpan<float> samples, string? language = null, int beam = 0,
-        string? task = null, bool? fallback = null) =>
-        Text(Run(samples, Options(language, beam, task, fallback, false)));
+        string? task = null, bool? fallback = null, int sampleRate = 0) =>
+        Text(Run(samples, Options(language, beam, task, fallback, false, sampleRate)));
 
-    /// <summary>A 16 kHz WAV file (16, 24, or 32-bit PCM, or 32-bit float); the rest as for <see cref="Transcribe"/>.</summary>
+    /// <summary>A WAV file (16, 24, or 32-bit PCM, or 32-bit float; a file that is not at 16 kHz is
+    /// resampled); the rest as for <see cref="Transcribe"/>.</summary>
     public string TranscribeWav(string path, string? language = null, int beam = 0,
         string? task = null, bool? fallback = null) =>
         Text(RunWav(path, Options(language, beam, task, fallback, false)));
@@ -153,16 +157,17 @@ public sealed class Trit : IDisposable
     /// <summary>The text in timed segments: sentences or pauses for Parakeet, windows of up to 30 s (40 s
     /// Canary) for the others. Arguments as for <see cref="Transcribe"/>.</summary>
     public List<Segment> Segments(ReadOnlySpan<float> samples, string? language = null, int beam = 0,
-        string? task = null, bool? fallback = null) =>
-        SegmentList(Run(samples, Options(language, beam, task, fallback, true)));
+        string? task = null, bool? fallback = null, int sampleRate = 0) =>
+        SegmentList(Run(samples, Options(language, beam, task, fallback, true, sampleRate)));
 
-    /// <summary><see cref="Segments"/> for a 16 kHz WAV file.</summary>
+    /// <summary><see cref="Segments"/> for a WAV file.</summary>
     public List<Segment> SegmentsWav(string path, string? language = null, int beam = 0,
         string? task = null, bool? fallback = null) =>
         SegmentList(RunWav(path, Options(language, beam, task, fallback, true)));
 
     /// <summary>The options JSON of trit_transcribe_json.</summary>
-    static string Options(string? language, int beam, string? task, bool? fallback, bool timestamps)
+    static string Options(string? language, int beam, string? task, bool? fallback, bool timestamps,
+        int sampleRate = 0)
     {
         using var buffer = new MemoryStream();
         using (var json = new Utf8JsonWriter(buffer))
@@ -173,6 +178,8 @@ public sealed class Trit : IDisposable
             if (task != null) json.WriteString("task", task);
             if (fallback is bool on) json.WriteBoolean("fallback", on);
             json.WriteBoolean("timestamps", timestamps);
+            // An older library does not know the key.
+            if (sampleRate > 0) json.WriteNumber("sample_rate", sampleRate);
             json.WriteEndObject();
         }
         return System.Text.Encoding.UTF8.GetString(buffer.ToArray());

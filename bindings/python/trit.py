@@ -6,6 +6,7 @@
     print(engine.kind)                              # "whisper"
     print(engine.transcribe_wav("take.wav"))        # the model detects the language
     print(engine.transcribe(samples, language="de"))  # 16 kHz mono floats: list, array, or numpy
+    print(engine.transcribe(mic, sample_rate=48000))  # another rate: Trit resamples
     print(engine.transcribe_wav("take.wav", task="translate"))  # into English
     for s in engine.segments_wav("take.wav"):       # timed sentences
         print(f"{s.start:.2f}-{s.end:.2f} {s.text}")
@@ -167,12 +168,14 @@ class Segment:
     text: str
 
 
-def _options(language, beam, task, fallback, timestamps) -> bytes:
+def _options(language, beam, task, fallback, timestamps, sample_rate=None) -> bytes:
     options = {"language": language, "beam": beam, "timestamps": timestamps}
     if task is not None:
         options["task"] = task
     if fallback is not None:
         options["fallback"] = fallback
+    if sample_rate is not None:  # an older library does not know the key
+        options["sample_rate"] = sample_rate
     return json.dumps(options).encode()
 
 
@@ -231,8 +234,12 @@ class Trit:
         return _lib.trit_kind(self._live()).decode()
 
     def transcribe(self, samples, language: str | None = None, beam: int = 0,
-                   task: str | None = None, fallback: bool | None = None) -> str:
-        """16 kHz mono samples in -1..1: list, array('f'), or numpy array.
+                   task: str | None = None, fallback: bool | None = None,
+                   sample_rate: int | None = None) -> str:
+        """Mono samples in -1..1: list, array('f'), or numpy array.
+        `sample_rate`: the rate of `samples` in Hz (None: 16000). Trit
+        resamples another rate, such as the 44100 or 48000 of a microphone.
+        Samples at another rate with no `sample_rate` give wrong text.
         `language`: ISO 639-1 code, or None to let the model detect it.
         `beam`: beams for Whisper, Moonshine, and Canary (0: the model's
         default, 5 for Whisper and Moonshine; 1: greedy).
@@ -240,24 +247,26 @@ class Trit:
         (multilingual Whisper, Canary).
         `fallback`: Whisper decodes a window again at higher temperatures
         when its text repeats itself (None: on)."""
-        return self._samples(samples, _options(language, beam, task, fallback, False))["text"]
+        return self._samples(samples, _options(language, beam, task, fallback, False, sample_rate))["text"]
 
     def transcribe_wav(self, path: str | os.PathLike, language: str | None = None, beam: int = 0,
                        task: str | None = None, fallback: bool | None = None) -> str:
-        """A 16 kHz WAV file (16, 24, or 32-bit PCM, or 32-bit float); options as for `transcribe`."""
+        """A WAV file (16, 24, or 32-bit PCM, or 32-bit float; a file that is
+        not at 16 kHz is resampled); options as for `transcribe`."""
         return self._wav(path, _options(language, beam, task, fallback, False))["text"]
 
     def segments(self, samples, language: str | None = None, beam: int = 0,
-                 task: str | None = None, fallback: bool | None = None) -> list[Segment]:
+                 task: str | None = None, fallback: bool | None = None,
+                 sample_rate: int | None = None) -> list[Segment]:
         """The text in timed segments: sentences or pauses for Parakeet,
         windows of up to 30 s (40 s Canary) for the others. Options as for
         `transcribe`."""
-        result = self._samples(samples, _options(language, beam, task, fallback, True))
+        result = self._samples(samples, _options(language, beam, task, fallback, True, sample_rate))
         return [Segment(**s) for s in result["segments"]]
 
     def segments_wav(self, path: str | os.PathLike, language: str | None = None, beam: int = 0,
                      task: str | None = None, fallback: bool | None = None) -> list[Segment]:
-        """`segments` for a 16 kHz WAV file."""
+        """`segments` for a WAV file."""
         result = self._wav(path, _options(language, beam, task, fallback, True))
         return [Segment(**s) for s in result["segments"]]
 

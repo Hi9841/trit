@@ -1661,6 +1661,69 @@ not know, for each 5 of about 600 million codes. `from_rows` (`kernels.rs:172`) 
 - Not run: `bench/hostile.py` (its small model has no ternary layer; the size and digit
   checks of `from_base3` did not change), and a ternary model other than Redux (none exists).
 
+### D-001 audio at another rate (PUBLIC API: `trit::resample`, the `sample_rate` option, `read_wav`)
+
+- The owner's decision (2026-11-11, asked with the J13 numbers): "do whatever you think". So
+  the choice of the additions is mine. Order: the sample rate first (it is the one case that
+  gives a wrong text with no error). `trit_shutdown`, a mode of the CLI that stays open, an
+  info function, and a test command are not built in this session.
+- Journey: J13, "audio that is not 16 kHz". Baseline: a 48 or 44.1 kHz WAV file is an error
+  with an `ffmpeg` command; 48 kHz samples give "", 44.1 kHz samples give "Of color".
+- Plan: `src/audio/resample.rs`, a polyphase filter (sinc with a Kaiser window, 16 zero
+  crossings on each side, cutoff at 0.95 of the lower Nyquist rate), exact for a ratio of
+  whole numbers. Lanes with separate multiply and add steps, so each CPU gives the same
+  bits. `trit::resample(samples, rate)`; `read_wav` and the CLI take a WAV file of any usual
+  rate; `sample_rate` in the JSON options of `trit_transcribe_json` and in the three bindings.
+- Expected: the texts of 48 and 44.1 kHz copies of the clips equal the texts of the 16 kHz
+  clips for nearly all clips, with the same error totals within 2; a tone above 8 kHz comes
+  out more than 60 dB down; the cost is below 0.3 ms for each second of 48 kHz audio.
+- Gate: `bench/rates.py` (new): tones, and the clips of `clean` at 48 and 44.1 kHz through
+  the Python binding (samples and WAV files) against the 16 kHz clips.
+- The first filter had its cutoff at 0.95 of the Nyquist rate (full level up to 6.3 kHz).
+  Redux did not show it (83 errors, SciPy's resample 83). Moonshine tiny did: 63 errors for
+  SciPy's 57, and 27 of 100 texts changed. `oploop/results/s1111/filter_lab.py` builds the
+  same filter in numpy: each cutoff below the Nyquist rate costs words (0.95: 63 errors; 0.97
+  with 32 zero crossings: 63; 0.98: 58 to 60), and a cutoff at the Nyquist rate gives SciPy's
+  57. Real speech at 24 kHz from Kokoro (`wideband.py`, 16 sentences, 1.4 % of the energy above
+  8 kHz): Moonshine tiny 21 errors with the cutoff at the Nyquist rate and with SciPy, 23 with
+  0.95; Redux 9 with each filter. So the cutoff is the Nyquist rate, as in `resample_poly`.
+- A first form of the filter loop (16 lanes in plain Rust under `multiversion!`) took 0.49 ms
+  for each second of 48 kHz audio: the compiler kept the lanes in memory. The loop now calls
+  the dot product of the second kernel set (`v2::float::matmul_into`, one row): 0.105 ms for
+  each second at 48 kHz, 0.106 at 44.1 kHz, 0.30 at 192 kHz, and one sum order on every CPU.
+  The tap table of the last rate stays (44.1 kHz: 15,360 taps, about 2 ms to build).
+- Result:
+  - `cargo run --release --example resample_check`: tones up to 0.75 of the cutoff within
+    0.001 dB, tones from 9.5 kHz at -83 dB or lower, a constant stays exact, the lengths are
+    right, the rates 0, 3,999, 384,001, and 44,101 fail. The same hash of the output with
+    the default path, `TRIT_ISA=avx2`, and `TRIT_ISA=scalar`.
+  - `bench/rates.py` (errors at the rate, SciPy's resample, the 16 kHz clips):
+
+    | Model, clips | 48 kHz | 44.1 kHz | 8 kHz | 16 kHz |
+    |---|---:|---:|---:|---:|
+    | Redux, 200 | 80 (SciPy 83) | 83 (83) | 90 (90) | 81 |
+    | Moonshine tiny, 100 | 57 (57) | 57 (57) | | 56 |
+    | Whisper tiny, 100 | 88 (91) | | | 89 |
+
+  - J13 after the change: a 48 or 44.1 kHz WAV file gives the right text; samples with
+    `sample_rate` give the right text; samples at another rate with no rate still give ""
+    and "Of color" (the engine cannot know the rate of bare samples).
+  - The cost inside a call (`rate_cost.py`, a 5.6 s clip, 40 calls in turns, cutoff 0.95
+    build): 35.1 ms at 16 kHz, +1.1 ms at 48 kHz, +1.9 ms at 44.1 kHz (the table is built
+    again when the rates take turns).
+  - Node 26 and Bun 1.3 (`sampleRate`), .NET 10 (`sampleRate:`): 48 and 44.1 kHz samples, a
+    48 kHz WAV file, segments, and the async call give the text of the 16 kHz clip; a rate of
+    44,101 and `sample_rate` with a WAV file give the planned errors.
+- Gates: `ab.py` B23 against B24, `clean` and `other`: 0 of 400 texts differ at 16 kHz (81 and
+  172). `bench/hostile.py --mutate <Moonshine tiny> --runs 150`: exit 0. fmt, clippy
+  `-D warnings --release` (workspace, and `-p trit`), `trit skill --check`: clean.
+- Lesson: `cargo build --workspace --examples` builds the examples only. One gate run used a
+  library from before a change and repeated the old numbers exactly; equal numbers after a
+  change are a reason to look at the time of the file.
+- Not run: a real 48 kHz recording (none here; Kokoro at 24 kHz is the nearest), macOS and
+  arm64 (the filter uses the second kernel set, which K-006 ran under QEMU), and a build of
+  TDT (the change only adds `trit::resample`).
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine

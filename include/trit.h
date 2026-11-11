@@ -116,7 +116,10 @@ const char *trit_kind(const Trit *engine);
 /* Frees an engine. NULL is a no-op. */
 void trit_free(Trit *engine);
 
-/* Transcribes `count` mono samples at 16 kHz in the range -1 to 1.
+/* Transcribes `count` mono samples at 16 kHz in the range -1 to 1. For
+ * samples at another rate (a microphone gives 44100 or 48000 Hz), use
+ * trit_transcribe_json with "sample_rate": samples at another rate with no
+ * rate give wrong text and no error.
  * `language`: ISO 639-1 code ("en", "de"), or NULL to let the model detect
  * it. Parakeet cannot be told a language; "en" keeps it to English.
  * Canary needs it (English when NULL).
@@ -131,7 +134,8 @@ char *trit_transcribe(const Trit *engine, const float *samples, size_t count,
 char *trit_transcribe_with(const Trit *engine, const float *samples, size_t count,
                            const char *language, int beam);
 
-/* Transcribes a 16 kHz WAV file (16, 24, or 32-bit PCM, or 32-bit float; any channels).
+/* Transcribes a WAV file (16, 24, or 32-bit PCM, or 32-bit float; any channels).
+ * A file that is not at 16 kHz is resampled (4000 to 384000 Hz).
  * `language` as for trit_transcribe. Returns the text, or NULL on failure.
  * Free with trit_free_text(). */
 char *trit_transcribe_wav(const Trit *engine, const char *path, const char *language);
@@ -147,12 +151,15 @@ char *trit_transcribe_wav(const Trit *engine, const char *path, const char *lang
  *                 when its text repeats itself (default true)
  *   "timestamps": fill "segments" (default false): sentences or pauses for
  *                 Parakeet, windows of up to 30 s (40 s Canary) for others
- * An unknown key or value fails. Example: "{\"language\": \"en\", \"timestamps\": true}".
+ *   "sample_rate": the rate of `samples` in Hz (default 16000). Trit
+ *                 resamples another rate, 4000 to 384000 Hz
+ * An unknown key or value fails. Example: "{\"language\": \"en\", \"sample_rate\": 48000}".
  * Returns the JSON, or NULL on failure. Free with trit_free_text(). */
 char *trit_transcribe_json(const Trit *engine, const float *samples, size_t count,
                            const char *options);
 
-/* trit_transcribe_json for a 16 kHz WAV file, as for trit_transcribe_wav. */
+/* trit_transcribe_json for a WAV file, as for trit_transcribe_wav. The file
+ * has its own rate: "sample_rate" in `options` fails. */
 char *trit_transcribe_wav_json(const Trit *engine, const char *path, const char *options);
 
 /* Frees text from the trit_transcribe, trit_clean, and trit_gpu_info functions.

@@ -2,7 +2,7 @@
 
 use super::output::{print_help, tilde, toon};
 
-pub(super) const DESCRIPTION: &str = "Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; 16 kHz WAV in, text out. Text to speech with Kokoro-82M (28 English voices) and MMS-TTS";
+pub(super) const DESCRIPTION: &str = "Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; WAV in, text out. Text to speech with Kokoro-82M (28 English voices) and MMS-TTS";
 
 pub(super) const HOME_HELP: [&str; 7] = [
     "Run `trit transcribe <file.wav>` to get the text of a recording",

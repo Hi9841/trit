@@ -71,8 +71,10 @@ def rates(model: str, clip: str, folder: str) -> None:
         "48 kHz WAV file": lambda: engine.transcribe_wav(write("48k.wav", at48, 48000), language="en"),
         "44.1 kHz WAV file": lambda: engine.transcribe_wav(write("441k.wav", at441, 44100), language="en"),
         "16 kHz stereo WAV file": lambda: engine.transcribe_wav(write("stereo.wav", stereo, RATE, 2), language="en"),
-        "48 kHz samples": lambda: engine.transcribe(at48, language="en"),
-        "44.1 kHz samples": lambda: engine.transcribe(at441, language="en"),
+        "48 kHz samples, sample_rate": lambda: engine.transcribe(at48, language="en", sample_rate=48000),
+        "44.1 kHz samples, sample_rate": lambda: engine.transcribe(at441, language="en", sample_rate=44100),
+        "48 kHz samples, no rate": lambda: engine.transcribe(at48, language="en"),
+        "44.1 kHz samples, no rate": lambda: engine.transcribe(at441, language="en"),
         "int16-scale samples": lambda: engine.transcribe(samples * 32768.0, language="en"),
         "int16 numpy array": lambda: engine.transcribe(pcm, language="en"),
     }
@@ -134,7 +136,7 @@ def main() -> None:
         sys.exit(done.stderr[-1500:])
     print("rates:")
     for name, result in json.loads(done.stdout.strip().splitlines()[-1]).items():
-        print(f"  {name:24} {result}")
+        print(f"  {name:30} {result}")
 
     header = (ROOT / "include" / "trit.h").read_text(encoding="utf-8")
     import re

@@ -5,7 +5,7 @@ description: Transcribe speech from WAV files to text on the CPU, offline, with 
 
 # Trit
 
-Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; 16 kHz WAV in, text out. Text to speech with Kokoro-82M (28 English voices) and MMS-TTS. `--device gpu` or `--device auto` runs the matrix products on the GPU. `auto` uses the GPU only for the Parakeet models, and the CPU when the computer has no adapter. Build with `--features gpu` for that path.
+Speech to text on the CPU, offline: Parakeet, Canary, Whisper, and Moonshine models from Hugging Face, in any language they speak; WAV in, text out. Text to speech with Kokoro-82M (28 English voices) and MMS-TTS. `--device gpu` or `--device auto` runs the matrix products on the GPU. `auto` uses the GPU only for the Parakeet models, and the CPU when the computer has no adapter. Build with `--features gpu` for that path.
 
 ## Commands
 
@@ -24,7 +24,7 @@ Output is TOON on stdout. Errors are on stdout too, as `error:` and `help:` line
 
 ```text
 usage: trit transcribe <path>... [--model <dir>] [--language <code>] [--dictionary <file>] [--task <t>] [--timestamps] [--cleanup] [--precision <p>] [--device <d>] [--beam <n>] [--format toon|json|text] [--full]
-  <path>          a 16 kHz WAV file, or a folder: every .wav file in it and its subfolders
+  <path>          a WAV file (16 kHz, or another rate: Trit resamples it), or a folder: every .wav file in it and its subfolders
   --model <dir>   speech model folder or `trit models` name: Parakeet, Canary, Whisper, Moonshine (default: TRIT_MODEL, then the places `trit doctor` lists)
   --language <code>  spoken language, ISO 639-1 (en, de, ...); default: the model detects it
   --dictionary <file>  terms to favor, one per line (names, product words)

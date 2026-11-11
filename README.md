@@ -56,7 +56,8 @@ it.
 | Node and Bun | [bindings/node/trit.mjs](bindings/node/trit.mjs) with koffi | [Node and Bun](docs/reference.md#node-and-bun) |
 
 Every integration follows [the contract](docs/reference.md#the-contract):
-16 kHz mono `f32` audio, load the engine once, and share it between threads.
+mono `f32` audio (at 16 kHz, or with its sample rate), load the engine once,
+and share it between threads.
 
 ## Select a model
 

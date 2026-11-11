@@ -4,7 +4,7 @@ Trit is a speech-to-text and text-to-speech engine for the CPU. It runs
 Parakeet, Canary, Whisper, and Moonshine checkpoints as published on Hugging
 Face, with its own kernels: no Python, no PyTorch, no ONNX Runtime. The
 products run on the CPU. Speech to text can also run them on the GPU: see
-[GPU](#gpu). 16 kHz audio in, text out. It can also clean a raw transcript with
+[GPU](#gpu). Audio in, text out. It can also clean a raw transcript with
 Superwhisper S1-mini, and speak text with Kokoro-82M (28 English voices)
 or a VITS voice (Meta MMS-TTS).
 
@@ -58,7 +58,7 @@ Every integration, in every language, follows these rules.
 
 | Topic | Rule |
 |---|---|
-| Audio | 16 kHz, mono, `f32` samples in -1..1. Trit does not resample. Convert other audio first: `ffmpeg -i in.mp3 -ar 16000 -ac 1 out.wav`. `read_wav` and the CLI read 16 kHz WAV (16, 24, or 32-bit PCM, or 32-bit float; also in the extensible format) and mix channels to mono. |
+| Audio | Mono `f32` samples in -1..1, at 16 kHz. For samples at another rate (a microphone gives 44.1 or 48 kHz), give the rate: `sample_rate` in the C ABI and the bindings, `trit::resample` in Rust. Trit then resamples (4 to 384 kHz). Samples at another rate with no rate give wrong text and no error. `read_wav` and the CLI read WAV at any of these rates (16, 24, or 32-bit PCM, or 32-bit float; also in the extensible format) and mix channels to mono. Convert other formats first: `ffmpeg -i in.mp3 -ar 16000 -ac 1 out.wav`. |
 | Load once | Loading takes 0.2 s (Redux) to 5 s (the large models). Load one engine when the program starts and keep it. |
 | Threads | `Trit` and `Cleaner` are `Send + Sync`. Share one engine between threads (`Arc` in Rust). Calls from several threads are safe, but they share one worker team, so together they are not faster than one after another. |
 | Model | A model is a Hugging Face folder with `config.json` and `model.safetensors`. Give a folder, a name from the [catalog](#models), or nothing (the default is `parakeet-redux`). |
@@ -148,7 +148,8 @@ use std::path::Path;
 
 let dir = trit::find_model(None).ok_or_else(|| trit::missing_model(None))?;  // parakeet-redux
 let engine = trit::Trit::load(&dir)?;                    // load once, keep it
-let samples = trit::read_wav(Path::new("take.wav"))?;   // 16 kHz mono f32
+let samples = trit::read_wav(Path::new("take.wav"))?;   // 16 kHz mono f32, resampled if the file has another rate
+// Samples from a microphone at 48 kHz: let samples = trit::resample(&mic, 48_000)?;
 let text = engine.transcribe_with(&samples, &trit::Options::language("en"));
 
 for segment in engine.segments(&samples, &trit::Options::language("en")) {
@@ -175,7 +176,8 @@ trit::release_memory();                                  // when the app goes id
 | `Cleaner::load(dir)`, `Cleaner::load_with(dir, &LoadOptions)`, `Cleaner::clean(&self, &str, &Style) -> String` | S1-mini transcript cleanup |
 | `find_model(Option<&Path>)`, `find_cleanup_model(Option<&Path>)` | The model search in [Models](#models) |
 | `missing_model(Option<&Path>) -> String` | Why `find_model` found nothing, with the fix |
-| `read_wav(&Path) -> Result<Vec<f32>, String>` | A 16 kHz WAV file as mono samples |
+| `read_wav(&Path) -> Result<Vec<f32>, String>` | A WAV file as 16 kHz mono samples (a file at another rate is resampled) |
+| `resample(&[f32], rate: u32) -> Result<Vec<f32>, String>` | Mono samples at `rate` Hz (4,000 to 384,000) as 16 kHz samples: a sinc filter with a Kaiser window, the same samples on every CPU. About 0.1 ms for each second of 48 kHz audio |
 | `Voice::load(dir) -> Result<Voice, String>` | Loads a voice: Kokoro-82M or VITS (MMS-TTS) |
 | `Voice::speak(&self, &str) -> Vec<f32>` | Speech of the text, mono at `Voice::sample_rate()` (24000 Kokoro, 16000 VITS) |
 | `Voice::speak_with(&self, &str, &Voicing) -> Result<Vec<f32>, String>` | The same with `Voicing { voice, phonemes, speed, noise, noise_duration, seed }` |
@@ -220,7 +222,7 @@ trit_free(engine);
 | `trit_transcribe(engine, const float *samples, size_t count, const char *language)` | Text, or NULL |
 | `trit_transcribe_with(engine, samples, count, language, int beam)` | The same with beams (0: the model's default, 1: greedy, at most 16) |
 | `trit_transcribe_wav(engine, const char *path, const char *language)` | Text, or NULL |
-| `trit_transcribe_json(engine, samples, count, const char *options)`, `trit_transcribe_wav_json(engine, path, options)` | `{"text", "segments": [{"start", "end", "text"}]}` as JSON, or NULL. `options` is NULL or a JSON object with any of `language`, `task` (`"transcribe"`, `"translate"`), `beam`, `fallback`, `timestamps` |
+| `trit_transcribe_json(engine, samples, count, const char *options)`, `trit_transcribe_wav_json(engine, path, options)` | `{"text", "segments": [{"start", "end", "text"}]}` as JSON, or NULL. `options` is NULL or a JSON object with any of `language`, `task` (`"transcribe"`, `"translate"`), `beam`, `fallback`, `timestamps`, and for samples `sample_rate` (their rate in Hz, default 16000; Trit resamples another rate) |
 | `trit_cancel(engine)` | The number of calls it stopped, or -1. Stops the calls that run on the engine now, on other threads: each returns NULL, and its `trit_last_error` says that it was cancelled. Parakeet stops in a part of a second; the other families between windows. A call that starts later is not stopped |
 | `trit_set_dictionary(engine, const char *terms)` | Terms skipped, or -1. One term per line; a term over 100 characters is skipped |
 | `trit_cleaner_load(const char *model)`, `trit_cleaner_load_with(model, precision)`, `trit_cleaner_load_ex(model, precision, device)` | A cleaner, or NULL. The device values are the same as for `trit_load_ex` |
@@ -262,6 +264,7 @@ print(trit.gpu_info())                            # the adapter, or TritError
 print(engine.kind)                                # "parakeet_tdt"
 print(engine.transcribe_wav("take.wav", language="en"))
 print(engine.transcribe(samples, language="en"))  # list, array("f"), or numpy float32, 16 kHz mono
+print(engine.transcribe(mic, sample_rate=48000))  # samples at another rate: Trit resamples
 print(engine.transcribe(samples, beam=1))         # greedy
 print(engine.transcribe_wav("take.wav", task="translate"))  # into English (Whisper, Canary)
 for s in engine.segments_wav("take.wav", language="en"):    # also segments(samples)
@@ -299,6 +302,7 @@ using var engine = new Trit("parakeet-redux");           // precision, device ("
 Console.WriteLine(Trit.GpuInfo());                       // the adapter, or TritException
 Console.WriteLine(engine.TranscribeWav("take.wav", "en"));
 Console.WriteLine(engine.Transcribe(samples, "en"));     // float[] or Span<float>, 16 kHz mono
+Console.WriteLine(engine.Transcribe(mic, "en", sampleRate: 48000));  // another rate: Trit resamples
 Console.WriteLine(engine.TranscribeWav("take.wav", task: "translate"));  // into English
 foreach (var s in engine.SegmentsWav("take.wav", "en"))  // also Segments(samples)
     Console.WriteLine($"{s.Start} {s.End} {s.Text}");    // seconds from the start
@@ -330,6 +334,7 @@ const engine = new Trit("parakeet-redux");             // second argument: { pre
 console.log(gpuInfo());                                // the adapter, or TritError
 console.log(engine.transcribeWav("take.wav", "en"));
 console.log(engine.transcribe(samples, "en"));         // Float32Array, 16 kHz mono
+console.log(engine.transcribe(mic, "en", { sampleRate: 48000 }));  // another rate: Trit resamples
 console.log(engine.transcribeWav("take.wav", null, { task: "translate" }));  // into English
 for (const s of engine.segmentsWav("take.wav", "en"))  // also segments(samples)
   console.log(s.start, s.end, s.text);                 // seconds from the start

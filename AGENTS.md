@@ -45,8 +45,10 @@ Do the steps in order. Each step ends on a check.
 
 5. **Write the integration** by the rules of docs/reference.md, "The contract". The
    rules that integrations get wrong most:
-   - Convert the audio to 16 kHz mono `f32` in -1..1 before Trit. Trit does
-     not resample, and microphones usually give 44.1 or 48 kHz.
+   - Give mono `f32` samples in -1..1, and give their rate when it is not
+     16 kHz (`sample_rate` in the C ABI and the bindings, `trit::resample`
+     in Rust). Microphones usually give 44.1 or 48 kHz, and samples at
+     another rate with no rate give wrong text and no error.
    - Load the engine once at start and keep it. Do not load it per call.
    - Pass `language: "en"` for an English program.
    - C ABI: free each returned text with `trit_free_text`; after NULL or -1,
@@ -83,6 +85,7 @@ Do the steps in order. Each step ends on a check.
 | Stability of one model | `uv run --no-project --python 3.12 --with numpy --with scipy --with whisper-normalizer==0.1.12 python oploop/steady.py <model> <A.dll> [<B.dll>]` (one clip many times, after an idle time, by length, said another way; `--tests load` adds busy threads) |
 | Cost to attach | `uv run --no-project --python 3.12 --with numpy --with scipy python oploop/attach.py <model> <trit.exe> <trit_ffi.dll>` (one cold call, the first text from Python, audio that is not 16 kHz) |
 | Long recordings | `uv run bench/long_clips.py` writes `bench/clips/long-clean` and `long-other` (40 recordings each, 45 to 130 s); then `ab.py <model> A B --sets long-clean,long-other` |
+| Audio at another rate | `cargo run --release --example resample_check` (tones, no model), then `uv run --no-project --python 3.12 --with numpy --with scipy --with whisper-normalizer==0.1.12 python bench/rates.py <model> <trit_ffi library>` (the clips at 48, 44.1, and 8 kHz) |
 
 There are no unit tests. The checks are:
 
@@ -113,6 +116,11 @@ There are no unit tests. The checks are:
   to a join must not raise the errors of `long-clean` and `long-other`
   (Redux, 60 s windows: 187 and 479). Windows of 30 s gave 17 % less time
   and 510 errors on `long-other`.
+- **Sample rates:** a change to `audio/resample.rs` must keep
+  `resample_check` at exit 0 (a tone below the cutoff within 0.05 dB, a
+  tone from 9.5 kHz 70 dB down, the same hash with `TRIT_ISA=scalar` and
+  `avx2`) and `bench/rates.py` at exit 0: at 48 and 44.1 kHz the errors
+  stay within 3 of SciPy's resample (Redux and Moonshine tiny).
 - **Error counts:** use `whisper-normalizer` 0.1.12, as the commands say.
   Version 1.0.1 counts 77 errors for the texts that 0.1.12 counts as 81.
 - **Files:** a change to a reader (`cpu/torch_file.rs`, `models/nemo.rs`,

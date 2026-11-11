@@ -6,6 +6,7 @@
 //   console.log(engine.kind);                            // "whisper"
 //   console.log(engine.transcribeWav("take.wav"));       // the model detects the language
 //   console.log(engine.transcribe(samples, "de"));       // Float32Array at 16 kHz mono
+//   console.log(engine.transcribe(mic, "en", { sampleRate: 48000 }));  // another rate: Trit resamples
 //   console.log(engine.transcribeWav("take.wav", null, { task: "translate" }));  // into English
 //   for (const s of engine.segmentsWav("take.wav")) console.log(s.start, s.end, s.text);
 //   engine.close();
@@ -95,8 +96,11 @@ function text(pointer, failed = "the call failed; run it with the call that wait
 export const gpuInfo = () => text(c.gpuInfo());
 
 /** The options JSON of trit_transcribe_json. */
-function options(language, { beam = 0, task = null, fallback = null } = {}, timestamps = false) {
+function options(language, { beam = 0, task = null, fallback = null, sampleRate = null } = {}, timestamps = false) {
   const json = { language, beam, timestamps };
+
+  // An older library does not know the key.
+  if (sampleRate !== null) json.sample_rate = sampleRate;
 
   if (task !== null) json.task = task;
 
@@ -143,20 +147,25 @@ export class Trit {
   }
 
   /**
-   * @param {Float32Array} samples 16 kHz mono, in the range -1 to 1.
+   * @param {Float32Array} samples mono, in the range -1 to 1, at 16 kHz or at `sampleRate`.
    * @param {string | null} language ISO 639-1 code, or null to let the model detect it.
-   * @param {{beam?: number, task?: string, fallback?: boolean}} settings beam: beams for Whisper,
-   *   Moonshine, and Canary (0: the model's default, 5 for Whisper and Moonshine; 1: greedy).
+   * @param {{beam?: number, task?: string, fallback?: boolean, sampleRate?: number}} settings beam: beams for
+   *   Whisper, Moonshine, and Canary (0: the model's default, 5 for Whisper and Moonshine; 1: greedy).
    *   task: "transcribe" (default), or "translate" into English (multilingual Whisper, Canary).
    *   fallback: Whisper decodes a window again at higher temperatures when its text repeats
    *   itself (default true).
+   *   sampleRate: the rate of `samples` in Hz (default 16000). Trit resamples another rate, such as
+   *   the 44100 or 48000 of a microphone. Samples at another rate with no `sampleRate` give wrong text.
    * @returns {string}
    */
   transcribe(samples, language = null, settings = {}) {
     return this.#samples(samples, options(language, settings)).text;
   }
 
-  /** @param {string} file a 16 kHz WAV file (16, 24, or 32-bit PCM, or 32-bit float); the rest as for `transcribe`. */
+  /**
+   * @param {string} file a WAV file (16, 24, or 32-bit PCM, or 32-bit float; a file that is not at 16 kHz is
+   *   resampled); the rest as for `transcribe`, without `sampleRate`.
+   */
   transcribeWav(file, language = null, settings = {}) {
     return this.#wav(file, options(language, settings)).text;
   }
@@ -170,7 +179,7 @@ export class Trit {
     return this.#samples(samples, options(language, settings, true)).segments;
   }
 
-  /** `segments` for a 16 kHz WAV file. */
+  /** `segments` for a WAV file. */
   segmentsWav(file, language = null, settings = {}) {
     return this.#wav(file, options(language, settings, true)).segments;
   }

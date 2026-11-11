@@ -4,6 +4,7 @@
 pub mod dft;
 pub mod kaldi_fbank;
 pub mod mel;
+pub mod resample;
 pub mod stft;
 pub mod table_mel;
 pub mod wav;

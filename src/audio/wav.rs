@@ -1,11 +1,15 @@
 //! WAV files: in, to the 16 kHz mono samples that `Trit::transcribe`
-//! takes; out, from the samples that `Voice::speak` gives.
+//! takes (a file at another rate is resampled); out, from the samples that
+//! `Voice::speak` gives.
 
 use std::path::Path;
 
 /// WAVE_FORMAT_EXTENSIBLE: the real format code is in the SubFormat field.
 const EXTENSIBLE: u16 = 0xFFFE;
 
+/// A WAV file as 16 kHz mono samples: 16, 24, or 32-bit PCM or 32-bit
+/// float, with its channels mixed to one. A file at another rate is
+/// resampled (`resample`).
 pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let not_wav = || format!("{} is not a WAV file", path.display());
@@ -38,13 +42,6 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
     }
     let (tag, channels, rate, bits) = format.ok_or_else(not_wav)?;
     let data = data.ok_or_else(not_wav)?;
-    if rate != crate::SAMPLE_RATE {
-        return Err(format!(
-            "{} is {rate} Hz; Trit needs 16000 Hz. Convert it: ffmpeg -i \"{}\" -ar 16000 -ac 1 out.wav",
-            path.display(),
-            path.display()
-        ));
-    }
     // 1 = PCM, 3 = IEEE float.
     let sample: fn(&[u8]) -> f32 = match (tag, bits) {
         (1, 16) => |b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0,
@@ -61,10 +58,20 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>, String> {
     };
     let width = usize::from(bits / 8);
     let channels = usize::from(channels.max(1));
-    Ok(data
+    let mono: Vec<f32> = data
         .chunks_exact(width * channels)
         .map(|frame| frame.chunks_exact(width).map(sample).sum::<f32>() / channels as f32)
-        .collect())
+        .collect();
+    if rate == crate::SAMPLE_RATE {
+        return Ok(mono);
+    }
+    super::resample::resample(&mono, rate).map_err(|e| {
+        format!(
+            "{}: {e}. Convert it: ffmpeg -i \"{}\" -ar 16000 -ac 1 out.wav",
+            path.display(),
+            path.display()
+        )
+    })
 }
 
 pub fn write_wav(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> {

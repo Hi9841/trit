@@ -12,7 +12,7 @@ const PREVIEW_CHARS: usize = 500;
 
 pub(super) const HELP: &str = "\
 usage: trit transcribe <path>... [--model <dir>] [--language <code>] [--dictionary <file>] [--task <t>] [--timestamps] [--cleanup] [--precision <p>] [--device <d>] [--beam <n>] [--format toon|json|text] [--full]
-  <path>          a 16 kHz WAV file, or a folder: every .wav file in it and its subfolders
+  <path>          a WAV file (16 kHz, or another rate: Trit resamples it), or a folder: every .wav file in it and its subfolders
   --model <dir>   speech model folder or `trit models` name: Parakeet, Canary, Whisper, Moonshine (default: TRIT_MODEL, then the places `trit doctor` lists)
   --language <code>  spoken language, ISO 639-1 (en, de, ...); default: the model detects it
   --dictionary <file>  terms to favor, one per line (names, product words)

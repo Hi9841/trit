@@ -417,7 +417,8 @@ unsafe fn options(language: *const c_char) -> Result<Options, String> {
     })
 }
 
-/// Transcribes `count` mono samples at 16 kHz, in the range -1 to 1.
+/// Transcribes `count` mono samples at 16 kHz, in the range -1 to 1. For
+/// samples at another rate, use `trit_transcribe_json` with `sample_rate`.
 /// `language` is an ISO 639-1 code ("en", "de"), or NULL to let the model
 /// detect it. Returns UTF-8 text (NULL on failure). Free with `trit_free_text`.
 ///
@@ -460,7 +461,8 @@ pub unsafe extern "C" fn trit_transcribe_with(
     })
 }
 
-/// Transcribes a 16 kHz WAV file; `language` as for `trit_transcribe`.
+/// Transcribes a WAV file (a file that is not at 16 kHz is resampled);
+/// `language` as for `trit_transcribe`.
 /// Returns UTF-8 text (NULL on failure). Free with `trit_free_text`.
 ///
 /// # Safety
@@ -483,18 +485,43 @@ pub unsafe extern "C" fn trit_transcribe_wav(
     })
 }
 
-const OPTION_KEYS: &str = "language, task, beam, fallback, timestamps";
+const OPTION_KEYS: &str = "language, task, beam, fallback, timestamps, sample_rate";
 
-/// Options from a JSON object, and whether to time segments. NULL or "" is
-/// the default; every key is optional.
+/// What the JSON options of one call ask.
+struct Request {
+    options: Options,
+    /// Fill `segments`.
+    timestamps: bool,
+    /// The rate of the caller's samples, when the caller gave it.
+    sample_rate: Option<u32>,
+}
+
+impl Request {
+    /// `samples` as the 16 kHz samples that the engine takes: resampled
+    /// when the caller gave another rate.
+    fn at_16_khz<'a>(&self, samples: &'a [f32]) -> Result<std::borrow::Cow<'a, [f32]>, String> {
+        match self.sample_rate {
+            Some(rate) if rate != trit::SAMPLE_RATE => Ok(trit::resample(samples, rate)?.into()),
+            _ => Ok(samples.into()),
+        }
+    }
+}
+
+/// The request of a JSON options object. NULL or "" is the default; every
+/// key is optional.
 ///
 /// # Safety
 /// `options` is NULL or a NUL-terminated string.
-unsafe fn json_options(options: *const c_char) -> Result<(Options, bool), String> {
+unsafe fn json_options(options: *const c_char) -> Result<Request, String> {
     let mut parsed = Options::default();
     let mut timestamps = false;
+    let mut sample_rate = None;
     let Some(object) = json_object(options, "{\"language\": \"en\"}")? else {
-        return Ok((parsed, timestamps));
+        return Ok(Request {
+            options: parsed,
+            timestamps,
+            sample_rate,
+        });
     };
     for (key, value) in &object {
         let wrong = || format!("options.{key} cannot be {value}");
@@ -519,6 +546,10 @@ unsafe fn json_options(options: *const c_char) -> Result<(Options, bool), String
             }
             "fallback" => parsed.fallback = Some(value.as_bool().ok_or_else(wrong)?),
             "timestamps" => timestamps = value.as_bool().ok_or_else(wrong)?,
+            "sample_rate" => {
+                let rate = value.as_u64().and_then(|rate| u32::try_from(rate).ok());
+                sample_rate = Some(rate.ok_or_else(wrong)?);
+            }
             _ => {
                 return Err(format!(
                     "unknown option {key}; valid options: {OPTION_KEYS}"
@@ -526,7 +557,11 @@ unsafe fn json_options(options: *const c_char) -> Result<(Options, bool), String
             }
         }
     }
-    Ok((parsed, timestamps))
+    Ok(Request {
+        options: parsed,
+        timestamps,
+        sample_rate,
+    })
 }
 
 /// `{"text": ..., "segments": [{"start", "end", "text"}]}`, the shape of one
@@ -541,13 +576,15 @@ fn json_result(engine: &Trit, samples: &[f32], options: &Options, timestamps: bo
     .to_string()
 }
 
-/// Transcribes `count` mono samples at 16 kHz with options, and returns
+/// Transcribes `count` mono samples with options, and returns
 /// JSON: `{"text": "...", "segments": [{"start": 0.0, "end": 1.8, "text": "..."}]}`.
 /// `options` is NULL or a JSON object with any of: `language` (ISO 639-1
 /// code), `task` (`"transcribe"` or `"translate"`), `beam` (as for
 /// `trit_transcribe_with`), `fallback` (Whisper temperature fallback,
-/// default true), `timestamps` (fill `segments`, default false). An unknown
-/// key or value fails. Free the result with `trit_free_text`.
+/// default true), `timestamps` (fill `segments`, default false),
+/// `sample_rate` (the rate of `samples` in Hz, default 16000; Trit
+/// resamples another rate, such as the 44100 or 48000 of a microphone).
+/// An unknown key or value fails. Free the result with `trit_free_text`.
 ///
 /// # Safety
 /// As for `trit_transcribe`; `options` is NULL or a NUL-terminated string.
@@ -560,16 +597,17 @@ pub unsafe extern "C" fn trit_transcribe_json(
 ) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         let engine = engine_arg(engine)?;
-        let (mut options, timestamps) = json_options(options)?;
-        engine.check(&options)?;
-        let samples = samples_arg(samples, count)?;
-        let running = Running::start(engine, &mut options);
-        let json = json_result(engine, samples, &options, timestamps);
+        let mut request = json_options(options)?;
+        engine.check(&request.options)?;
+        let samples = request.at_16_khz(samples_arg(samples, count)?)?;
+        let running = Running::start(engine, &mut request.options);
+        let json = json_result(engine, &samples, &request.options, request.timestamps);
         Ok(owned_text(running.finish(json)?))
     })
 }
 
-/// `trit_transcribe_json` for a 16 kHz WAV file.
+/// `trit_transcribe_json` for a WAV file. The file has its own rate, so
+/// `sample_rate` in `options` fails.
 ///
 /// # Safety
 /// `engine` is from `trit_load`; `path` is a NUL-terminated UTF-8 path;
@@ -582,11 +620,14 @@ pub unsafe extern "C" fn trit_transcribe_wav_json(
 ) -> *mut c_char {
     guard(std::ptr::null_mut(), || {
         let engine = engine_arg(engine)?;
-        let (mut options, timestamps) = json_options(options)?;
-        engine.check(&options)?;
+        let mut request = json_options(options)?;
+        if request.sample_rate.is_some() {
+            return Err("options.sample_rate is for samples; a WAV file has its own rate".into());
+        }
+        engine.check(&request.options)?;
         let samples = trit::read_wav(Path::new(text_arg(path, "path")?))?;
-        let running = Running::start(engine, &mut options);
-        let json = json_result(engine, &samples, &options, timestamps);
+        let running = Running::start(engine, &mut request.options);
+        let json = json_result(engine, &samples, &request.options, request.timestamps);
         Ok(owned_text(running.finish(json)?))
     })
 }

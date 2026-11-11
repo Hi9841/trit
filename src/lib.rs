@@ -30,6 +30,7 @@ mod tts;
 
 use std::path::Path;
 
+pub use audio::resample::resample;
 pub use audio::wav::{read_wav, write_wav};
 pub use catalog::{known, Known, CATALOG};
 pub use cleanup::{Cleaner, Context, Structure, Style, Styling, UnknownName, CLEANUP_REPO};
@@ -78,7 +79,8 @@ pub(crate) fn log(message: &str) {
         None => eprintln!("trit: {message}"),
     }
 }
-/// `transcribe` takes mono samples at this rate.
+/// `transcribe` takes mono samples at this rate; `resample` makes them
+/// from audio at another rate.
 pub const SAMPLE_RATE: u32 = 16_000;
 
 /// How to load a model. `LoadOptions::default()` is `Precision::Auto` on the
