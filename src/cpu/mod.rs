@@ -72,13 +72,23 @@ impl Spread {
 /// has its own team, so models of both kinds in one process each run on
 /// theirs. A second thread on a core shares its vector units and only adds
 /// contention, so a team has one thread per core.
-pub fn enter(spread: Spread) -> team::Entered {
+pub fn enter(spread: Spread) -> Entered {
     let slot = spread.slot();
     team::start(slot, || {
         let (threads, domain) = engine_threads(spread);
         (threads, domain, equal_domains(domain))
     });
-    team::enter(slot)
+    Entered {
+        _team: team::enter(slot),
+        _pool: buf::in_call(),
+    }
+}
+
+/// A load or a call that runs: its thread is on the team, and the buffer
+/// pool keeps the buffers of its passes.
+pub struct Entered {
+    _team: team::Entered,
+    _pool: buf::InCall,
 }
 
 /// Worker threads of a team with `spread`. `TRIT_THREADS` overrides it.

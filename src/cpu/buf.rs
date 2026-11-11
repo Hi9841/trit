@@ -10,14 +10,103 @@
 use parking_lot::Mutex;
 use std::ops::{Deref, DerefMut};
 
-/// Freed buffers, kept until the next take needs them.
-static POOL: Mutex<Vec<Vec<f32>>> = Mutex::new(Vec::new());
-/// Enough for every live buffer of one forward pass.
-const MAX_POOLED: usize = 64;
-/// Bytes the pool may hold. 16 MB against 64 MB, 60 clips: Whisper base.en
-/// and Moonshine base keep 20 to 75 MB less, at about 5 % of Whisper's
-/// speed; Parakeet Redux runs the same.
-const MAX_POOLED_BYTES: usize = 16 << 20;
+/// The buffers and the bytes that the pool may hold.
+#[derive(Clone, Copy)]
+struct Limit {
+    buffers: usize,
+    bytes: usize,
+}
+
+/// While no call runs. 64 buffers are enough for every live buffer of one
+/// forward pass. 16 MB against 64 MB, 60 clips: Whisper base.en and
+/// Moonshine base keep 20 to 75 MB less.
+const IDLE: Limit = Limit {
+    buffers: 64,
+    bytes: 16 << 20,
+};
+/// While a call runs. A pass of 1,500 frames uses buffers of 2 to 9 MB
+/// (Whisper tiny), more than the idle limit holds: each one that the pool
+/// did not keep came back as a new buffer, filled with zeros on the calling
+/// thread (5.6 % of a clip).
+const IN_CALL: Limit = Limit {
+    buffers: 256,
+    bytes: 256 << 20,
+};
+
+/// Freed buffers, kept until the next pass needs them.
+struct Pool {
+    /// The smallest capacity first: a request finds its buffer by a binary
+    /// search. A look at every buffer for each request and each drop cost
+    /// Moonshine tiny 6 % with 256 buffers in the pool.
+    free: Vec<Vec<f32>>,
+    /// The bytes of `free`.
+    bytes: usize,
+    /// Calls in progress (see `in_call`).
+    calls: usize,
+}
+
+static POOL: Mutex<Pool> = Mutex::new(Pool {
+    free: Vec::new(),
+    bytes: 0,
+    calls: 0,
+});
+
+impl Pool {
+    /// The smallest buffer that holds `len` values.
+    fn take(&mut self, len: usize) -> Option<Vec<f32>> {
+        let at = self.free.partition_point(|buffer| buffer.capacity() < len);
+        (at < self.free.len()).then(|| {
+            let buffer = self.free.remove(at);
+            self.bytes -= buffer.capacity() * 4;
+            buffer
+        })
+    }
+
+    /// Keeps `buffer` when the limit of this moment has room for it.
+    fn keep(&mut self, buffer: Vec<f32>) {
+        let limit = if self.calls == 0 { IDLE } else { IN_CALL };
+        let size = buffer.capacity() * 4;
+        if self.free.len() < limit.buffers && self.bytes + size <= limit.bytes {
+            let at = self
+                .free
+                .partition_point(|kept| kept.capacity() < buffer.capacity());
+            self.free.insert(at, buffer);
+            self.bytes += size;
+        }
+    }
+
+    /// Back under `limit`. The largest go first: the most memory back for
+    /// each buffer lost.
+    fn trim(&mut self, limit: Limit) {
+        while self.free.len() > limit.buffers || self.bytes > limit.bytes {
+            self.bytes -= self.free.pop().map_or(0, |buffer| buffer.capacity() * 4);
+        }
+    }
+}
+
+/// A call that runs: the pool keeps the buffers of its passes until it ends.
+#[derive(Debug)]
+pub struct InCall;
+
+/// From now until the value drops, the pool keeps what a pass frees. When
+/// the last call ends, the pool goes back under its idle limits.
+pub fn in_call() -> InCall {
+    POOL.lock().calls += 1;
+    InCall
+}
+
+impl Drop for InCall {
+    fn drop(&mut self) {
+        // The count changes under the pool's lock, and a buffer that drops
+        // reads it under the same lock: no buffer enters the pool with the
+        // limits of a call after this trim.
+        let mut pool = POOL.lock();
+        pool.calls -= 1;
+        if pool.calls == 0 {
+            pool.trim(IDLE);
+        }
+    }
+}
 
 /// `data` keeps every value it ever held, so reuse never fills it again;
 /// the buffer is its first `len` values.
@@ -37,16 +126,7 @@ impl Buf {
     /// `len` values left from an earlier use (zeros where there was none),
     /// for an output that is written in full before it is read.
     pub fn scratch(len: usize) -> Self {
-        let reused = {
-            let mut pool = POOL.lock();
-            let best = pool
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.capacity() >= len)
-                .min_by_key(|(_, v)| v.capacity())
-                .map(|(i, _)| i);
-            best.map(|i| pool.swap_remove(i))
-        };
+        let reused = POOL.lock().take(len);
         let mut data = reused.unwrap_or_else(|| Vec::with_capacity(len));
         if data.len() < len {
             data.resize(len, 0.0);
@@ -64,7 +144,9 @@ impl Buf {
 }
 
 pub fn clear_pool() {
-    POOL.lock().clear();
+    let mut pool = POOL.lock();
+    pool.free.clear();
+    pool.bytes = 0;
 }
 
 impl Drop for Buf {
@@ -73,11 +155,7 @@ impl Drop for Buf {
         if vec.capacity() == 0 {
             return;
         }
-        let mut pool = POOL.lock();
-        let held: usize = pool.iter().map(|v| v.capacity() * 4).sum();
-        if pool.len() < MAX_POOLED && held + vec.capacity() * 4 <= MAX_POOLED_BYTES {
-            pool.push(vec);
-        }
+        POOL.lock().keep(vec);
     }
 }
 

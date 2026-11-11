@@ -1941,6 +1941,151 @@ of all threads; "wall" is time on the calling thread.
 - Decoder steps as one task for each beam were not built: each beam would read the weights
   of every layer for itself (5 times the traffic), where a batch reads them once.
 
+### Contract for the low-level work (written 2026-11-11, 23:40; it applies from SI-029 on)
+
+The owner started the `low-level-systems-engineering` workflow. Its first step is a written
+contract. Each later entry is judged against it.
+
+- Boundary: one `transcribe` call through the C library, warm engine, one call for each clip
+  (`ab.py`). Inputs: the 200 `clean` clips for the decoder models, `clean` and `other` (400)
+  for Redux, the 62 cases for S1-mini.
+- Primary metric: the median of the per-clip ratio B / A, with the time of a round next to it.
+- Secondary metrics: CPU time of a round, peak working set, private memory after
+  `release_memory`.
+- Minimum useful change: 2 %. Keep rule: per-clip ratio at or below 0.98 with paired
+  signed-rank p < 0.01 in two runs with the sides in opposite order. A run where the round
+  medians of one side spread by more than 20 % does not count. When the computer is too busy
+  for that, a stage timer that shows the mechanism in one process can stand for one of the
+  two runs, and the entry says so.
+- Guards: no other model above 1.02 in both orders; peak working set at most 10 % above the
+  baseline; private memory after `release_memory` at most 2 % above it.
+- Correctness: 0 texts differ and equal errors (Redux: `clean` 81, `other` 172);
+  `bench/paths.py` (each `TRIT_ISA` value, 1 thread); for a change of shared state, unsafe
+  code, or a buffer's life: the invariant in the entry, and a run with several threads.
+- Environment: Ryzen 9 7950X3D, AVX-512 VNNI, Windows 11, Rust release with fat LTO, 8 threads
+  on one L3 domain (16 for Whisper). Other sessions and a game use 1 to 7 cores at times: each
+  entry gives the load that `quiet.ps1` saw. No hardware counters are in use (no elevated
+  shell for a kernel trace), so a mechanism is shown with stage timers and `kernel_bench`.
+- Stop rule: three entries in a row with no kept change close a journey.
+- Limit of this contract: the peak working set guard was written after the first SI-029
+  numbers (Moonshine tiny 228 to 249 MB) were on the screen. It is not a blind gate for SI-029.
+
+### SI-029 the pool keeps the buffers of a call that runs (SI-016 again, with a direct check)
+
+- Journey: J1 (Whisper tiny). J3 and J4 as guards, and the memory of each side.
+- Profile (P-13): `Buf::scratch` fills a new buffer of 64 KB or more with zeros 5,459 times
+  in 200 Whisper tiny clips, 843 ms of 15,162 ms of wall time (5.6 %), on the calling thread
+  while the team waits. Moonshine tiny: 124 ms of 11,033 ms (1.1 %). The pool holds 16 MB at
+  most, and one pass of 1,500 frames frees buffers of 2 to 9 MB.
+- Why again: SI-016 (2026-11-09) had the same change and showed no gain in two runs on a busy
+  computer, and its cause was not proven. P-13 now has a timer on the fill itself. The check
+  is direct: with the change that stage must go to about zero, in the same run where the
+  other stages keep their time.
+- Hypothesis (the patch of SI-016, unchanged): while a call runs (the guard of `cpu::enter`),
+  the pool keeps up to 256 buffers and 256 MB; when the last call ends it goes back under
+  64 buffers and 16 MB, the largest first. Expected: the fill stage under 50 ms; Whisper tiny
+  about 0.95; Moonshine tiny and Redux the same; the private memory after a call and the
+  peak working set the same.
+- Test: a pool buffer holds old values where a new one holds zeros, and every user of
+  `scratch` writes all values before it reads them (the rule of `Buf::scratch` today): 0
+  texts differ.
+- Did it happen (`trace29.exe`, the timers of P-13 on B29, back to back with `trace27.exe`,
+  6.7 cores of other load): the fill stage 957 ms to 153 ms over the 200 Whisper tiny clips
+  (5,459 fills to 1,045: about 5 for each clip, the first use of each large size in a call).
+- Result, B28 against two forms of the change. B29 keeps up to 256 buffers and 256 MB in a
+  call; B29b keeps 64 buffers and 256 MB. 0 texts differ and equal errors in every run.
+
+  | Model | Form | Order | Rounds | Per-clip ratio of the candidate | Paired p | Time of a round | Other load |
+  |---|---|---|---:|---:|---:|---:|---|
+  | Whisper tiny | B29 | B28 first | 4 | 0.939 | 2.1e-33 | 0.939 | 6 cores |
+  | Whisper tiny | B29 | B29 first | 3 | 0.948 | 1.3e-30 | 0.957 | 6 cores |
+  | Moonshine tiny | B29 | B28 first | 3 | 1.063 | 8.5e-12 | 1.053 | 6 cores |
+  | Redux, 400 clips | B29 | B28 first | 3 | 0.957 | 7.3e-17 | 0.970 | 6 cores |
+  | Whisper tiny | B29b | B28 first | 4 | 0.924 | 1.6e-34 | 0.931 | 1 core |
+  | Whisper tiny | B29b | B29b first | 3 | 0.932 | 6.6e-31 | 0.935 | 1 core |
+  | Moonshine tiny | B29b | B28 first | 4 | 1.006 | | 1.002 | 3 cores |
+  | Moonshine tiny | B29b | B29b first | 4 | 1.030 | 0.58 | 1.005 | 1 core |
+  | Redux, 400 clips | B29b | B28 first | 3 | 1.021 | 3.4e-09 | 1.100 | 1 core |
+  | Redux, 400 clips | B29b | B29b first | 3 | 1.038 | 1.4e-05 | 1.078 | 1 core |
+
+- Memory (`oploop/results/s1111/idle_mem.py`, a process with no numpy, 20 clips, B28 and
+  B29b): private memory after `release_memory` 218 and 221 MB (Whisper tiny), 143 and 143
+  (Moonshine tiny), 485 and 485 (Redux); peak working set 254 to 223, 186 to 184, 465 to 439
+  MB. 4 threads x 20 calls on one engine: 0 wrong texts with each build.
+- Decision: neither form passes the contract. Whisper tiny clears the keep rule with both
+  (two orders, p < 0.01, 5 to 8 %). B29 fails the guard for Moonshine tiny (1.063, one
+  order). B29b fails the guard for Redux (1.021 and 1.038, both orders). Not kept as built.
+- What the two failures have in common: each `Buf::scratch` looks at every buffer of the pool
+  for the best fit, and each drop adds up the bytes of every buffer, under one lock. With 256
+  small buffers in the pool (B29) Moonshine pays for that in each decoder step. With a byte
+  limit that no longer binds (B29b), the pool of Redux fills to its 64 buffers where the
+  16 MB limit held about 10. This is a guess from the code: no timer was on the pool itself.
+
+### SI-030 the pool: buffers in order of size, found by a binary search
+
+- Journey: J1 (Whisper tiny: the gain of SI-029), with J3 and J4 as the guards that SI-029
+  failed.
+- Hypothesis: if the pool keeps its buffers in order of capacity and its byte total as a
+  number, a request finds the smallest buffer that fits with a binary search, and a drop
+  needs no sum. Then the size of the pool costs almost nothing, and the limits of SI-029 in
+  a call (256 buffers, 256 MB) can stay. Expected: Whisper tiny about 0.93 as in SI-029;
+  Moonshine tiny and Redux between 0.98 and 1.02 in both orders. If Redux or Moonshine is
+  again above 1.02 in both orders, the guess about the scans is wrong, and the change goes
+  out.
+- Invariants: a buffer is in the pool or in one `Buf`, never in both (it moves under the
+  lock). The call count changes under the pool's lock and a drop reads it under the same
+  lock, so no buffer enters with the limits of a call after the trim at the end of the last
+  call. A pool buffer holds old values; each user of `scratch` writes before it reads (the
+  rule of today). Acceptance: 0 texts differ, 4 threads x 20 calls with 0 wrong texts, and
+  the private memory after `release_memory` within 2 %.
+- Changed code: `src/cpu/buf.rs` (`Pool`: `free` in order of capacity, `bytes`, `calls`;
+  `take`, `keep`, `trim`; `IDLE` 64 buffers and 16 MB, `IN_CALL` 256 buffers and 256 MB) and
+  `src/cpu/mod.rs` (`Entered` holds the team guard and `buf::InCall`). Build B30.
+- Did it happen (`trace30.exe` against `trace27.exe`, back to back, two pairs for Whisper):
+  fill stage of Whisper tiny 769 to 121 ms and 871 to 193 ms over 200 clips (5,459 fills to
+  1,045); Redux 391 to 222 ms (2,875 fills to 514).
+- Result, B28 against B30 (0 texts differ and equal errors in every run). "Spread" is the
+  largest spread of the round medians of one side; the contract counts a run only at 20 % or
+  less.
+
+  | Model | Order | Rounds | Per-clip ratio of B30 | Paired p | Time of a round | Spread | Counts |
+  |---|---|---:|---:|---:|---:|---:|---|
+  | Whisper tiny | B28 first | 3 | 0.947 | 4.3e-07 | 0.941 | 50 % | no |
+  | Whisper tiny | B30 first | 3 | 1.005 | 0.83 | 0.967 | 27 % | no |
+  | Whisper tiny | B28 first | 4 | 0.960 | 8.7e-10 | 0.889 | 33 % | no |
+  | Whisper tiny | B30 first | 4 | 0.929 | 1.6e-20 | 0.947 | 46 % | no |
+  | Whisper tiny | B28 first | 4 | 0.983 | 0.84 | 1.006 | 37 % | no |
+  | Whisper tiny | B30 first | 4 | 0.942 | 4.1e-31 | 0.928 | 50 % (B28: 4 %) | no |
+  | Moonshine tiny | B28 first | 4 | 1.004 | 0.21 | 1.011 | 23 % | no |
+  | Moonshine tiny | B30 first | 4 | 1.012 | 0.062 | 0.983 | 22 % | no |
+  | Redux, 400 clips | B28 first | 3 | 0.953 | 1.3e-09 | 0.956 | 35 % | no |
+  | Redux, 400 clips | B30 first | 3 | 1.073 | 3e-15 | 1.041 | 42 % | no |
+  | Redux, 200 clips | B28 first | 4 | 0.965 | 7.4e-06 | 0.928 | 32 % | no |
+  | Redux, 200 clips | B30 first | 4 | 1.002 | 0.95 | 0.997 | 4 % | yes |
+
+- Memory (`idle_mem.py`, B28 and B30): private memory after `release_memory` 217 and 217 MB
+  (Whisper tiny), 147 and 143 (Moonshine tiny), 485 and 487 (Redux); peak working set 278 to
+  217, 193 to 188, 459 to 438 MB. In the `ab.py` process the peak of Moonshine tiny is 227 to
+  247 MB (9 % more, inside the 10 % guard). 4 threads x 20 calls: 0 wrong texts.
+- Gates: fmt, clippy `-D warnings --release` (workspace, and `-p trit`), `trit skill --check`,
+  `bench/paths.py` with B30 (Moonshine tiny and Redux the same text on every path, Whisper
+  tiny with its known scalar text).
+- Decision: KEEP, as a result that the contract only partly covers. What holds: the stage
+  timer shows the mechanism in three pairs (the fill of Whisper tiny falls by 650 to 680 ms
+  in 200 clips, 3.3 ms for each clip); Whisper tiny is faster in five of six A/B runs, 4 to
+  7 % in the three with p < 0.01, in both orders; the form with a linear pool (B29b) gave
+  0.924 and 0.932 with rounds inside 4 %; Redux is level in the one run that counts;
+  Moonshine tiny is level in both orders; all memory and text guards pass. What does not
+  hold: no Whisper run of B30 has rounds inside 20 % (Whisper uses all 16 cores and another
+  session builds in bursts), so the size of the gain is "about 5 %", not a number with a
+  tight interval.
+- Not run: models larger than tiny (their buffers pass 256 MB sooner: Whisper large has
+  1,500 x 5,120 values, 30 MB, in one buffer), and the GPU build.
+- Left in the stage: about 5 fills for each Whisper clip and 2.6 for each Redux clip (222 ms
+  in 200 clips, 1.1 ms for each clip): the first use of each large size after the trim at
+  the end of the call before. A pool that keeps more between calls removes them and costs
+  idle memory: the owner's trade.
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine
