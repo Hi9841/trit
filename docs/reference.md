@@ -64,7 +64,7 @@ Every integration, in every language, follows these rules.
 | Model | A model is a Hugging Face folder with `config.json` and `model.safetensors`. Give a folder, a name from the [catalog](#models), or nothing (the default is `parakeet-redux`). |
 | Output | Plain text. An empty string means no speech. `segments` gives timed parts. |
 | Errors | Rust returns `Err(String)` with the cause and the fix. The C ABI returns NULL or -1; read `trit_last_error()`. The bindings raise `TritError` (Python, Node) or `TritException` (C#). |
-| Memory | Trit keeps a buffer pool (up to 16 MB) and scratch per thread for the next call. Call `release_memory()` when the program goes idle. With `LoadOptions::cache`, the weights are a mapped file, not private memory (see "Weight cache"). |
+| Memory | Trit keeps a buffer pool (up to 16 MB between calls, up to 64 MB while a call runs) and scratch per thread for the next call. Call `release_memory()` when the program goes idle. With `LoadOptions::cache`, the weights are a mapped file, not private memory (see "Weight cache"). |
 | Language | `en` for English apps. Without a language, multilingual Whisper detects it. A code that the model does not take fails in the CLI, the C ABI, and the bindings; in Rust, `Trit::check(&Options)` gives the same error. See [Languages](#languages). |
 
 ## Select a model

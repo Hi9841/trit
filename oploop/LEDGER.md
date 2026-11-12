@@ -2340,6 +2340,92 @@ counts: the round medians of each side are inside 5 %.
 set of the `ab.py` process: Whisper tiny 274 to 250 MB, Redux 647 to 635, Moonshine tiny 228
 to 240.
 
+### J15 long recordings through the CLI: time, CPU time, memory (`oploop/longrun.py`, new)
+
+The owner asked for a test on long files, with the CPU time and the memory. 83 recordings,
+160.8 minutes of audio, 26,503 words: `long-clean` and `long-other` (40 to 133 s) and
+`very-long` (6, 16, and 30 minutes, joined from them by `longrun.py --make`). One process for
+each run (`trit transcribe <folders> --format json`), V11 and B34 in turns, 3 runs each,
+medians; quiet computer (0.9 to 1.3 cores of other load before each model). Memory and CPU
+time come from Windows for the process that ended.
+
+| | Redux V11 | Redux B34 | Moonshine tiny V11 | B34 | Whisper tiny V11 | B34 |
+|---|---:|---:|---:|---:|---:|---:|
+| Engine time, s | 80.4 | 60.1 (0.747) | 58.9 | 37.8 (0.641) | 59.3 | 43.6 (0.735) |
+| Audio seconds for each engine second | 120 | 161 | 164 | 256 | 163 | 221 |
+| CPU time, s | 642.7 | 477.3 (0.743) | 470.9 | 300.6 (0.638) | 946.7 | 694.8 (0.734) |
+| CPU seconds for each hour of audio | 239.8 | 178.1 | 175.7 | 112.2 | 353.2 | 259.3 |
+| Cores busy on average | 7.9 | 7.9 | 7.9 | 7.8 | 15.8 | 15.7 |
+| Peak working set, MB | 848 | 979 (1.154) | 358 | 461 (1.289) | 406 | 374 (0.920) |
+| Peak private memory, MB | 1,038 | 1,204 (1.161) | 449 | 502 (1.118) | 550 | 490 (0.891) |
+| Word errors | 835 | 835 | 1,568 | 1,568 | 2,146 | 2,146 |
+| Recordings with another text | | 0 of 83 | | 0 of 83 | | 0 of 83 |
+
+- The gain on long recordings is larger than on short clips (Redux 0.75 against 0.98): a
+  long window has larger buffers (more zero fill before SI-030) and runs longer (more moves
+  before SI-033).
+- Fault found: the peak memory of Redux and Moonshine tiny is 12 to 29 % above V11, outside
+  the 10 % guard of the contract. The short clips did not show it. Whisper is lower, not
+  higher.
+- Cause: the windows of a long recording have many lengths (cuts at quiet points), so each
+  window asks for buffers of its own sizes. A request takes the smallest pool buffer that is
+  large enough, so a buffer of a shorter window is of no use to a longer one, and the pool
+  fills to its 256 MB of a call. Whisper's windows always have 1,500 frames.
+
+### SI-034 pool buffers in size steps
+
+- Journey: J15, the peak memory of Redux and Moonshine tiny; the engine time is the guard.
+- Hypothesis: a new buffer gets a capacity rounded up to a step of one eighth of its power
+  of two (at most 12.5 % more). Windows of nearly the same length then ask for the same
+  capacity, and the pool holds about one pass of buffers and not one pass for each window
+  length. Expected: peak working set of Redux and Moonshine tiny within 5 % of V11, the
+  engine time the same or lower (fewer new buffers), the same text.
+- Test: 0 of 83 recordings with another text; `ab.py` guards on the short clips.
+- Result of the steps alone (B35 against B34, 2 runs, the 83 recordings): Moonshine tiny
+  peak working set 461 to 354 MB (V11: 358), peak private 502 to 446 MB (V11: 449), engine
+  time 0.954. Redux 979 to 962 MB and 1,204 to 1,170 MB: not corrected.
+- Why Redux stays high (`peak.py`, one 30-minute recording, each build once): 840 MB (V11),
+  789 (B28), 967 (B30, the pool), 961 (B35), 845 (B35 with 64 MB in a call). The first layer
+  of a 60 s window makes one buffer of 123 MB (3,000 x 40 x 256 values), and with 256 MB in a
+  call it waits in the pool while the rest of the window runs.
+- The limit of a call, Redux on `very-long` (52 minutes, 3 runs, against V11):
+
+  | Limit in a call | Engine time | Peak working set | Peak private |
+  |---|---:|---:|---:|
+  | 64 MB | 0.943 | 1.131 | 1.079 |
+  | 128 MB | 0.907 | 1.093 | 1.101 |
+  | 256 MB | 0.953 (other load in this run) | 1.160 | 1.144 |
+
+  The time does not follow the limit; the memory does. Whisper tiny with 64 MB against 256:
+  engine time 0.994, peak private 476 and 499 MB (V11: 550).
+- Final form (B36): 64 MB in a call, steps for buffers of 16 KB to 16 MB. J15, V11 against
+  B36, 3 runs, quiet computer (0.4 to 1.5 cores of other load):
+
+  | | Redux V11 | B36 | Moonshine tiny V11 | B36 | Whisper tiny V11 | B36 |
+  |---|---:|---:|---:|---:|---:|---:|
+  | Engine time, s | 65.0 | 61.6 (0.946) | 59.8 | 38.4 (0.642) | 50.3 | 38.3 (0.761) |
+  | Audio seconds for each engine second | 148 | 157 | 161 | 251 | 192 | 252 |
+  | CPU time, s | 517.7 | 489.7 (0.946) | 478.4 | 305.8 (0.639) | 804.9 | 609.9 (0.758) |
+  | CPU seconds for each hour of audio | 193.1 | 182.7 | 178.5 | 114.1 | 300.3 | 227.6 |
+  | Cores busy on average | 7.9 | 7.9 | 7.9 | 7.8 | 15.8 | 15.7 |
+  | Peak working set, MB | 830 | 901 (1.085) | 357 | 353 (0.989) | 408 | 380 (0.933) |
+  | Peak private memory, MB | 1,031 | 1,134 (1.100) | 454 | 432 (0.951) | 552 | 496 (0.899) |
+  | Word errors | 835 | 835 | 1,568 | 1,568 | 2,146 | 2,146 |
+  | Recordings with another text | | 0 of 83 | | 0 of 83 | | 0 of 83 |
+
+- Redux in the first J15 run took 80.4 s with V11 and 60.1 s with B34 (0.747); here V11 takes
+  65.0 s. V11 moves between the domains, and how often depends on the other load of the
+  moment, so its time changes from run to run. The head does not move and took 60.1, 61.6,
+  57.5, and 58.2 s in four runs.
+- Guards, B34 against B36 on the short clips, both orders: Whisper tiny 0.990 and 1.009;
+  Redux 1.051 and 0.973 (the side that runs second is slower in both); Moonshine tiny 1.058,
+  then 0.990 and 1.000 in two runs with rounds inside 2 %. 0 texts differ (Redux 81 and 172).
+  Private memory after `release_memory` 491 MB (Redux) and 221 MB (Whisper tiny); 4 threads
+  x 20 calls with 0 wrong texts; `bench/paths.py` the same text on every path; fmt, clippy.
+- Decision: KEEP. Peak memory: Moonshine tiny and Whisper tiny below V11, Redux 8.5 % (working
+  set) and 10.0 % (private) above it, at the limit of the 10 % guard. The reference now says
+  64 MB while a call runs.
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine

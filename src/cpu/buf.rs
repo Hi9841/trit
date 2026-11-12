@@ -27,10 +27,12 @@ const IDLE: Limit = Limit {
 /// While a call runs. A pass of 1,500 frames uses buffers of 2 to 9 MB
 /// (Whisper tiny), more than the idle limit holds: each one that the pool
 /// did not keep came back as a new buffer, filled with zeros on the calling
-/// thread (5.6 % of a clip).
+/// thread (5.6 % of a clip). 64 MB and not more: on 52 minutes of Parakeet
+/// the time is the same with 64, 128, and 256 MB (0.94, 0.91, 0.95 of the
+/// time with 16 MB), and the peak private memory is 8, 10, and 14 % higher.
 const IN_CALL: Limit = Limit {
     buffers: 256,
-    bytes: 256 << 20,
+    bytes: 64 << 20,
 };
 
 /// Freed buffers, kept until the next pass needs them.
@@ -127,13 +129,32 @@ impl Buf {
     /// for an output that is written in full before it is read.
     pub fn scratch(len: usize) -> Self {
         let reused = POOL.lock().take(len);
-        let mut data = reused.unwrap_or_else(|| Vec::with_capacity(len));
+        let mut data = reused.unwrap_or_else(|| Vec::with_capacity(stepped(len)));
         if data.len() < len {
             let _span = crate::prof::span(crate::prof::Stage::BufFill);
             data.resize(len, 0.0);
         }
         Buf { data, len }
     }
+}
+
+/// `len` rounded up to a step of one eighth of its power of two: at most
+/// 12.5 % more. The windows of a long recording have many lengths, and a
+/// buffer of exactly one window's size was of no use to a longer window:
+/// the pool filled with a set of buffers for each length (peak memory of
+/// Parakeet 15 % up on 161 minutes of audio). With steps, windows of nearly
+/// the same length ask for the same capacity.
+fn stepped(len: usize) -> usize {
+    /// Below this a buffer is cheap, and a step would be most of it.
+    const SMALL: usize = 1 << 12;
+    /// From 16 MB a buffer does not stay in the pool with others of its
+    /// size, and a step of it is megabytes: its own size.
+    const LARGE: usize = 4 << 20;
+    if !(SMALL..LARGE).contains(&len) {
+        return len;
+    }
+    let step = 1usize << (len.ilog2() - 3);
+    len.next_multiple_of(step)
 }
 
 impl Buf {
