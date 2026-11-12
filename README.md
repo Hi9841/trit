@@ -12,8 +12,8 @@ It runs on Windows, Linux, macOS, and Android, on x86-64 and arm64, with
 kernels for AVX-512, AVX2, and Arm NEON (`sdot` and `smmla` on Apple M chips).
 
 [TDT](https://github.com/Hi9841/tdt), an offline dictation app for Windows,
-uses Trit for all of its speech. Trit is free for noncommercial use only
-(see [License](#license)).
+uses Trit for all of its speech. Trit is free under the AGPL-3.0; commercial
+use needs a commercial licence (see [License](#license)).
 
 **[Reference](docs/reference.md)** ·
 **[Website and benchmarks](https://hi9841.github.io/trit/)** ·
@@ -76,9 +76,10 @@ The other models, the GPU, text to speech, and the full results are in the
 
 ## License
 
-Trit is under the [PolyForm Noncommercial License 1.0.0](LICENSE). You can
-use, change, and share it for any noncommercial purpose. You cannot sell it
-or use it to make money.
+Trit is under the [GNU AGPL-3.0](LICENSE): free for personal, academic,
+and research use. To use it in a commercial product or a paid service, get
+a commercial licence ([LICENSING.md](LICENSING.md),
+[COMMERCIAL.md](COMMERCIAL.md)).
 
 Each model has its own license: Parakeet and Canary CC-BY-4.0 (Parakeet
 Unified English: the NVIDIA Open Model License), Whisper and

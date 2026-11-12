@@ -58,8 +58,9 @@ Do the steps in order. Each step ends on a check.
 6. **Verify:** run your program on the clip of step 4.
    Check: the text is the same as the CLI text, character for character.
 
-7. **License:** Trit is under PolyForm Noncommercial 1.0.0. If the program
-   is commercial, tell the user before you ship it. The model has its own
+7. **License:** Trit is under the AGPL-3.0, or a paid commercial licence
+   (LICENSING.md). If the program is commercial or closed source, tell the
+   user before you ship it. The model has its own
    license (docs/reference.md, "License").
 
 ## Change Trit

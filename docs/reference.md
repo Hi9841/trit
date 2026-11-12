@@ -10,7 +10,7 @@ or a VITS voice (Meta MMS-TTS).
 
 [TDT](https://github.com/Hi9841/tdt), an offline dictation app for Windows,
 uses Trit for all of its speech.
-Trit is free for noncommercial use only (see [License](#license)).
+Trit is free under the AGPL-3.0; commercial use needs a commercial licence (see [License](#license)).
 The website, with benchmarks and a comparison: <https://hi9841.github.io/trit/>.
 
 **Agents:** read [AGENTS.md](../AGENTS.md) first. It gives the steps to put Trit
@@ -881,9 +881,11 @@ Parakeet Redux. Other models run on the GPU and gain little; a decoder step
 
 ## License
 
-Trit is under the [PolyForm Noncommercial License 1.0.0](../LICENSE). You can
-use, change, and share it for any noncommercial purpose. You cannot sell it
-or use it to make money.
+Trit is under the [GNU AGPL-3.0](../LICENSE): free for personal, academic,
+and research use. To use it in a commercial product or a paid service, get
+a commercial licence ([LICENSING.md](../LICENSING.md),
+[COMMERCIAL.md](../COMMERCIAL.md)). The licence of each model and each
+dependency is in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
 Each model has its own license: Parakeet and Canary CC-BY-4.0, Whisper and
 Moonshine MIT, S1-mini Apache-2.0 with a naming clause, MMS-TTS
