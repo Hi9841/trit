@@ -2325,6 +2325,21 @@ comes after a move (the cores of the other domain slept), and lasts until the ne
 - Why the test of 2026-11-05 missed this: it compared batch means, at a time when the
   workers still spun after each call, and it had no test of the order of single calls.
 
+### Journeys, the start build (V11, Trit 0.11.0) against the head (B34, commit 3c61d1a), quiet computer
+
+2026-11-12, 0.1 to 0.4 cores of other load before each run, `ab.py`, V11 first. Each run
+counts: the round medians of each side are inside 5 %.
+
+| Journey | V11 | B34 | Per-clip ratio | Paired p | Time of a round | CPU time of a round |
+|---|---:|---:|---:|---:|---:|---:|
+| J3 Moonshine tiny, 3 x 200 | 27.0 ms (26.8-27.4) | 19.4 ms (19.2-20.1) | 0.694 | 1.4e-34 | 0.718 | 0.674 |
+| J1 Whisper tiny, 4 x 200 | 51.6 ms (50.3-53.1) | 46.5 ms (44.8-47.0) | 0.895 | 1.5e-34 | 0.892 | 0.847 |
+| J4 Redux, 3 x 400 | 31.2 ms (30.9-32.0) | 30.5 ms (29.9-30.6) | 0.982 | 1.3e-15 | 0.992 | 0.918 |
+
+0 texts differ in each run; errors 133, 231, and 253 (81 and 172) on both sides. Peak working
+set of the `ab.py` process: Whisper tiny 274 to 250 MB, Redux 647 to 635, Moonshine tiny 228
+to 240.
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine
