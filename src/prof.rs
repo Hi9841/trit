@@ -29,11 +29,14 @@ pub enum Stage {
     BeamClone,
     Jobs,
     Moves,
+    BusyHere,
+    BusyAway,
+    Home,
 }
 
 #[cfg(feature = "profile")]
 impl Stage {
-    const COUNT: usize = Stage::Moves as usize + 1;
+    const COUNT: usize = Stage::Home as usize + 1;
 
     const NAMES: [&'static str; Stage::COUNT] = [
         "features (mel), wall",
@@ -55,6 +58,9 @@ impl Stage {
         "beam search: copy of a state that splits, wall",
         "jobs of the team (count)",
         "moves of the team to another L3 domain (count)",
+        "last look: other load on the team's domain, percent",
+        "last look: load on the quietest other domain, percent",
+        "last look: 1 when the team is on its first domain",
     ];
 }
 
@@ -105,6 +111,11 @@ mod on {
         COUNTS[stage as usize].fetch_add(by, Ordering::Relaxed);
     }
 
+    /// Keeps `value` as the count of `stage`: a gauge, not a sum.
+    pub fn set(stage: Stage, value: u64) {
+        COUNTS[stage as usize].store(value, Ordering::Relaxed);
+    }
+
     /// The count of `stage` up to now.
     pub fn counted(stage: Stage) -> u64 {
         COUNTS[stage as usize].load(Ordering::Relaxed)
@@ -141,7 +152,7 @@ mod on {
 }
 
 #[cfg(feature = "profile")]
-pub use on::{allocated, count, counted, report, span, Span, ALLOCATED_BYTES, ALLOCATIONS};
+pub use on::{allocated, count, counted, report, set, span, Span, ALLOCATED_BYTES, ALLOCATIONS};
 
 /// Nothing: this build has no profile.
 #[cfg(not(feature = "profile"))]
@@ -163,3 +174,7 @@ pub fn span(_stage: Stage) -> Span {
 #[cfg(not(feature = "profile"))]
 #[inline(always)]
 pub fn count(_stage: Stage, _by: u64) {}
+
+#[cfg(not(feature = "profile"))]
+#[inline(always)]
+pub fn set(_stage: Stage, _value: u64) {}

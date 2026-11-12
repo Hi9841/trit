@@ -251,7 +251,9 @@ fn core_classes() -> Option<Vec<(usize, u8)>> {
 
 /// The L3 domains the team of `domain` can move to, `domain` included: those
 /// with as many cores, inside the process mask. Parakeet runs at the same
-/// speed on both CCDs of a 7950X3D, so a larger L3 is no reason to stay.
+/// speed on both CCDs of a 7950X3D. Moonshine tiny does not (17.8 ms with
+/// 96 MB of L3, 24.4 ms with 32 MB), so the team goes back to `domain` when
+/// the load that sent it away is gone (`Team::steer`).
 fn equal_domains(domain: usize) -> Vec<usize> {
     let Some((cores, l3)) = topology().filter(|_| domain != 0) else {
         return Vec::new();

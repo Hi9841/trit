@@ -2226,6 +2226,105 @@ each claim here rests on a count or on a stage timer in one process, not on wall
   `trit skill --check`; `bench/paths.py` (Redux the same text on every path, Whisper tiny
   with its known scalar text).
 
+### P-15 the cause of two levels of call time (quiet computer, 2026-11-12 07:35, 0.2 to 1 core of other load)
+
+`oploop/results/s1111/domain.py B32.dll 3`: Redux, one 5.7 s clip, 60 calls with no pause and
+15 after each idle time, 3 processes for each case. The process is free (the team can move
+between the two L3 domains), or its affinity mask holds one domain (the team cannot move).
+
+| Case | p10 | p50 | p90 | max (no pause) |
+|---|---:|---:|---:|---:|
+| Free | 30.9 | 33.0 | 37.8 | 42.7 |
+| First domain only | 30.5 | 32.4 | 36.8 | 46.5 |
+| Second domain only | 29.4 | 34.6 | 54.4 | 63.9 |
+
+The pooled numbers hide the pattern, which is in the order of the calls of one process:
+
+- Free: `31 31 31 32 31 31 | 39 39 38 38 38 39 | 32 31 32 31 32 32 32 | 40 39 39 39 | 33 33 35
+  31 31 34 32 31 32 | 43 39 39 39 | 33 ...`. Two levels, 31 to 32 ms and 38 to 39 ms, in
+  blocks of 4 to 9 calls: about one change for each 200 to 250 ms, the window of `steer`.
+- One domain: `34 34 34 34 34 34 35 34 34 33 34 ...` for all 60 calls (33 to 35 ms).
+
+So on a quiet computer the moves of the team make about 4 of each 10 calls 25 % slower. P-14
+counted the moves (16 in 80 calls). The cause is in `Team::steer` (`src/cpu/team.rs`): the
+busy time of a processor holds the team's own work, so the team's domain always looks half
+busy next to an idle one, and the gap of 0.25 is passed after each window. The slow block
+comes after a move (the cores of the other domain slept), and lasts until the next move.
+
+### SI-033 the team does not move away from its own work
+
+- Journey: J9 (one clip many times: the spread) and J10. J4 as the guard for the mean.
+- Hypothesis: `steer` takes the CPU time of this process in the window off the busy time of
+  the team's domain before it compares the domains. On a quiet computer the gap is then
+  near zero and the team stays; a load of other programs on its domain still gives a gap,
+  and the team still moves. Expected: the order of calls of a free process is flat like the
+  one-domain case; p90 / p10 of 60 calls from about 1.22 to about 1.08; moves on a quiet
+  computer 0; with 8 busy threads of another process on the team's domain, the team moves in
+  its first second as today.
+- History: the change of 2026-11-05 did this with `GetProcessTimes`, gave 0 moves, and was
+  rejected because a batch of 200 clips took 0.9 % more. That test took the mean of a batch.
+  The fault is in single calls, and P-15 is the test that shows it.
+- Risk: the process time holds host threads that are not on the team's domain (a UI thread
+  that works hard). The team then sees its domain as quieter than it is and can stay where
+  it would move today. It never makes a move more likely.
+- Test: the same tasks: 0 texts differ. `domain.py` free against one domain; the profile
+  build counts the moves, quiet and with a load on the domain.
+- First form (B33: the process's own time out of the count). Quiet computer, in turns:
+  - `moves.py B32 B33`, 80 calls with no pause, 3 processes each: p90 / p10 of each process
+    1.23, 1.19, 1.23 before and 1.03, 1.04, 1.04 after; max 36.9 to 38.6 ms before, 32.6 to
+    36.5 after. The order of calls of B33 is flat at 30 to 32 ms. The median goes from 30.5 to
+    31.1 ms: the fast phase of B32 was 29 ms.
+  - `foreign.py` with the profile builds, 200 calls: no other load: 32 moves before, 0 after
+    (6.09 to 5.34 ms for each second of audio). 8 busy threads of another process on the
+    first domain: 1 move in call 2 with each build.
+  - `ab.py`, Redux, 400 clips, 3 rounds, both orders, rounds inside 4 %: per-clip 0.904
+    (p = 2.5e-48) and 0.891 (p = 7.4e-56); time of a round 0.934 and 0.915; CPU time 0.930
+    and 0.915. 0 of 400 texts differ, errors 81 and 172.
+- What B33 showed next (`levels.py`, 6 processes for each case, 50 calls): Moonshine tiny
+  takes 17.7 to 17.9 ms on the first domain (96 MB of L3) and 24.3 to 24.6 ms on the second
+  (32 MB): 37 % more. Redux takes 30.4 to 30.9 and 29.4 to 30.2 ms. So the two domains are
+  not equal for a model that fits one cache and not the other, and a team that left for
+  another program's load and stays away keeps a small model 37 % slower. In the Moonshine
+  A/B of B33 some processes ran at 21 to 24 ms and some at 29 to 31 ms for this reason.
+- Second form (B34, the candidate): a team that is not on its first domain goes back when
+  that domain is at most 5 points busier than the one it is on (`RETURN_AT_BUSY_GAP`).
+  The profile build now shows what `steer` sees (the load on each domain and where the team
+  is). A run with 8 busy threads on the first domain for 3 s: the team leaves in call 2
+  (load 50 %), stays while the load is there, and came back in call 134, after another
+  session's 11 to 20 % on that domain went away.
+- Result of B34, quiet computer (0.1 to 0.7 cores of other load before each run):
+
+  | Model | Order | Per-clip ratio of B34 | Paired p | Time of a round | CPU time | Spread of rounds |
+  |---|---|---:|---:|---:|---:|---:|
+  | Moonshine tiny | B32 first | 0.889 | 7.8e-17 | 0.855 | 0.849 | 5 % |
+  | Moonshine tiny | B34 first | 0.909 | 5.3e-14 | 0.869 | 0.864 | 9 % |
+  | Redux, 400 clips | B32 first | 0.964 | 2.2e-20 | 0.969 | 0.972 | 6 % |
+  | Redux, 400 clips | B34 first | 1.011 | 0.012 | 1.018 | 1.012 | 5 % |
+  | Whisper tiny (guard: its team has no domain) | B32 first | 1.008 | 0.47 | | | |
+
+  `moves.py B32 B34`: p90 / p10 of each process 1.18, 1.12, 1.19 before and 1.10, 1.05, 1.04
+  after; p90 34.7, 32.6, 34.9 ms before and 33.1, 31.6, 31.2 ms after.
+- Decision: KEEP. Moonshine tiny clears the keep rule (two orders, p < 0.01, 9 to 11 %,
+  rounds inside 10 %). Redux: 0 moves is certain; its batch gain is 10 % in the pair where
+  the old build moved most and 0 to 4 % in the second pair, because the old build moves
+  less when another session loads the second domain a little. The call times of one
+  process are steadier with each form.
+- Gates: 0 texts differ in each run (Redux 81 and 172, Moonshine tiny 133, Whisper tiny
+  231). fmt; clippy `-D warnings --release` for the workspace and for
+  `-p trit --features profile`; `trit skill --check`; `bench/paths.py` with B34 (Moonshine
+  tiny and Redux: the same text on every path); 4 threads x 20 calls with 0 wrong texts;
+  private memory after `release_memory` 488 MB (Redux) and 143 MB (Moonshine tiny), as before.
+- Limits: Windows only (`cpu_times` has no source on Linux and macOS, so a team there never
+  moved and does not now). One CPU (7950X3D: two domains of 8 cores, 96 and 32 MB). A host
+  that burns CPU on its own threads makes the team's domain look quieter than it is.
+- Left open: with 1 to 3 busy threads of another program on the first domain (6 to 19 %),
+  the team stays (below the 25 points to leave) and shares cores with them; and it returns
+  only when the first domain is nearly idle. The right limits depend on the model: Redux
+  loses nothing on the second domain, Moonshine tiny loses 37 %. A model that says if its
+  weights fit the smaller cache could choose; not built.
+- Why the test of 2026-11-05 missed this: it compared batch means, at a time when the
+  workers still spun after each call, and it had no test of the order of single calls.
+
 ### Finding: the error counts move with the version of `whisper-normalizer`
 
 - Each model gave 4 to 5 errors fewer on `clean` than the ledger: Redux 77 for 81, Moonshine

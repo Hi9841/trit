@@ -38,6 +38,10 @@ const MAX_LOAD_WINDOW: Duration = Duration::from_secs(30);
 /// fraction of all the domain's processors. One hardware thread on each core
 /// is 0.5, and a move costs the warm caches, so noise must not start one.
 const MOVE_AT_BUSY_GAP: f64 = 0.25;
+/// A team that left its first domain goes back when that domain is at most
+/// this much busier than the one it is on. Far from `MOVE_AT_BUSY_GAP`, so
+/// the two rules cannot take turns.
+const RETURN_AT_BUSY_GAP: f64 = 0.05;
 /// A team thread takes much less than this to start a task, even under load.
 /// A longer wait means that the workers do not exist: a forked child keeps
 /// only the thread that called `fork`.
@@ -81,10 +85,14 @@ pub struct Team {
     threads: Vec<JoinHandle<()>>,
     /// Affinity mask of the team's L3 domain, 0 when the team is not pinned.
     domain: AtomicUsize,
+    /// The domain the team started on: the one with the largest L3. A small
+    /// model lives in that cache: Moonshine tiny takes 17.8 ms there and
+    /// 24.4 ms on the 32 MB domain of a 7950X3D.
+    home: usize,
     /// Domains of the same size that the team can move to, its own included.
     domains: Vec<usize>,
-    /// When and what the last look at the processors saw.
-    load: Mutex<Option<(Instant, Vec<CpuTimes>)>>,
+    /// The last look at the processors.
+    load: Mutex<Option<Look>>,
     /// One caller at a time; a nested call from inside a task runs inline.
     submit: Mutex<()>,
 }
@@ -135,6 +143,7 @@ impl Team {
             workers: handles.len(),
             threads: handles,
             domain: AtomicUsize::new(domain),
+            home: domain,
             domains,
             load: Mutex::new(None),
             submit: Mutex::new(()),
@@ -151,23 +160,49 @@ impl Team {
         let Some(mut load) = self.load.try_lock() else {
             return;
         };
-        let Some(times) = cpu_times() else {
+        let Some(processors) = cpu_times() else {
             return;
         };
         let now = Instant::now();
-        let window = load.as_ref().map(|(at, _)| now.duration_since(*at));
+        let window = load.as_ref().map(|look| now.duration_since(look.at));
         if window.is_some_and(|window| window < MIN_LOAD_WINDOW) {
             return;
         }
-        let before = load.replace((now, times));
-        let (Some((_, before)), Some((_, times))) = (before, load.as_ref()) else {
+        let before = load.replace(Look {
+            at: now,
+            processors,
+            own: process_time(),
+        });
+        let (Some(before), Some(after)) = (before, load.as_ref()) else {
             return;
         };
         if window.is_some_and(|window| window > MAX_LOAD_WINDOW) {
             return;
         }
         let current = self.domain.load(Ordering::Relaxed);
-        let busy = |domain: usize| busy_fraction(&before, times, domain);
+        // The team's own work is on its domain and is no reason to leave it.
+        // With it in the count, the domain of a team that works looked half
+        // busy next to an idle one, the team moved after each window, and
+        // the calls after a move were 25 % slower (cores that slept).
+        let own = after.own - before.own;
+        let busy = |domain: usize| {
+            let own = if domain == current { own } else { 0 };
+            busy_fraction(&before.processors, &after.processors, domain, own)
+        };
+        {
+            use crate::prof::{set, Stage};
+            let away = self.domains.iter().filter(|domain| **domain != current);
+            let quietest = away.map(|domain| busy(*domain)).fold(1.0, f64::min);
+            set(Stage::BusyHere, (busy(current) * 100.0) as u64);
+            set(Stage::BusyAway, (quietest * 100.0) as u64);
+            set(Stage::Home, u64::from(current == self.home));
+        }
+        // Back to the first domain when the load that sent the team away
+        // is gone: without this a team that moved once stayed away.
+        if current != self.home && busy(self.home) - busy(current) <= RETURN_AT_BUSY_GAP {
+            self.move_to(self.home);
+            return;
+        }
         let quietest = self
             .domains
             .iter()
@@ -393,10 +428,20 @@ struct CpuTimes {
     total: i64,
 }
 
+/// What one look at the processors saw.
+struct Look {
+    at: Instant,
+    /// One entry per processor, in processor order.
+    processors: Vec<CpuTimes>,
+    /// The CPU time of this process up to the look, in the system's ticks.
+    own: i64,
+}
+
 /// The fraction of the processors of `domain` that were busy between the
-/// two looks. Each list holds one entry per processor, in processor order.
-fn busy_fraction(before: &[CpuTimes], after: &[CpuTimes], domain: usize) -> f64 {
-    let (mut busy, mut total) = (0, 0);
+/// two looks, without `own` ticks of them (the work of this process). Each
+/// list holds one entry per processor, in processor order.
+fn busy_fraction(before: &[CpuTimes], after: &[CpuTimes], domain: usize, own: i64) -> f64 {
+    let (mut busy, mut total) = (-own, 0);
     for (cpu, (first, last)) in before.iter().zip(after).enumerate() {
         if cpu < usize::BITS as usize && domain >> cpu & 1 == 1 {
             busy += last.busy - first.busy;
@@ -404,10 +449,42 @@ fn busy_fraction(before: &[CpuTimes], after: &[CpuTimes], domain: usize) -> f64 
         }
     }
     if total > 0 {
-        busy as f64 / total as f64
+        busy.max(0) as f64 / total as f64
     } else {
         0.0
     }
+}
+
+/// The CPU time of this process, all threads, in the ticks of `cpu_times`
+/// (100 ns); 0 when the system does not say.
+#[cfg(windows)]
+fn process_time() -> i64 {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let ticks =
+        |time: FILETIME| (i64::from(time.dwHighDateTime) << 32) | i64::from(time.dwLowDateTime);
+    let (mut created, mut ended) = (FILETIME::default(), FILETIME::default());
+    let (mut kernel, mut user) = (FILETIME::default(), FILETIME::default());
+    // SAFETY: the pseudo handle names this process, and the four pointers
+    // name locals that live through the call.
+    let known = unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut ended,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    match known {
+        Ok(()) => ticks(kernel) + ticks(user),
+        Err(_) => 0,
+    }
+}
+
+#[cfg(not(windows))]
+fn process_time() -> i64 {
+    0
 }
 
 /// The time of each processor of this processor group, or `None` when the

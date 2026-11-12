@@ -235,13 +235,16 @@ mod profile {
         pub fn line(&self, samples: usize, started: std::time::Instant) {
             let after = Self::now();
             eprintln!(
-                "call {:.2} s {:.2} ms allocations {} bytes {} moves {} jobs {}",
+                "call {:.2} s {:.2} ms allocations {} bytes {} moves {} jobs {} here {} away {} home {}",
                 samples as f64 / f64::from(trit::SAMPLE_RATE),
                 started.elapsed().as_secs_f64() * 1000.0,
                 after.0 - self.0,
                 after.1 - self.1,
                 after.2 - self.2,
-                after.3 - self.3
+                after.3 - self.3,
+                counted(Stage::BusyHere),
+                counted(Stage::BusyAway),
+                counted(Stage::Home)
             );
         }
     }
