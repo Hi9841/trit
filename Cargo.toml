@@ -35,11 +35,10 @@ pollster = { version = "0.4", optional = true }
 bytemuck = { version = "1", optional = true, features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
-# Exactly 0.62.0. wgpu-hal wants ^0.62 (crates.io serves 0.62.2) and
-# gpu-allocator 0.28 accepts <=0.62, which Cargo reads as <=0.62.0.
-# Those two ranges meet only at 0.62.0. Any other patch splits the
-# ID3D12 types and the DX12 backend does not compile.
-windows = { version = "=0.62.0", features = [
+# Any 0.62: wgpu-hal wants ^0.62 and gpu-allocator 0.28 accepts
+# ">=0.53, <=0.62", which Cargo reads as below 0.63, so one 0.62 patch
+# serves all three. No exact pin: it would bind every host too.
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
