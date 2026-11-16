@@ -2697,3 +2697,64 @@ for a clip.
   of that path, so with the error counts).
 - Clippy of Rust 1.100: `fgemm.rs:48` and `audio/mel.rs:202` fail `-D warnings` in the base
   commit. CI uses the stable toolchain, so its lint step fails at the next push.
+
+## Session 2026-11-16, part 2 (a quiet computer: the gap table again, and the passes after a product)
+
+### P-17 gap table of Whisper tiny on a quiet computer (`prof39.exe`, 0.2 cores of other load)
+
+`oploop/results/s1116/threads-16-1.txt`: 200 `clean` clips, 9,898 ms; the peak in the same
+process: 5.01 GHz, 0.95 `vpdpbusd` and 0.94 `vfmadd` for each cycle and core.
+
+| Line | Time | Share of the run | Of its floor |
+|---|---:|---:|---:|
+| Attention with a head-major copy, wall | 2,988 ms | 30.2 % | |
+| f32 broadcast 1500 x 64 and 64 x 1500, 125 rows (encoder), thread time | 20,535 ms | | 86 and 93 % |
+| f32 broadcast, 5 rows (cross-attention of a step): scores and values, thread time | 1,522 and 2,003 ms | | 53 and 40 % |
+| int8, up to 2,048 rows (encoder), wall | 1,419 ms | 14.3 % | 29 to 44 % |
+| f16 51865 x 384, 5 rows (token table), wall | 1,145 ms | 11.6 % | 38 % |
+| Beam search: score job, wall | 707 ms | 7.1 % | |
+| int8, 5 rows (decoder), wall | 581 ms | 5.9 % | 5 to 10 % |
+
+- After SI-036 the scores of a step cost less than its values (1,522 against 2,003 ms).
+- The token table takes 216 us for each step here (the 327 to 400 us of P-16 came from the
+  busy computer). `kernel_bench f16 all|one 51865 384 5`, 3 pairs in turns: 0.168 to 0.185 ms
+  with 16 threads, 0.224 to 0.273 ms with the 8 threads of the 96 MB domain.
+
+### Rejected with a bound test: the token table on the 8 threads of the large L3 only
+
+- The open idea of 2026-11-11: the table (38 MB) does not fit the 32 MB L3 of the second
+  domain, so the 8 threads there read it from memory; the 8 threads of the 96 MB domain
+  alone can be faster.
+- Bound test (no build): the profile build with `TRIT_THREADS=8` against 16 threads, in
+  turns, quiet: the table product takes 1,145 ms with 16 threads and 1,388 ms with 8 (216
+  and 262 us for each step); the decoder steps take 3,619 and 3,583 ms; the run takes 9,898
+  and 11,289 ms. So 8 threads do not make the table faster, and the encoder loses.
+- Decision: NOT BUILT. This also answers the open item "Whisper tiny with 8 threads against
+  16": 16 threads are right for Whisper tiny on this CPU (0.877 of the time of 8).
+
+### Not clear, not built: attention blocks of fewer queries
+
+- Guess: a block of 128 queries gives the 16-thread team 72 tasks for a Whisper encoder
+  layer (4.5 for each thread), so the last round of tasks leaves threads idle.
+- Probe (`TRIT_ATTENTION_ROWS` in a probe build, `kernel_bench attention all 1500 1500 384 6
+  4`, 3 rounds in turns, quiet, the same hash): median for each layer 2,377, 2,318, 2,154 us
+  at 128 queries; 2,134, 2,043, 2,130 us at 64; 2,192, 2,160, 2,247 us at 48; 2,024, 2,098,
+  2,224 us at 32; 2,211, 2,181, 2,110 us at 24. No order that repeats; at most 8 % of the
+  encoder attention, which is under 2 % of a clip. The probe is not in the repository.
+
+### P-18 the passes after a product (`prof40.exe`: new stages `Bias`, `Gelu`, `Norm`, `Add`; quiet)
+
+| Stage, wall | Whisper tiny (9,766 ms) | Moonshine tiny (5,317 ms) | Redux (8,816 ms) |
+|---|---:|---:|---:|
+| Bias and ReLU pass after a product | 674 ms (6.9 %) | 79 ms (1.5 %) | 13 ms |
+| GELU pass | 299 ms (3.1 %) | 58 ms (1.1 %) | |
+| Layer norm pass | 307 ms (3.1 %) | 102 ms (1.9 %) | 24 ms |
+| Residual add pass | 173 ms (1.8 %) | 39 ms (0.7 %) | |
+
+- A Whisper encoder layer has 1,500 rows, so its buffers are 2.3 to 9.2 MB (1,500 x 384 to
+  1,500 x 1,536 values). The product writes a buffer, a second pass reads and writes it to
+  add the bias, a third applies GELU, and the quantizer of the next product reads it again.
+  Each pass moves the buffer through memory: about 0.16 ms for a bias pass, as much as the
+  multiply-adds of the product at the peak (0.18 ms).
+- These passes are not in the product lines of P-17. They explain a part of the int8
+  products at 29 to 44 % of their floor: the quantizer reads a buffer that left the caches.

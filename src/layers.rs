@@ -50,6 +50,7 @@ impl Norm {
 
     pub fn apply(&self, x: &[f32], d: usize) -> Buf {
         debug_assert_eq!(d, self.weight.len());
+        let _span = crate::prof::span(crate::prof::Stage::Norm);
         let mut out = Buf::scratch(x.len());
         team::chunks_mut(&mut out, d, |index, o| {
             normalize_row(
@@ -174,6 +175,7 @@ impl Gelu {
 
     pub fn apply(self, values: &mut [f32], d: usize) {
         const C: f32 = 0.797_884_6; // sqrt(2 / pi)
+        let _span = crate::prof::span(crate::prof::Stage::Gelu);
         team::chunks_mut(values, d, |_, row| match self {
             Self::Exact => activation::gelu(row),
             Self::Tanh => {
@@ -213,6 +215,7 @@ pub fn folded_batch_norm(
 }
 
 pub fn add_into(x: &mut [f32], y: &[f32]) {
+    let _span = crate::prof::span(crate::prof::Stage::Add);
     team::chunks_mut(x, 4096, |chunk, xs| {
         for (a, b) in xs.iter_mut().zip(&y[chunk * 4096..]) {
             *a += b;

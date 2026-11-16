@@ -505,6 +505,7 @@ impl Dense {
         if self.bias.is_none() && !relu {
             return out;
         }
+        let _span = crate::prof::span(crate::prof::Stage::Bias);
         team::chunks_mut(&mut out, EPILOGUE_ROWS * n, |_, block| {
             for row in block.chunks_exact_mut(n) {
                 if let Some(bias) = &self.bias {
