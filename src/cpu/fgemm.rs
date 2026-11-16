@@ -663,6 +663,40 @@ pub fn matmul_nn_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &
     }
 }
 
+/// Columns of one strip of `matmul_nn_strips_into`.
+pub const NN_STRIP: usize = 32;
+
+/// True when this CPU runs `matmul_nn_strips_into` (the AVX-512 level of the
+/// first kernel set): a caller then keeps its weights in strips.
+pub fn nn_strips() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    let wide = level() == Level::Avx512;
+    #[cfg(not(target_arch = "x86_64"))]
+    let wide = false;
+    wide && !super::v2::float_enabled()
+}
+
+/// `matmul_nn_into` for weights in strips of `NN_STRIP` columns: strip `s`
+/// holds columns `s * 32..` of the `k` weight rows, one row after the other
+/// (`[strip][k][32]`; the last strip can have fewer columns, and its other
+/// places are not read). A tile then reads one run of bytes. With `k x n`
+/// weights a tile reads `k` runs that are `n` values apart, and keys that
+/// are in no cache came 1.5 times slower that way: the cross-attention of a
+/// Whisper decoder step, after the token table went through the caches.
+/// Each value is the one `matmul_nn_into` gives. Only when `nn_strips()`.
+pub fn matmul_nn_strips_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &mut [f32]) {
+    let _product = crate::prof::product(crate::prof::Product::F32Broadcast, n, k, m);
+    assert!(nn_strips(), "this CPU has no kernel for weights in strips");
+    assert!(x.len() >= m * k && w.len() >= n.div_ceil(NN_STRIP) * k * NN_STRIP);
+    assert!(out.len() >= m * n);
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: the asserts keep every access inside the three buffers, and
+    // `nn_strips` is true only on the AVX-512 level.
+    unsafe {
+        nn_avx512::strips(x.as_ptr(), m, k, w.as_ptr(), n, out.as_mut_ptr());
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 mod nn_avx512 {
     use std::arch::x86_64::*;
@@ -691,62 +725,103 @@ mod nn_avx512 {
         cols: std::ops::Range<usize>,
         out: *mut f32,
     ) {
+        let (x, w) = (x.as_ptr(), w.as_ptr().add(cols.start));
         let mut i = rows.start;
         while i < rows.end {
             let r = (rows.end - i).min(6);
-            let mut j = cols.start;
-            while j < cols.end {
-                // Strips of 32 columns in two registers. The columns that
-                // remain take one register (up to 16), half of one (up to
-                // 8), or the two in turn (17 to 24): a multiply-add on a
-                // masked register costs as much as on a full one, and a
-                // head of 36 values (Moonshine) ran its last 4 columns as 32.
-                let c = match cols.end - j {
-                    left @ (1..=16 | 25..=32) => left,
-                    17..=24 => 16,
-                    _ => 32,
-                };
-                match c {
-                    17.. => by_rows!(pair, r, x, k, w, n, i, j, c, out),
-                    9..=16 => by_rows!(single, r, x, k, w, n, i, j, c, out),
-                    _ => by_rows!(half, r, x, k, w, n, i, j, c, out),
-                }
-                j += c;
+            let o = out.add(i * n + cols.start);
+            columns(r, x.add(i * k), k, w, n, cols.len(), o, n);
+            i += r;
+        }
+    }
+
+    /// The product for weights in strips of 32 columns (`[strip][k][32]`).
+    #[target_feature(enable = "avx512f,avx512vl,fma")]
+    pub unsafe fn strips(
+        x: *const f32,
+        m: usize,
+        k: usize,
+        w: *const f32,
+        n: usize,
+        out: *mut f32,
+    ) {
+        let mut i = 0;
+        while i < m {
+            let r = (m - i).min(6);
+            let mut j = 0;
+            while j < n {
+                // Strip `j / 32` starts at `j / 32 * k * 32`, which is `j * k`.
+                let (w, o) = (w.add(j * k), out.add(i * n + j));
+                columns(r, x.add(i * k), k, w, 32, (n - j).min(32), o, n);
+                j += 32;
             }
             i += r;
         }
     }
 
-    /// R rows by 17 to 32 columns (`c`), masked at the right edge.
-    #[target_feature(enable = "avx512f")]
-    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
-    unsafe fn pair<const R: usize>(
-        x: &[f32],
+    /// `r` rows (at most 6) by `c` columns. `w` has `k` rows that are
+    /// `stride` values apart; the rows of `out` are `n` apart.
+    #[target_feature(enable = "avx512f,avx512vl,fma")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn columns(
+        r: usize,
+        x: *const f32,
         k: usize,
-        w: &[f32],
-        n: usize,
-        i: usize,
-        j: usize,
+        w: *const f32,
+        stride: usize,
         c: usize,
         out: *mut f32,
+        n: usize,
+    ) {
+        let mut j = 0;
+        while j < c {
+            // Strips of 32 columns in two registers. The columns that
+            // remain take one register (up to 16), half of one (up to
+            // 8), or the two in turn (17 to 24): a multiply-add on a
+            // masked register costs as much as on a full one, and a
+            // head of 36 values (Moonshine) ran its last 4 columns as 32.
+            let part = match c - j {
+                left @ (1..=16 | 25..=32) => left,
+                17..=24 => 16,
+                _ => 32,
+            };
+            let (w, o) = (w.add(j), out.add(j));
+            match part {
+                17.. => by_rows!(pair, r, x, k, w, stride, part, o, n),
+                9..=16 => by_rows!(single, r, x, k, w, stride, part, o, n),
+                _ => by_rows!(half, r, x, k, w, stride, part, o, n),
+            }
+            j += part;
+        }
+    }
+
+    /// R rows by 17 to 32 columns (`c`), masked at the right edge.
+    #[target_feature(enable = "avx512f")]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn pair<const R: usize>(
+        x: *const f32,
+        k: usize,
+        w: *const f32,
+        stride: usize,
+        c: usize,
+        out: *mut f32,
+        n: usize,
     ) {
         let mask_hi: __mmask16 = ((1u32 << (c - 16)) - 1) as u16;
         let mut lo = [_mm512_setzero_ps(); R];
         let mut hi = [_mm512_setzero_ps(); R];
-        let wp = w.as_ptr().add(j);
-        let xp = x.as_ptr().add(i * k);
         for e in 0..k {
-            let row = wp.add(e * n);
+            let row = w.add(e * stride);
             let b0 = _mm512_loadu_ps(row);
             let b1 = _mm512_maskz_loadu_ps(mask_hi, row.add(16));
             for r in 0..R {
-                let a = _mm512_set1_ps(*xp.add(r * k + e));
+                let a = _mm512_set1_ps(*x.add(r * k + e));
                 lo[r] = _mm512_fmadd_ps(a, b0, lo[r]);
                 hi[r] = _mm512_fmadd_ps(a, b1, hi[r]);
             }
         }
         for r in 0..R {
-            let o = out.add((i + r) * n + j);
+            let o = out.add(r * n);
             _mm512_storeu_ps(o, lo[r]);
             _mm512_mask_storeu_ps(o.add(16), mask_hi, hi[r]);
         }
@@ -757,29 +832,26 @@ mod nn_avx512 {
     macro_rules! narrow {
         ($name:ident, $mask:ty, $zero:ident, $load:ident, $set1:ident, $fmadd:ident, $store:ident) => {
             #[target_feature(enable = "avx512f,avx512vl,fma")]
-            #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+            #[allow(clippy::needless_range_loop)]
             unsafe fn $name<const R: usize>(
-                x: &[f32],
+                x: *const f32,
                 k: usize,
-                w: &[f32],
-                n: usize,
-                i: usize,
-                j: usize,
+                w: *const f32,
+                stride: usize,
                 c: usize,
                 out: *mut f32,
+                n: usize,
             ) {
                 let mask = ((1u32 << c) - 1) as $mask;
                 let mut acc = [$zero(); R];
-                let wp = w.as_ptr().add(j);
-                let xp = x.as_ptr().add(i * k);
                 for e in 0..k {
-                    let b = $load(mask, wp.add(e * n));
+                    let b = $load(mask, w.add(e * stride));
                     for r in 0..R {
-                        acc[r] = $fmadd($set1(*xp.add(r * k + e)), b, acc[r]);
+                        acc[r] = $fmadd($set1(*x.add(r * k + e)), b, acc[r]);
                     }
                 }
                 for r in 0..R {
-                    $store(out.add((i + r) * n + j), mask, acc[r]);
+                    $store(out.add(r * n), mask, acc[r]);
                 }
             }
         };

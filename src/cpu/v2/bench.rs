@@ -257,7 +257,8 @@ fn numbers(args: &[String], from: usize) -> Vec<usize> {
 /// products of a core), `ternary|int8|f32|f16 <one|all> <n> <k> <m>...` (the
 /// first set alone), `ternary2|int82|q8_02|f322|f162|nn2 <one|all> <n> <k>
 /// <m>...` (the first set against the second, in turns), or `attention
-/// <one|all> <tq> <tk> <d> <heads> [layers]` (the attention of `layers.rs`). `one` is the team
+/// <one|all> <tq> <tk> <d> <heads> [layers] [cold]` (the attention of
+/// `layers.rs`; `cold` empties the caches before each timed round). `one` is the team
 /// of one L3 domain, `all` the team of all cores. Run it with `TRIT_KERNELS`
 /// not set, so that the first set is the first set.
 pub fn run(args: &[String]) -> Vec<String> {
@@ -444,13 +445,14 @@ pub fn run(args: &[String]) -> Vec<String> {
             }
         }
         "attention" => {
-            // `attention <one|all> <tq> <tk> <d> <heads> [layers]`: the
-            // attention of `layers` layers in turn, each with its own keys
-            // and values, as an encoder (many queries) or a decoder step
-            // (one query for each beam) runs it.
+            // `attention <one|all> <tq> <tk> <d> <heads> [layers] [cold]`:
+            // the attention of `layers` layers in turn, each with its own
+            // keys and values, as an encoder (many queries) or a decoder
+            // step (one query for each beam) runs it.
             let shape = numbers(args, 2);
             let (tq, tk, d, heads) = (shape[0], shape[1], shape[2], shape[3]);
             let layers = shape.get(4).copied().unwrap_or(1);
+            let cold = args.iter().any(|a| a == "cold");
             let _team = enter(spread);
             let sources: Vec<(Vec<f32>, Vec<f32>)> = (0..layers)
                 .map(|_| (rng.activations(tk, d), rng.activations(tk, d)))
@@ -466,11 +468,28 @@ pub fn run(args: &[String]) -> Vec<String> {
                 (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3)
             });
             let rounds = (2_000_000_000 / (tq * tk * d * layers).max(1)).clamp(15, 4000);
-            let (least, median) = time_ms(rounds, || {
-                for kv in &kv {
-                    std::hint::black_box(attend(kv));
-                }
-            });
+            // With `cold`, every thread first reads 40 MB that the attention
+            // does not use, as the token table of a decoder step does: the
+            // keys and values then are in no cache. Only the attention is timed.
+            let filler = vec![1.0f32; if cold { 10 << 20 } else { 0 }];
+            let sink = std::sync::atomic::AtomicU64::new(0);
+            let mut times: Vec<f64> = (0..rounds + 2)
+                .map(|_| {
+                    team::for_each(16, |task| {
+                        let part = &filler[task * (filler.len() / 16)..][..filler.len() / 16];
+                        let sum: u64 = part.iter().map(|v| u64::from(v.to_bits())).sum();
+                        sink.fetch_add(sum, std::sync::atomic::Ordering::Relaxed);
+                    });
+                    let start = Instant::now();
+                    for kv in &kv {
+                        std::hint::black_box(attend(kv));
+                    }
+                    start.elapsed().as_secs_f64() * 1e3
+                })
+                .skip(2)
+                .collect();
+            times.sort_by(f64::total_cmp);
+            let (least, median) = (times[times.len() / 20], times[times.len() / 2]);
             let (copy_least, copy_median) = time_ms(rounds.min(200), || {
                 for source in &sources {
                     std::hint::black_box(head_major(source));
@@ -478,7 +497,8 @@ pub fn run(args: &[String]) -> Vec<String> {
             });
             let each = 1e3 / layers as f64;
             lines.push(format!(
-                "attention {tq} queries x {tk} keys, d {d}, {heads} heads, {layers} layers: least {:.2} us, median {:.2} us for each layer; head-major copy least {:.2} us, median {:.2} us; hash {hash:016x}",
+                "attention {tq} queries x {tk} keys, d {d}, {heads} heads, {layers} layers{}: 5th percentile {:.2} us, median {:.2} us for each layer; head-major copy least {:.2} us, median {:.2} us; hash {hash:016x}",
+                if cold { ", cold" } else { "" },
                 least * each,
                 median * each,
                 copy_least * each,
@@ -486,7 +506,7 @@ pub fn run(args: &[String]) -> Vec<String> {
             ));
         }
         _ => lines.push(
-            "usage: kernel_bench peak [one|all] | ternary2|int82|q8_02|f322|f162|nn2 <one|all> <n> <k> <m>... | attention <one|all> <tq> <tk> <d> <heads> [layers]"
+            "usage: kernel_bench peak [one|all] | ternary2|int82|q8_02|f322|f162|nn2 <one|all> <n> <k> <m>... | attention <one|all> <tq> <tk> <d> <heads> [layers] [cold]"
                 .into(),
         ),
     }

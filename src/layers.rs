@@ -305,14 +305,20 @@ pub fn attention(
 
 /// Keys and values per key/value head, laid out for `attention_with`: K
 /// transposed (hd x tk) and V as it is (tk x hd), so both products are
-/// `matmul_nn`, whose tiles need no horizontal sums. Build it once for keys
-/// that do not change (Whisper's cross-attention over one window).
+/// `matmul_nn`, whose tiles need no horizontal sums. Where the CPU has the
+/// kernel for it (`fgemm::nn_strips`), the transposed K is in strips of 32
+/// keys (`[strip][hd][32]`): a tile of the scores then reads one run of
+/// bytes. Build it once for keys that do not change (Whisper's
+/// cross-attention over one window).
 pub struct HeadMajor {
     kt: Buf,
     vh: Buf,
     tk: usize,
     hd: usize,
     kv_heads: usize,
+    /// The values of one head in `kt`: `hd * tk`, or whole strips.
+    keys: usize,
+    strips: bool,
 }
 
 impl HeadMajor {
@@ -324,10 +330,15 @@ impl HeadMajor {
         (hd, kv_heads): (usize, usize),
     ) -> Self {
         let _span = crate::prof::span(crate::prof::Stage::HeadMajor);
+        let strips = fgemm::nn_strips();
+        let keys = match strips {
+            true => tk.div_ceil(fgemm::NN_STRIP) * hd * fgemm::NN_STRIP,
+            false => hd * tk,
+        };
         // From the pool, on the calling thread: the workers allocate nothing,
         // so their allocator heaps do not grow with every clip.
         let (mut kt, mut vh) = (
-            Buf::scratch(kv_heads * hd * tk),
+            Buf::scratch(kv_heads * keys),
             Buf::scratch(kv_heads * tk * hd),
         );
         let (kt_ptr, vh_ptr) = (team::SendPtr::new(&mut kt), team::SendPtr::new(&mut vh));
@@ -335,13 +346,25 @@ impl HeadMajor {
             // SAFETY: head g owns its range of both buffers, which outlive the step.
             let (kt, vh) = unsafe {
                 (
-                    kt_ptr.slice_mut(g * hd * tk, hd * tk),
+                    kt_ptr.slice_mut(g * keys, keys),
                     vh_ptr.slice_mut(g * tk * hd, tk * hd),
                 )
             };
             for j in 0..tk {
-                for (e, value) in k[j * ks + g * hd..][..hd].iter().enumerate() {
-                    kt[e * tk + j] = *value;
+                let key = &k[j * ks + g * hd..][..hd];
+                if strips {
+                    // The places of a last strip that no key takes keep what
+                    // the buffer held: the kernel does not read them.
+                    let (strip, column) = (j / fgemm::NN_STRIP, j % fgemm::NN_STRIP);
+                    let rows = &mut kt[strip * hd * fgemm::NN_STRIP..][..hd * fgemm::NN_STRIP];
+                    let (rows, _) = rows.as_chunks_mut::<{ fgemm::NN_STRIP }>();
+                    for (row, value) in rows.iter_mut().zip(key) {
+                        row[column] = *value;
+                    }
+                } else {
+                    for (e, value) in key.iter().enumerate() {
+                        kt[e * tk + j] = *value;
+                    }
                 }
                 vh[j * hd..(j + 1) * hd].copy_from_slice(&v[j * vs + g * hd..][..hd]);
             }
@@ -352,13 +375,18 @@ impl HeadMajor {
             tk,
             hd,
             kv_heads,
+            keys,
+            strips,
         }
     }
 
-    /// K transposed (hd x tk) and V (tk x hd) of key/value head `g`.
-    pub fn head(&self, g: usize) -> (&[f32], &[f32]) {
-        let size = self.hd * self.tk;
-        (&self.kt[g * size..][..size], &self.vh[g * size..][..size])
+    /// K transposed (hd x tk, or in strips) and V (tk x hd) of key/value head `g`.
+    fn head(&self, g: usize) -> (&[f32], &[f32]) {
+        let values = self.tk * self.hd;
+        (
+            &self.kt[g * self.keys..][..self.keys],
+            &self.vh[g * values..][..values],
+        )
     }
 }
 
@@ -404,7 +432,10 @@ pub fn attention_with(
                 }
             }
             let scores = crate::prof::span(crate::prof::Stage::Scores);
-            fgemm::matmul_nn_into(qh, m, hd, kt, tk, probs);
+            match kv.strips {
+                true => fgemm::matmul_nn_strips_into(qh, m, hd, kt, tk, probs),
+                false => fgemm::matmul_nn_into(qh, m, hd, kt, tk, probs),
+            }
             scores.end();
             let softmax = crate::prof::span(crate::prof::Stage::Softmax);
             softmax_rows(probs, tk, |local| match causal {

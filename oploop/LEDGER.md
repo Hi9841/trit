@@ -2577,3 +2577,123 @@ What the table says:
   sums that are not fused (the finding of 2026-11-10); a tile for them changes the bits of
   that path. NEON was not read. The second set (`v2/nn.rs`) keeps its form: 36 x 1000 is
   now 1.47 times slower there than in the first set.
+
+### SI-036 broadcast product with few rows: the weights as one stream
+
+- Journey: J1 (Whisper tiny: the cross-attention scores of a decoder step, 5 queries against
+  1,500 keys). J3 (Moonshine tiny, the same stage with fewer keys).
+- Profile (P-16): 127,104 score products of 5 rows take 4,008 ms of thread time, 31.5 us
+  each; the value products of the same step take 16.2 us; the multiply-adds are 6 us at the
+  peak, and both kernels reach that on one thread with the weights in L2. 6 tasks run a
+  step of a layer, so the 15 us between scores and values are about 320 ms of the 12,626 ms
+  of wall time (2.5 %), on a busy computer.
+- Cause (a guess, not measured): the tile takes 32 columns of each of the 64 key rows in
+  turn, so it reads 64 streams that are 6,000 bytes apart, and a prefetcher does not follow
+  a step that crosses a 4 KB page. The keys of a head (384 KB) are not in L2 at a step: the
+  4 layers hold 18.4 MB of keys and values. The values are one stream.
+- Hypothesis: for at most 6 rows and many columns, the product keeps the sums in the output
+  buffer (5 x 1,500 values, 30 KB) and takes the weights row by row: one stream. Each output
+  still adds its products in the order of the keys with fused steps: the same bits. More
+  loads and stores for each multiply-add, so with the weights in L2 it can be slower; a
+  block of columns (sums of a block in L1, shorter streams) is the middle form. Expected:
+  the scores of a step near the values (16 us); `kernel_bench attention all 5 1500 384 6 4`
+  from about 30 us for each layer to about 24 us; Whisper tiny about 0.975.
+- Bound test first (the method of this session): a probe build takes the block size from
+  `TRIT_NN_BLOCK` (0: the tile of today). Build the change only if the attention bench with
+  5 queries and 4 layers gains 10 % or more at some block size, and `nn2 1500 x 64` with 5
+  rows (weights in L2) loses less than that.
+- Bound test of this form (probe build `kb-probe36.exe`, 0 values with other bits): with the
+  weights in L2, 5 rows of 1500 x 64 take 6.4 us in the tile and 19.5 to 22.5 us with the
+  sums in memory (blocks of 64, 256, 512, and all columns): a load and a store for each
+  multiply-add cost 3.4 cycles, not 1. The attention bench with 5 queries and 4 layers: 31.3
+  and 31.7 us for each layer in the tile, 46.5 to 52.0 us with the sums in memory. Decision:
+  NOT BUILT. The probe is not in the repository.
+- Second form, from the same cause: the tile stays, and the transposed keys go in strips of
+  32 keys (`[strip][hd][32]`), so a tile reads one run of 8 KB and not 64 runs that are 6,000
+  bytes apart. Bound test (a probe in `kernel_bench`, not kept: the scores of 6 heads and 4
+  layers as jobs of the team, transposed keys against keys in strips, 400 rounds in turns,
+  the same sums): with warm keys 18.97 and 19.62 us for each layer (1.02 to 1.03, the probe
+  made 47 calls and copies for each head); after every thread read 40 MB that the product
+  does not use (what the token table of a Whisper step does) 35.5 and 22.3 us, then 42.2 and
+  29.4 us (0.62 and 0.69 at the median). Moonshine (keys of 6 layers: 6.9 MB, one L3 of
+  96 MB): 1.02 to 1.06. So the cause holds where the keys are in no cache, and the gain is
+  above the 10 % of the rule. Built.
+- Change: `fgemm::matmul_nn_strips_into` and `nn_avx512::strips` (the tiles of SI-035 now
+  take the distance between weight rows); `fgemm::nn_strips()` is true on the AVX-512 level
+  of the first set; `layers::HeadMajor` keeps the keys in strips when it is true, and
+  `attention_with` calls the product that fits. The other levels, the second set, and
+  `attention_steps` (keys of a few tokens, in the buffer of the thread) keep `hd x tk`.
+  `kernel_bench attention ... cold` reads 40 MB on every thread before each timed round.
+- Invariant of the unsafe code: a head has `ceil(tk / 32) * hd * 32` values in `kt`; strip
+  `s` starts at `s * hd * 32`; a tile of `c` columns loads and stores only its first `c`
+  places (masked loads and stores; two registers only from 17 columns), so the places of
+  the last strip that no key takes are never read.
+- Result, the bench (`kb38c.exe`: this bench with the old layout; `kb39.exe`; in turns; the
+  same output hash in every pair):
+
+  | `kernel_bench attention` | Before | After |
+  |---|---:|---:|
+  | Whisper step, cold: `all 5 1500 384 6 4 cold`, 5th percentile, 2 pairs | 36.5 and 29.4 us | 29.5 and 23.9 us |
+  | The same, median | 58.9 and 49.1 us | 39.4 and 32.4 us |
+  | Whisper step, warm: `all 5 1500 384 6 4`, 5th percentile, 1 pair | 23.4 us | 27.1 us |
+  | Whisper encoder: `all 1500 1500 384 6 4` | 2,353 us | 2,327 us |
+  | Moonshine step, cold: `one 5 1000 288 8 6 cold` | 11.35 us | 11.07 us |
+  | Moonshine encoder: `one 1000 1000 288 8 6` | 1,523 us | 1,532 us |
+  | Head-major copy, Moonshine (1,000 keys) | 26.3 us | 18.8 us |
+  | Head-major copy, Whisper (1,500 keys), least and median | 62 to 110 and 160 to 182 us | 77 to 173 and 174 to 209 us |
+
+  `nn2` (the tiles after the change, one thread): 1500 x 64, 64 x 1500, 1000 x 36, and
+  36 x 1000 at the times of SI-035, 0 values with other bits.
+- Result, the stage (`prof38.exe` and `prof39.exe` in turns, Whisper tiny, 200 clips, 2
+  pairs; the totals of the runs spread from 10.0 to 13.5 s, so the values of the same step
+  are the control inside each run): the 127,104 score products of 5 rows take 4,448 and
+  2,045 ms of thread time before (2.01 and 1.55 times the values) and 1,823 and 1,693 ms
+  after (0.86 and 0.88 times the values).
+- Result, a clip (`ab.py`, B38 against B39, 200 `clean` clips, 4 rounds, 0.2 to 2 cores of
+  other load):
+
+  | Model | Order | Per-clip ratio of B39 | Paired p | Time of a round | CPU time | Rounds |
+  |---|---|---:|---:|---:|---:|---|
+  | Whisper tiny | B38 first | 0.935 | 1.6e-22 | 0.943 | 0.951 | 46.7-54.9 and 44.7-50.5 ms |
+  | Whisper tiny | B39 first | 0.962 | 1.8e-22 | 0.968 | 0.965 | 43.6-47.6 and 44.7-50.5 ms |
+  | Whisper tiny | B38 first, under load | 0.924 | 9e-18 | 0.925 | 0.923 | does not count: rounds 48.2-78.7 ms; B39 is the faster side in each of the 4 rounds |
+  | Moonshine tiny (guard), 3 rounds | B38 first | 1.012 | 0.031 | 1.002 | 1.024 | inside 7 % |
+  | Moonshine tiny (guard), 3 rounds | B39 first | 0.972 | 0.00096 | 0.987 | 0.962 | inside 14 %; the side that runs second is slower in both |
+  | Redux, `clean` and `other` (guard), 3 rounds | B38 first | 0.897 | | | | no time claim: Redux does not use this code, and the rounds of B38 spread by 22 %; 0 of 400 texts differ, 81 and 172 |
+
+- Decision: KEEP. Whisper tiny passes the keep rule in both orders (0.935 and 0.962; the
+  forecast was 0.975). 0 texts differ in every run, errors 231, 133, and 253 on both sides.
+- Gates: `bench/paths.py` with B39: Moonshine tiny the same text on every path, Whisper tiny
+  with its known scalar text (the same line with B38). `TRIT_KERNELS=v2`, B38 against B39,
+  3 clips: the same text for Whisper tiny, Moonshine tiny, and Canary 1B v2 (Canary also
+  with the first set). Kokoro and MMS-TTS: the same bytes. 4 threads x 20 calls on one
+  engine: 0 wrong texts; private memory after `release_memory` 223 and 222 MB (Whisper
+  tiny), 147 and 144 MB (Moonshine tiny); peak working set 223 and 218 MB, 198 and 198 MB.
+  fmt; clippy with the two findings of the base commit allowed, for the workspace and for
+  `--features profile`; `trit skill --check`.
+- Not known: a Whisper model on a CPU with one L3 that holds the token table and the keys
+  (the warm case: one bench pair gave 23.4 against 27.1 us, the A/B on this CPU gave a
+  gain). Whisper base.en and larger are not on this computer. AVX2 and NEON keep `hd x tk`.
+
+### SI-035 on a quiet computer (added after SI-036)
+
+`ab.py`, Moonshine tiny, B37 against B38, 5 rounds, 0.2 cores of other load, rounds inside
+16 %: per-clip ratio of B38 0.995 with B37 first (p = 0.24) and 0.985 with B38 first
+(p = 0.0029). 0 texts differ. The forecast was 0.985. It stays a correction with no claim
+for a clip.
+
+### Next
+
+- The token table of Whisper and Moonshine (13.7 % and 12.6 % of a run, 34 % and 52 % of
+  their floors): it waits on memory, and after SI-036 it is the largest line that is not
+  at its floor. An int8 table changes the logits (a WER decision of the owner).
+- The copy of the values in `HeadMajor::new`: the product can take the values where they
+  are, with the row distance of the layer (`matmul_nn` with a stride), so half of the copy
+  and half of its memory go. About 1.5 % of a Whisper tiny clip at most (P-16: 407 ms).
+- The first set against the second on 1500 x 64 with 125 rows: the second is 3 to 4 % faster
+  in every run of `nn2` (0.957 to 0.971). Find the difference in the loop of `v2/nn.rs`; the
+  encoder products of Whisper are the largest block of thread time.
+- The tile of SI-035 for the second set and for AVX2 (with fused sums there: a bits change
+  of that path, so with the error counts).
+- Clippy of Rust 1.100: `fgemm.rs:48` and `audio/mel.rs:202` fail `-D warnings` in the base
+  commit. CI uses the stable toolchain, so its lint step fails at the next push.
