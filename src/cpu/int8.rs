@@ -340,8 +340,28 @@ impl Int8 {
 
     /// `x` is `m x k` f32; returns `m x n`.
     pub fn forward(&self, x: &[f32], m: usize) -> Buf {
+        self.forward_biased(x, m, None)
+    }
+
+    /// True when `forward_biased` adds a bias itself: the AVX-512 VNNI tile
+    /// of the first kernel set.
+    pub fn adds_bias(&self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        let tile = self.path == Path::Vnni512;
+        #[cfg(not(target_arch = "x86_64"))]
+        let tile = false;
+        tile && self.v2.is_none()
+    }
+
+    /// `forward` with `bias` (`n` values) added to every output row. The
+    /// tile adds it to a sum before it stores the sum, so each output is
+    /// written once: a pass over the output to add the bias moved up to
+    /// 9 MB through memory again (a Whisper encoder layer has 1,500 rows)
+    /// and took 7 % of a Whisper tiny clip. Only when `adds_bias()`.
+    pub fn forward_biased(&self, x: &[f32], m: usize, bias: Option<&[f32]>) -> Buf {
         let _span = crate::prof::span(crate::prof::Stage::Int8);
         let _product = crate::prof::product(crate::prof::Product::Int8, self.n, self.k, m);
+        assert!(bias.is_none_or(|bias| self.adds_bias() && bias.len() == self.n));
         if let Some(layer) = &self.v2 {
             return layer.forward(x, m);
         }
@@ -354,7 +374,7 @@ impl Int8 {
             #[cfg(target_arch = "x86_64")]
             // SAFETY: Path::detect confirmed the CPU features.
             Path::Vnni512 => team::for_each(self.n / (2 * rows), |task| unsafe {
-                self.vnni_task(&q, task, ptr)
+                self.vnni_task(&q, task, bias, ptr)
             }),
             #[cfg(target_arch = "x86_64")]
             // SAFETY: Path::detect confirmed the CPU features: AVX-VNNI, or
@@ -410,23 +430,23 @@ impl Int8 {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
-    unsafe fn vnni_task(&self, q: &Quantized, task: usize, out: OutPtr) {
+    unsafe fn vnni_task(&self, q: &Quantized, task: usize, bias: Option<&[f32]>, out: OutPtr) {
         let mut frame = 0;
         while frame + 6 <= q.m {
-            self.vnni_tile::<6>(q, task, frame, out);
+            self.vnni_tile::<6>(q, task, frame, bias, out);
             frame += 6;
         }
         match q.m - frame {
-            1 => self.vnni_tile::<1>(q, task, frame, out),
-            2 => self.vnni_tile::<2>(q, task, frame, out),
-            3 => self.vnni_tile::<3>(q, task, frame, out),
-            4 => self.vnni_tile::<4>(q, task, frame, out),
-            5 => self.vnni_tile::<5>(q, task, frame, out),
+            1 => self.vnni_tile::<1>(q, task, frame, bias, out),
+            2 => self.vnni_tile::<2>(q, task, frame, bias, out),
+            3 => self.vnni_tile::<3>(q, task, frame, bias, out),
+            4 => self.vnni_tile::<4>(q, task, frame, bias, out),
+            5 => self.vnni_tile::<5>(q, task, frame, bias, out),
             _ => {}
         }
     }
 
-    /// 32 outputs (two 16-row blocks) by F frames.
+    /// 32 outputs (two 16-row blocks) by F frames, each plus its `bias`.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
     #[allow(clippy::needless_range_loop)]
@@ -435,6 +455,7 @@ impl Int8 {
         q: &Quantized,
         task: usize,
         frame0: usize,
+        bias: Option<&[f32]>,
         out: OutPtr,
     ) {
         use std::arch::x86_64::*;
@@ -477,6 +498,13 @@ impl Int8 {
             }
         }
         for (b, block) in blocks.iter().enumerate() {
+            if let Some(bias) = bias {
+                // No bias is not a bias of zero: a sum of -0.0 stays -0.0.
+                let shift = _mm512_loadu_ps(bias.as_ptr().add(block * 16));
+                for sum in acc[b].iter_mut() {
+                    *sum = _mm512_add_ps(*sum, shift);
+                }
+            }
             for f in 0..F {
                 _mm512_storeu_ps(out.0.add((frame0 + f) * self.n + block * 16), acc[b][f]);
             }

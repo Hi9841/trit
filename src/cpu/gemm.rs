@@ -496,19 +496,22 @@ impl Dense {
             }
         }
         let n = self.out_features;
+        let mut bias = self.bias.as_deref();
         let mut out = match &self.weight {
             Weights::F32(w) => fgemm::matmul(x, rows, self.in_features, w, n),
             Weights::F16(w) => fgemm::matmul(x, rows, self.in_features, w, n),
+            // The tile adds the bias where it can: no pass over the output for it.
+            Weights::Int8(w) if w.adds_bias() => w.forward_biased(x, rows, bias.take()),
             Weights::Int8(w) => w.forward(x, rows),
             Weights::Q8(w) => w.matmul(x, rows, self.in_features, n),
         };
-        if self.bias.is_none() && !relu {
+        if bias.is_none() && !relu {
             return out;
         }
         let _span = crate::prof::span(crate::prof::Stage::Bias);
         team::chunks_mut(&mut out, EPILOGUE_ROWS * n, |_, block| {
             for row in block.chunks_exact_mut(n) {
-                if let Some(bias) = &self.bias {
+                if let Some(bias) = bias {
                     for (value, b) in row.iter_mut().zip(bias) {
                         *value += b;
                     }

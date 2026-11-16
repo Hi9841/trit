@@ -2758,3 +2758,65 @@ process: 5.01 GHz, 0.95 `vpdpbusd` and 0.94 `vfmadd` for each cycle and core.
   multiply-adds of the product at the peak (0.18 ms).
 - These passes are not in the product lines of P-17. They explain a part of the int8
   products at 29 to 44 % of their floor: the quantizer reads a buffer that left the caches.
+
+### SI-037 int8 product: the bias inside the tile (AVX-512 VNNI)
+
+- Journey: J1 (Whisper tiny). Canary and the other int8 families get it. J3 and J4 as guards.
+- Profile (P-18): the bias pass is 674 ms of 9,766 ms (6.9 %). About 4,200 of its 141,174
+  calls are encoder products (0.16 ms each); the decoder calls have 5 rows and run inline.
+- Hypothesis: `Int8::vnni_tile` adds the 16 bias values of its block to each sum before it
+  stores the sum, and `Dense::forward_then` then skips the pass. A value is the same sum
+  with the same one addition of the bias: the same bits. Each output is written once, so
+  the pass and its memory traffic go. Expected: the bias stage of Whisper tiny from 674 ms
+  to under 100 ms (the float products and the other paths keep the pass); Whisper tiny
+  about 0.94 for each clip.
+- Test: 0 texts differ (`ab.py`, Whisper tiny; Canary on 3 clips); `bench/paths.py`;
+  `TRIT_KERNELS=v2` keeps the pass and the same text.
+- Change: `Int8::forward_biased` and `Int8::adds_bias` (`src/cpu/int8.rs`); `vnni_tile` adds
+  the bias of its block before the store; `Dense::forward_then` gives the bias to the
+  product when `adds_bias()` and keeps its pass for ReLU, for the float and Q8 products,
+  and for the other int8 paths (256-bit VNNI, AVX2, NEON, scalar, the second set). With no
+  bias the tile adds nothing (a bias of zero would turn a sum of -0.0 into +0.0).
+- Result, the stage (`prof40.exe` and `prof41.exe` in turns, 2 pairs, Whisper tiny, 200
+  clips, 3 to 11 cores of other load): the bias pass 757.5 to 21.6 ms and 708.9 to 20.5 ms
+  (141,174 calls to 201: the float convolution keeps it); the int8 products with their
+  quantizer 2,819 to 2,678 ms and 2,494 to 2,271 ms. 0 of 200 texts differ.
+- Result, a clip (`ab.py`, B39 against B41, Whisper tiny, 200 `clean` clips, 4 rounds, 0.1
+  to 5 cores of other load, rounds inside 13 %):
+
+  | Order | Per-clip ratio of B41 | Paired p | Time of a round | CPU time | Rounds |
+  |---|---:|---:|---:|---:|---|
+  | B39 first | 0.912 | 1.6e-34 | 0.913 | 0.908 | 44.0-49.9 and 40.5-43.8 ms |
+  | B41 first | 0.916 | 1.6e-31 | 0.923 | 0.932 | 40.9-45.3 and 45.7-47.7 ms |
+  | B39 first, under load | 0.888 | 4e-33 | 0.887 | 0.884 | does not count: rounds 44.3-57.8 ms |
+  | B41 first, under load | 1.045 | 5.7e-06 | | | does not count: rounds 44.5-65.3 ms |
+
+- Guards (B39 first, 3 rounds, quiet): Redux `clean` and `other` 0.989, 0 of 400 texts
+  differ, errors 81 and 172; Moonshine tiny 0.963 in one order (it has no int8 layer: no
+  claim), 0 of 200 texts differ, 133 errors.
+- Decision: KEEP. Whisper tiny 0.912 and 0.916 (the forecast was 0.94): the pass, and a
+  quantizer and a product that find their buffers in a cache more often.
+- Gates: 0 texts differ in every run (231 errors). `bench/paths.py` with B41: Whisper tiny
+  with its known scalar text, the other paths the same text. B39 against B41 on 3 clips,
+  first and second kernel set: the same text for Whisper tiny, Canary 1B v2, Moonshine
+  tiny, and Redux. 4 threads x 20 calls: 0 wrong texts; private memory after
+  `release_memory` 222 and 226 MB (inside the 2 % guard). fmt; clippy as before.
+- Not done: the 256-bit VNNI, AVX2, and NEON tiles, the second set, the ternary product
+  (Redux: 13 ms of bias pass in 8,816 ms), and the float product (Moonshine tiny: 79 ms in
+  5,317 ms).
+
+### Next (after part 2)
+
+- GELU inside the tile of the product before it (Whisper tiny: 299 ms of 9,766 ms, 3.1 %;
+  the arithmetic of GELU stays, the pass over 9.2 MB goes). The vector GELU gives each
+  lane the value of the pass, so the bits can stay; rows of 1,536 values have no tail.
+- The layer norm with its residual add in one pass (`Norm::residual` exists; the audio
+  encoder calls `add_into` and then `Norm::apply`): 173 ms of add passes in Whisper tiny.
+- The first product of the feed-forward block can write int8 values for the second one
+  (no 9.2 MB buffer of f32 at all). It needs tasks of 128 outputs (a quantizer group).
+- The token table (11.6 % of Whisper tiny, 38 % of its floor) and the cross-attention
+  values of a step (40 % of their floor) wait on memory. A smaller table changes the
+  logits: a WER decision of the owner.
+- This list replaces the "Next" of part 1. Two items there were wrong: the copy of the
+  values in `HeadMajor::new` is already one run of bytes for each head (the transposed keys
+  were the slow part), and the token table is not faster on 8 threads.
