@@ -2820,3 +2820,82 @@ process: 5.01 GHz, 0.95 `vpdpbusd` and 0.94 `vfmadd` for each cycle and core.
 - This list replaces the "Next" of part 1. Two items there were wrong: the copy of the
   values in `HeadMajor::new` is already one run of bytes for each head (the transposed keys
   were the slow part), and the token table is not faster on 8 threads.
+
+### SI-038 int8 product: the exact GELU inside the tile (AVX-512 VNNI)
+
+- Journey: J1 (Whisper tiny: `fc1` of each encoder and decoder layer). The models that
+  share the audio encoder (Voxtral, MOSS) get the encoder part.
+- Profile (P-18, and `prof41.exe` after SI-037): the GELU pass is 299 to 323 ms of a run of
+  about 9,000 ms (3.3 %): 800 encoder passes over 9.2 MB (about 0.27 ms each, where the
+  arithmetic of GELU on 2.3 million values is about 0.06 ms on 16 threads) and 21,184
+  decoder passes of 5 rows as jobs of 5 tasks (about 4 us each).
+- Hypothesis: `Int8::vnni_tile` applies the vector GELU of `activation.rs` to each sum
+  (after the bias) before the store, and `Dense::forward_gelu` skips the pass. The pass
+  gives each value `compute(v, Gelu)` in a lane of a 512-bit register, with a masked
+  register for a tail, so a value does not depend on the lanes next to it: the same bits.
+  Expected: the GELU stage near 0; the int8 products about 60 ms more (the arithmetic
+  moves there); Whisper tiny about 0.975 for each clip.
+- Only for the exact form (config `gelu`) on the AVX-512 level. The tanh form (GGUF files of
+  whisper.cpp) and the other paths keep the pass.
+- Test: 0 texts differ (`ab.py`); `bench/paths.py`; the second set keeps the pass and the
+  same text; Canary on 3 clips.
+- Result of the first form (the vector GELU on the sums in the registers of the tile;
+  `prof41.exe` and `prof42.exe` in turns, 2 pairs, quiet): the GELU pass 288 to 48 ms and
+  289 to 50 ms (the convolutions of the stem keep it); the int8 products 2,090 to 2,306 ms
+  and 2,060 to 2,485 ms. `ab.py`, B41 against B42, 4 rounds, quiet, rounds inside 12 %:
+  per-clip ratio of B42 1.035 (B41 first, p = 3.5e-16) and 1.010 (B42 first, p = 1.5e-05).
+  0 texts differ. Slower.
+- Second form (the tile calls `activation::gelu` on the 32 values of a frame that it just
+  stored, through a function that is not inlined, so the loop of the product keeps its
+  registers; B43): per-clip ratio 1.000 (B41 first, p = 0.56) and 1.007 (B43 first,
+  p = 1e-05), rounds inside 8 %. 0 texts differ. No gain.
+- Why (a probe in `kernel_bench`, not kept: each activation on 1,536 values in L1, one
+  thread, 5.24 GHz): GELU takes 56 cycles for each 16 values, `exp` 19, SiLU 24, tanh 27.
+  So the GELU of a Whisper encoder layer (2.3 million values) is 8.1 million cycles, 0.1 ms
+  on 16 threads: the pass was bound by its arithmetic and not by memory, and the forecast
+  (0.06 ms of arithmetic in a pass of 0.27 ms) was wrong. The first form also made each
+  int8 product slower: the tile then holds the code and the constants of GELU.
+- Decision: REVERT both forms. `Int8::forward_biased` stays as SI-037 left it.
+- For a later idea: a faster GELU needs other operations for each value (a division, a
+  chain of 10 fused steps, and `exp` now), and that changes the bits: with the error counts.
+
+### Rejected by the ledger: the layer norms of 5 rows on the calling thread
+
+P-18 shows 75,883 layer norm passes in Whisper tiny (307 ms) and 113,877 in Moonshine tiny
+(102 ms); most have 5 rows and are a job of 5 tasks. SI-014 (2026-11-09) ran them on the
+calling thread: Whisper tiny 0.998, Moonshine tiny 1.055. Not built again. The sums of
+`moments` already run in 32 lanes.
+
+### Journeys, the start of this session (B37, commit 9b90d1d) against the head (B41, commit ee100d9)
+
+`ab.py`, 200 `clean` clips, 4 rounds, 0.02 to 0.2 cores of other load, rounds inside 7 %.
+
+| Journey | B37 | B41 | Per-clip ratio, B37 first | B41 first | Paired p | CPU time of a round |
+|---|---:|---:|---:|---:|---:|---:|
+| J1 Whisper tiny, a clip | 43.3 ms (42.4-44.6) | 38.8 ms (38.1-41.0) | 0.897 | 0.889 | 1.5e-34 and 1.4e-34 | 0.896 and 0.891 |
+| J3 Moonshine tiny, a clip | 18.7 ms (18.3-19.1) | 18.1 ms (17.9-19.1) | 0.986 | 0.985 | 4.6e-21 and 9.4e-21 | 0.983 and 0.982 |
+| J4 Redux, `clean` and `other` (B39 against B41, 3 rounds) | 32.3 ms | 32.1 ms | 0.989 | | no change claimed | 0.998 |
+
+- 0 texts differ in every run; errors 231, 133, and 253 (81 and 172) on both sides.
+- Moonshine tiny gets its 1.5 % from SI-035 alone (it has no int8 layer, and its keys stay
+  in the L3): both orders now show the forecast of that entry. It stays under the 2 % of
+  the contract.
+- Kept in this session: SI-035, SI-036, SI-037. Not built after a bound test: the sums in
+  memory (SI-036, first form), the token table on 8 threads, attention blocks of fewer
+  queries. Reverted after an A/B: SI-038 (two forms).
+
+### Next (after SI-038; this replaces the list above)
+
+- The token table (11.6 % of Whisper tiny before SI-037, 38 % of its floor) and the
+  cross-attention values of a step (40 % of their floor) wait on memory. A smaller table
+  or f16 values change the logits: a WER decision of the owner.
+- The bias inside the tile for the other int8 paths (256-bit VNNI, AVX2, NEON) and for the
+  second set: the same change, for CPUs that this computer cannot time (`TRIT_ISA` gives
+  the text, not the speed of such a CPU).
+- The first product of a feed-forward block can write int8 values for the second (no
+  buffer of 9.2 MB of f32): tasks of 128 outputs, and GELU before the quantizer. The bound
+  first: the quantizer stage of the encoder products in the profile build.
+- Whisper base.en, Moonshine base, and larger models are not on this computer: SI-035
+  (52 values for each head) and SI-036 are not measured on them.
+- Clippy of Rust 1.100: `fgemm.rs:48` and `audio/mel.rs:202` fail `-D warnings` in the base
+  commit. CI uses the stable toolchain, so its lint step fails at the next push.
