@@ -268,6 +268,7 @@ impl Ternary {
     /// `x` is `m x k` f32; returns `m x n`.
     pub fn forward(&self, x: &[f32], m: usize) -> Buf {
         let _span = crate::prof::span(crate::prof::Stage::Ternary);
+        let _product = crate::prof::product(crate::prof::Product::Ternary, self.n, self.k, m);
         #[cfg(feature = "gpu")]
         if let Some(layer) = &self.gpu {
             if !crate::gpu::host_products() && crate::gpu::usable() {

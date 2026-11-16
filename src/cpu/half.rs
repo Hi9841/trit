@@ -76,6 +76,7 @@ impl HalfDense {
     pub fn matvec(&self, x: &[f32]) -> Buf {
         assert_eq!(x.len(), self.in_features);
         let (n, k) = (self.out_features, self.in_features);
+        let _product = crate::prof::product(crate::prof::Product::F16Vector, n, k, 1);
         if super::v2::float_enabled() {
             let mut out = super::v2::float::matmul(x, 1, k, &self.weight, n);
             if let Some(bias) = &self.bias {

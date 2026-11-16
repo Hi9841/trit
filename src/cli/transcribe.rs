@@ -252,9 +252,10 @@ mod profile {
     pub fn table(rows: &[super::Row]) {
         let busy: f64 = rows.iter().map(|row| row.ms).sum();
         eprint!(
-            "profile: {} calls, {busy:.1} ms\n{}",
+            "profile: {} calls, {busy:.1} ms\n{}{}",
             rows.len(),
-            trit::prof::report()
+            trit::prof::report(),
+            trit::prof::products()
         );
     }
 }

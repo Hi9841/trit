@@ -64,6 +64,8 @@ pub trait Weight: Copy + Send + Sync + 'static + super::v2::float::Element {
     /// True for f16: a block of many rows widens its weight panel to f32
     /// once, instead of once per register tile.
     const WIDEN: bool;
+    /// The name of this weight type in the profile's table of products.
+    const PRODUCT: crate::prof::Product;
     fn to_f32(self) -> f32;
     /// `dst = src` as f32; the caller sizes `dst` like `src`.
     fn widen(src: &[Self], dst: &mut [f32]);
@@ -77,6 +79,7 @@ pub trait Weight: Copy + Send + Sync + 'static + super::v2::float::Element {
 
 impl Weight for f32 {
     const WIDEN: bool = false;
+    const PRODUCT: crate::prof::Product = crate::prof::Product::F32;
     #[inline(always)]
     fn to_f32(self) -> f32 {
         self
@@ -104,6 +107,7 @@ impl Weight for f32 {
 /// f16 bits. The CPUs of the AVX2 and AVX-512 paths have F16C (see `level`).
 impl Weight for u16 {
     const WIDEN: bool = true;
+    const PRODUCT: crate::prof::Product = crate::prof::Product::F16;
     #[inline(always)]
     fn to_f32(self) -> f32 {
         super::tensors::f16_to_f32(self)
@@ -209,6 +213,7 @@ unsafe impl Sync for OutPtr {}
 /// `out[i][j] = sum_k x[i][k] * w[j][k]`, parallel over 64 x 64 blocks.
 pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Buf {
     let _span = crate::prof::span(crate::prof::Stage::Float);
+    let _product = crate::prof::product(W::PRODUCT, n, k, m);
     if super::v2::float_enabled() {
         return super::v2::float::matmul(x, m, k, w, n);
     }
@@ -245,6 +250,7 @@ pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Bu
 /// is itself one of many parallel tasks. Each value is the one `matmul`
 /// gives: a value's sum does not depend on the tile around it.
 pub fn matmul_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &mut [f32]) {
+    let _product = crate::prof::product(crate::prof::Product::F32Into, n, k, m);
     if super::v2::float_enabled() {
         return super::v2::float::matmul_into(x, m, k, w, n, out);
     }
@@ -264,6 +270,7 @@ pub fn matmul_widened(
     n: usize,
     widen: impl Fn(std::ops::Range<usize>, &mut [f32]) + Sync,
 ) -> Buf {
+    let _product = crate::prof::product(crate::prof::Product::Q8Widened, n, k, m);
     if super::v2::float_enabled() {
         return super::v2::float::matmul_widened(x, m, k, n, widen);
     }
@@ -627,6 +634,7 @@ mod neon {
 /// (AVX-512) or 6 x 16 (AVX2) accumulators, so a short `k` (an attention
 /// head) costs no horizontal sums.
 pub fn matmul_nn_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &mut [f32]) {
+    let _product = crate::prof::product(crate::prof::Product::F32Broadcast, n, k, m);
     if super::v2::float_enabled() {
         return super::v2::nn::matmul_nn_into(x, m, k, w, n, out);
     }

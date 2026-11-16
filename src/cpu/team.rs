@@ -831,6 +831,12 @@ pub fn threads() -> usize {
     team().workers + 1
 }
 
+/// True on a thread that runs a task of a job: a step there runs inline.
+#[cfg(feature = "profile")]
+pub fn inside() -> bool {
+    INSIDE.get()
+}
+
 pub fn for_each(tasks: usize, run: impl Fn(usize) + Sync) {
     // A step inside a task (on a worker or the caller) runs inline.
     if INSIDE.get() {

@@ -255,8 +255,9 @@ fn numbers(args: &[String], from: usize) -> Vec<usize> {
 
 /// One line per result. `args`: `peak [one|all]` (the clock and the most
 /// products of a core), `ternary|int8|f32|f16 <one|all> <n> <k> <m>...` (the
-/// first set alone), or `ternary2|int82|q8_02|f322|f162 <one|all> <n> <k>
-/// <m>...` (the first set against the second, in turns). `one` is the team
+/// first set alone), `ternary2|int82|q8_02|f322|f162|nn2 <one|all> <n> <k>
+/// <m>...` (the first set against the second, in turns), or `attention
+/// <one|all> <tq> <tk> <d> <heads> [layers]` (the attention of `layers.rs`). `one` is the team
 /// of one L3 domain, `all` the team of all cores. Run it with `TRIT_KERNELS`
 /// not set, so that the first set is the first set.
 pub fn run(args: &[String]) -> Vec<String> {
@@ -417,8 +418,75 @@ pub fn run(args: &[String]) -> Vec<String> {
                 });
             }
         }
+        "nn2" => {
+            // The broadcast-form product on one thread: `x` is `m x k`, the
+            // weights are `k x n`.
+            let shape = numbers(args, 2);
+            let (n, k) = (shape[0], shape[1]);
+            let weights: Vec<f32> = (0..n * k).map(|_| 0.05 * rng.unit()).collect();
+            for &m in &shape[2..] {
+                let x = rng.activations(m, k);
+                let run = |second: bool| {
+                    let mut out = crate::cpu::buf::Buf::scratch(m * n);
+                    if second {
+                        crate::cpu::v2::nn::matmul_nn_into(&x, m, k, &weights, n, &mut out);
+                    } else {
+                        fgemm::matmul_nn_into(&x, m, k, &weights, n, &mut out);
+                    }
+                    out
+                };
+                lines.push(compared(
+                    &format!("nn {n}x{k} m={m}"),
+                    m * n * k,
+                    || run(false),
+                    || run(true),
+                ));
+            }
+        }
+        "attention" => {
+            // `attention <one|all> <tq> <tk> <d> <heads> [layers]`: the
+            // attention of `layers` layers in turn, each with its own keys
+            // and values, as an encoder (many queries) or a decoder step
+            // (one query for each beam) runs it.
+            let shape = numbers(args, 2);
+            let (tq, tk, d, heads) = (shape[0], shape[1], shape[2], shape[3]);
+            let layers = shape.get(4).copied().unwrap_or(1);
+            let _team = enter(spread);
+            let sources: Vec<(Vec<f32>, Vec<f32>)> = (0..layers)
+                .map(|_| (rng.activations(tk, d), rng.activations(tk, d)))
+                .collect();
+            let head_major = |(k, v): &(Vec<f32>, Vec<f32>)| {
+                crate::layers::HeadMajor::new((k, d), (v, d), tk, (d / heads, heads))
+            };
+            let kv: Vec<_> = sources.iter().map(head_major).collect();
+            let q = rng.activations(tq, d);
+            let attend =
+                |kv| crate::layers::attention_with((&q, d), kv, tq, (d, heads), false);
+            let hash = attend(&kv[0]).iter().fold(0xcbf2_9ce4_8422_2325u64, |h, v| {
+                (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3)
+            });
+            let rounds = (2_000_000_000 / (tq * tk * d * layers).max(1)).clamp(15, 4000);
+            let (least, median) = time_ms(rounds, || {
+                for kv in &kv {
+                    std::hint::black_box(attend(kv));
+                }
+            });
+            let (copy_least, copy_median) = time_ms(rounds.min(200), || {
+                for source in &sources {
+                    std::hint::black_box(head_major(source));
+                }
+            });
+            let each = 1e3 / layers as f64;
+            lines.push(format!(
+                "attention {tq} queries x {tk} keys, d {d}, {heads} heads, {layers} layers: least {:.2} us, median {:.2} us for each layer; head-major copy least {:.2} us, median {:.2} us; hash {hash:016x}",
+                least * each,
+                median * each,
+                copy_least * each,
+                copy_median * each
+            ));
+        }
         _ => lines.push(
-            "usage: kernel_bench peak [one|all] | ternary2|int82|q8_02|f322|f162 <one|all> <n> <k> <m>..."
+            "usage: kernel_bench peak [one|all] | ternary2|int82|q8_02|f322|f162|nn2 <one|all> <n> <k> <m>... | attention <one|all> <tq> <tk> <d> <heads> [layers]"
                 .into(),
         ),
     }

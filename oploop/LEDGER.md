@@ -2440,3 +2440,79 @@ time come from Windows for the process that ended.
   The error counts in the tables of this session before this entry came from 1.0.1.
 - TDT has its own harness (`bench/accuracy.py` in the TDT repository). If it has no pin, its
   counts go down by 4 with no change of the engine, and the ratchet then hides 4 new errors.
+
+## Session 2026-11-16 (the method of kernel-autoresearch on the CPU kernels: floors, then bounded ideas)
+
+The owner asked to use https://github.com/gauravjain14/kernel-autoresearch-plugin (commit
+64d53f3) on the CPU kernels. Its harness cannot run them: it times CUDA kernels (NVRTC, CUDA
+graphs, `torch.cuda`, nsys and ncu). Its method does apply, and this session uses it inside the
+rules of this ledger:
+
+1. Model the score: what one millisecond of each product shape is worth in a clip.
+2. Measure floors, not only times: the gap to the floor, shape by shape, is the backlog.
+3. Bound each idea with the cheapest test before the build.
+4. Keep each change that is proven, and stack them.
+
+Other sessions used 17 to 23 cores during this part (Rust builds). `kernel_bench peak` gave
+0.67 to 0.82 products for each cycle and core, where a quiet computer gives 1.0. So a claim
+here rests on one thread with the least time of many rounds, on a count, or on two builds in
+turns in one state of the computer.
+
+### Scaffold: the products by shape in the profile build (`prof::product`, `prof::products`)
+
+- `--features profile` now prints a table of the matrix products by kernel, shape, row count,
+  and thread count: calls, time, the floor, and the time over the floor. The floor of a line
+  is the time of its multiply-adds alone at the peak of this CPU (`vpdpbusd` and `vfmadd231ps`
+  alone, measured in the same process at the end of the run) on the threads of the line. A
+  product inside a task counts thread time on one thread; a product on the calling thread
+  counts wall time on the team.
+- A lock-free table of 4,096 slots keeps the lines. A normal build has no code for it.
+- `kernel_bench nn2 <one|all> <n> <k> <m>...`: the broadcast-form product (`matmul_nn_into`),
+  first set against second. `kernel_bench attention <one|all> <tq> <tk> <d> <heads> [layers]`:
+  `layers::attention_with` and the head-major copy, with the keys and values of `layers`
+  layers in turn, and a hash of the output.
+
+### P-16 gap table (profile build `prof37.exe`, 200 `clean` clips, one run, busy computer)
+
+The times are high (busy computer); the order of the lines and the ratios inside one line
+are what counts. Full tables: `oploop/results/s1116/gap-<model>.txt`.
+
+| Model | Line | Time | Share of the run | Of its floor |
+|---|---|---:|---:|---:|
+| Whisper tiny (12,626 ms) | Attention with a head-major copy, wall | 4,350 ms | 34 % | |
+| | f32 broadcast 1500 x 64 and 64 x 1500, 65 to 128 rows (encoder), thread time | 25,758 ms | | 93 to 102 % |
+| | f32 broadcast 1500 x 64, 5 rows (cross-attention scores of a step), thread time | 4,008 ms | | 27 % |
+| | f32 broadcast 64 x 1500, 5 rows (its values), thread time | 2,058 ms | | 53 % |
+| | f16 51865 x 384, 5 rows (token table), wall | 1,734 ms | 13.7 % | 34 % |
+| | int8, up to 2,048 rows (encoder), wall | 1,690 ms | 13.4 % | 34 to 53 % |
+| | int8, 5 rows (decoder), wall | 640 ms | 5.1 % | 6 to 13 % |
+| Moonshine tiny (6,339 ms) | f16 32768 x 288, 5 rows (token table), wall | 798 ms | 12.6 % | 52 % |
+| | f16, 5 rows (decoder layers), wall | 1,102 ms | 17.4 % | 24 to 47 % |
+| | f16, 129 to 2,048 rows (encoder), wall | about 1,200 ms | 19 % | 60 to 71 % |
+| | f32 broadcast 36 x tk (attention values), thread time | 2,124 ms (stage) | | 38 to 52 % |
+| | f32 broadcast tk x 36 (attention scores), thread time | 1,494 ms (stage) | | 65 to 76 % |
+| Redux (10,204 ms) | Ternary, 33 to 512 rows, wall | 6,654 ms | 65 % | 69 to 96 % |
+| | f16 vector 2560 x 1280 and 8198 x 640 (decoder), wall | 723 ms | 7.1 % | 32 to 37 % |
+| | f32 into (attention, dot form), thread time | about 1,100 ms | | 68 to 111 % |
+
+What the table says:
+
+- Whisper tiny, cross-attention of a decoder step (5 queries): the scores take 31.5 us of
+  thread time for each head and the values 16.2 us, for the same count of multiply-adds
+  (6 us at the peak) and the same bytes (384 KB of keys or values for each head). On one
+  thread with the keys in L2, `kernel_bench nn2` gives 6.1 us for each. So a step waits on
+  the keys and values (18.4 MB for the 4 layers, more than all L2 caches), and the scores
+  wait twice as long as the values. The scores read 64 rows of the transposed keys side by
+  side (64 streams, 6,000 bytes apart); the values read one stream.
+- Moonshine, values of the attention: 53 % of the peak on one thread too (`nn2 36 x 1000`,
+  125 rows: 0.044 T/s; `1000 x 36`: 0.075 T/s; the peak is 0.083). A head has 36 values: the
+  tile runs 32 columns in two registers, then 4 columns in two registers again, where the
+  second register is masked to nothing. 24 multiply-adds for each key and 6 rows, where
+  13.5 are the work.
+- The encoder products of Whisper (f32 broadcast, 125 rows) run at 94 % of the peak on one
+  thread with the keys in L2 (0.078 T/s). No gain is there.
+- The token tables and the one-row decoder products of Redux wait on memory (38 MB, 18 MB,
+  16 MB for each step). A smaller table changes the logits: a WER decision (the ledger of
+  2026-11-11 has this open).
+- Ternary: the limit of 2026-11-10 holds (94 % of the peak on a quiet computer). The 69 to
+  96 % here is the busy computer.
