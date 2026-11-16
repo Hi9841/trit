@@ -2516,3 +2516,64 @@ What the table says:
   2026-11-11 has this open).
 - Ternary: the limit of 2026-11-10 holds (94 % of the peak on a quiet computer). The 69 to
   96 % here is the busy computer.
+
+### SI-035 broadcast product: the columns that remain in one register, or in half of one
+
+- Journey: J3 (Moonshine tiny: 36 values for each head). Moonshine base (52 for each head)
+  is not on this computer. J1 as a guard (Whisper: 64 for each head, no columns remain).
+- Profile (P-16): the values of the attention are 2,124 ms of thread time in 200 clips, 39 %
+  of the attention thread time; the attention is 857 ms of 6,339 ms of wall time (13.5 %).
+  `kernel_bench nn2 one 36 1000 125`: 0.1029 ms, 0.044 T/s (53 % of the peak).
+- Hypothesis: `nn_avx512::block` in `src/cpu/fgemm.rs` runs the columns that remain after
+  the strips of 32 in one 512-bit register (9 to 16 columns), in one 256-bit register (1 to
+  8 columns), or in both (17 to 24). On Zen 4 a 256-bit multiply-add takes one of the two
+  pipes and a 512-bit one takes both. For 36 columns and 6 rows: 12 wide and 6 half
+  multiply-adds for each key, 16 cycles (the half ones wait 4 cycles on their own sums)
+  where the tile now takes 24. Each output still adds its products in the order of the
+  keys with fused steps: the same bits. Expected: `nn2 36 x 1000` at 125 rows from 0.103 ms
+  to about 0.070 ms (0.68); the values stage of Moonshine tiny about 0.7 of its thread time;
+  Moonshine tiny about 0.985 for each clip (under the 2 % of the contract, so the stage and
+  the bench are the proof, and the entry makes no end-to-end claim without a quiet A/B).
+- Not known: an Intel CPU with two 512-bit multiply-add units (a 256-bit step saves nothing
+  there, and loses nothing).
+- Test: `kernel_bench nn2` with 0 values with other bits against the second set at n of 36,
+  52, 20, 8, 3, 64, and 1500; `ab.py` with 0 texts differ; `bench/paths.py`; Kokoro and
+  MMS-TTS write the same bytes (their convolutions use this product).
+- Result, the kernel (`kernel_bench nn2 one`, builds `kb37.exe` and `kb38.exe`, one thread,
+  least time; 0 values with other bits against the second set in every shape, and the
+  hashes of the second set are equal in both builds):
+
+  | Shape (n x k, rows) | Before | After | Ratio |
+  |---|---:|---:|---:|
+  | 36 x 1000, 125 rows (Moonshine tiny values) | 0.1001 ms | 0.0663 ms | 0.66 |
+  | 36 x 1000, 5 rows | 0.0040 ms | 0.0027 ms | 0.68 |
+  | 52 x 1000, 125 rows (Moonshine base values) | 0.0999 ms | 0.0916 ms | 0.92 |
+  | 48 x 300, 125 rows | 0.0297 ms | 0.0227 ms | 0.76 |
+  | 24 x 300 and 20 x 300, 125 rows | 0.0151 and 0.0150 ms | 0.0126 and 0.0121 ms | 0.83 and 0.81 |
+  | 8 x 300 and 3 x 300, 125 rows | 0.0150 ms | 0.0049 and 0.0048 ms | 0.33 |
+  | 64 x 1500, 1500 x 64, 1000 x 36 (no columns remain, or 1 strip in 47) | | | 1.00 |
+
+- Result, the stage (`prof37.exe` and `prof38.exe` in turns, 2 pairs, Moonshine tiny, 200
+  `clean` clips): values of the attention, thread time, 2,108 to 1,468 ms and 2,020 to
+  1,381 ms (0.70 and 0.68; the forecast was 0.7). Attention, wall: 843 to 722 ms and 758 to
+  677 ms. 0 of 200 texts differ.
+- Result, a clip (`ab.py`, B37 against B38, Moonshine tiny, 4 rounds): per-clip ratio 1.002,
+  p = 0.99, rounds 18.8 to 21.1 ms, 2 to 8 cores of other load. The run in the other order
+  does not count (rounds 19.9 to 49.4 ms). So no change of a clip is shown. The forecast of
+  0.985 is inside the noise of this computer today.
+- Guards: Whisper tiny 0 of 200 texts differ (231 errors), Redux 0 of 400 (81 and 172);
+  their times do not count (another build started). `bench/paths.py` with B38, Moonshine
+  tiny: the same text on every path. Kokoro and MMS-TTS: the same bytes for one sentence of
+  10.6 s (times 693 to 907 ms and 707 to 931 ms; 375 to 462 ms and 397 to 449 ms: no change
+  shown). fmt clean. Clippy `-D warnings --release`: clean but for two findings of the base
+  commit that Rust 1.100 brings (`fgemm.rs:48` `needless_bool`, `audio/mel.rs:202`
+  `needless_range_loop`); not changed here.
+- Decision: KEEP as a correction of the kernel, with no claim for a clip. The tile did 24
+  multiply-adds where 16 do the work, and the bench and the stage show the forecast. It
+  does not pass the keep rule of the contract (2 % of a clip, two orders): the gain of a
+  Moonshine tiny clip is about 1.5 % by the stage times. It is one commit, so the owner can
+  take it out. Measure Moonshine tiny and Moonshine base again on a quiet computer.
+- Not done: the AVX2 tile (6 x 16) runs the columns that remain one value at a time, with
+  sums that are not fused (the finding of 2026-11-10); a tile for them changes the bits of
+  that path. NEON was not read. The second set (`v2/nn.rs`) keeps its form: 36 x 1000 is
+  now 1.47 times slower there than in the first set.

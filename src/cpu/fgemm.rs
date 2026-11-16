@@ -667,7 +667,21 @@ pub fn matmul_nn_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &
 mod nn_avx512 {
     use std::arch::x86_64::*;
 
-    #[target_feature(enable = "avx512f")]
+    /// `$tile::<R>` for `$r` rows.
+    macro_rules! by_rows {
+        ($tile:ident, $r:expr, $($arg:expr),*) => {
+            match $r {
+                6 => $tile::<6>($($arg),*),
+                5 => $tile::<5>($($arg),*),
+                4 => $tile::<4>($($arg),*),
+                3 => $tile::<3>($($arg),*),
+                2 => $tile::<2>($($arg),*),
+                _ => $tile::<1>($($arg),*),
+            }
+        };
+    }
+
+    #[target_feature(enable = "avx512f,avx512vl,fma")]
     pub unsafe fn block(
         x: &[f32],
         k: usize,
@@ -682,14 +696,20 @@ mod nn_avx512 {
             let r = (rows.end - i).min(6);
             let mut j = cols.start;
             while j < cols.end {
-                let c = (cols.end - j).min(32);
-                match r {
-                    6 => tile::<6>(x, k, w, n, i, j, c, out),
-                    5 => tile::<5>(x, k, w, n, i, j, c, out),
-                    4 => tile::<4>(x, k, w, n, i, j, c, out),
-                    3 => tile::<3>(x, k, w, n, i, j, c, out),
-                    2 => tile::<2>(x, k, w, n, i, j, c, out),
-                    _ => tile::<1>(x, k, w, n, i, j, c, out),
+                // Strips of 32 columns in two registers. The columns that
+                // remain take one register (up to 16), half of one (up to
+                // 8), or the two in turn (17 to 24): a multiply-add on a
+                // masked register costs as much as on a full one, and a
+                // head of 36 values (Moonshine) ran its last 4 columns as 32.
+                let c = match cols.end - j {
+                    left @ (1..=16 | 25..=32) => left,
+                    17..=24 => 16,
+                    _ => 32,
+                };
+                match c {
+                    17.. => by_rows!(pair, r, x, k, w, n, i, j, c, out),
+                    9..=16 => by_rows!(single, r, x, k, w, n, i, j, c, out),
+                    _ => by_rows!(half, r, x, k, w, n, i, j, c, out),
                 }
                 j += c;
             }
@@ -697,10 +717,10 @@ mod nn_avx512 {
         }
     }
 
-    /// R rows by up to 32 columns (`c`), masked at the right edge.
+    /// R rows by 17 to 32 columns (`c`), masked at the right edge.
     #[target_feature(enable = "avx512f")]
     #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
-    unsafe fn tile<const R: usize>(
+    unsafe fn pair<const R: usize>(
         x: &[f32],
         k: usize,
         w: &[f32],
@@ -710,27 +730,15 @@ mod nn_avx512 {
         c: usize,
         out: *mut f32,
     ) {
-        let mask_lo: __mmask16 = if c >= 16 {
-            0xFFFF
-        } else {
-            ((1u32 << c) - 1) as u16
-        };
-        let mask_hi: __mmask16 = if c >= 32 {
-            0xFFFF
-        } else if c > 16 {
-            ((1u32 << (c - 16)) - 1) as u16
-        } else {
-            0
-        };
+        let mask_hi: __mmask16 = ((1u32 << (c - 16)) - 1) as u16;
         let mut lo = [_mm512_setzero_ps(); R];
         let mut hi = [_mm512_setzero_ps(); R];
         let wp = w.as_ptr().add(j);
         let xp = x.as_ptr().add(i * k);
         for e in 0..k {
             let row = wp.add(e * n);
-            let b0 = _mm512_maskz_loadu_ps(mask_lo, row);
-            // With a mask of 0 this points past the buffer, and nothing loads.
-            let b1 = _mm512_maskz_loadu_ps(mask_hi, row.wrapping_add(16));
+            let b0 = _mm512_loadu_ps(row);
+            let b1 = _mm512_maskz_loadu_ps(mask_hi, row.add(16));
             for r in 0..R {
                 let a = _mm512_set1_ps(*xp.add(r * k + e));
                 lo[r] = _mm512_fmadd_ps(a, b0, lo[r]);
@@ -739,10 +747,62 @@ mod nn_avx512 {
         }
         for r in 0..R {
             let o = out.add((i + r) * n + j);
-            _mm512_mask_storeu_ps(o, mask_lo, lo[r]);
+            _mm512_storeu_ps(o, lo[r]);
             _mm512_mask_storeu_ps(o.add(16), mask_hi, hi[r]);
         }
     }
+
+    /// `$name::<R>`: R rows by up to `c` columns in one register for each
+    /// row, masked at the right edge.
+    macro_rules! narrow {
+        ($name:ident, $mask:ty, $zero:ident, $load:ident, $set1:ident, $fmadd:ident, $store:ident) => {
+            #[target_feature(enable = "avx512f,avx512vl,fma")]
+            #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+            unsafe fn $name<const R: usize>(
+                x: &[f32],
+                k: usize,
+                w: &[f32],
+                n: usize,
+                i: usize,
+                j: usize,
+                c: usize,
+                out: *mut f32,
+            ) {
+                let mask = ((1u32 << c) - 1) as $mask;
+                let mut acc = [$zero(); R];
+                let wp = w.as_ptr().add(j);
+                let xp = x.as_ptr().add(i * k);
+                for e in 0..k {
+                    let b = $load(mask, wp.add(e * n));
+                    for r in 0..R {
+                        acc[r] = $fmadd($set1(*xp.add(r * k + e)), b, acc[r]);
+                    }
+                }
+                for r in 0..R {
+                    $store(out.add((i + r) * n + j), mask, acc[r]);
+                }
+            }
+        };
+    }
+
+    narrow!(
+        single,
+        __mmask16,
+        _mm512_setzero_ps,
+        _mm512_maskz_loadu_ps,
+        _mm512_set1_ps,
+        _mm512_fmadd_ps,
+        _mm512_mask_storeu_ps
+    );
+    narrow!(
+        half,
+        __mmask8,
+        _mm256_setzero_ps,
+        _mm256_maskz_loadu_ps,
+        _mm256_set1_ps,
+        _mm256_fmadd_ps,
+        _mm256_mask_storeu_ps
+    );
 }
 
 #[cfg(target_arch = "x86_64")]
