@@ -481,7 +481,7 @@ pub fn run(args: &[String]) -> Vec<String> {
             let sink = std::sync::atomic::AtomicU64::new(0);
             let mut times: Vec<f64> = (0..rounds + 2)
                 .map(|_| {
-                    team::for_each(16, |task| {
+                    crate::cpu::team::for_each(16, |task| {
                         let part = &filler[task * (filler.len() / 16)..][..filler.len() / 16];
                         let sum: u64 = part.iter().map(|v| u64::from(v.to_bits())).sum();
                         sink.fetch_add(sum, std::sync::atomic::Ordering::Relaxed);
