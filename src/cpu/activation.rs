@@ -455,7 +455,22 @@ mod neon {
     use std::arch::aarch64::*;
 
     pub unsafe fn apply(values: &mut [f32], op: Op) {
-        let (chunks, tail) = values.as_chunks_mut::<4>();
+        // Four vectors at a time, step by step: one vector's steps form a
+        // chain of about 30 dependent operations, and the core keeps too
+        // few in flight to overlap the chains of the next vectors.
+        let (quads, rest) = values.as_chunks_mut::<16>();
+        for quad in quads {
+            let at = quad.as_mut_ptr();
+            let mut v = [vdupq_n_f32(0.0); 4];
+            for (i, v) in v.iter_mut().enumerate() {
+                *v = vld1q_f32(at.add(4 * i));
+            }
+            let v = compute4(v, op);
+            for (i, v) in v.iter().enumerate() {
+                vst1q_f32(at.add(4 * i), *v);
+            }
+        }
+        let (chunks, tail) = rest.as_chunks_mut::<4>();
         for chunk in chunks {
             let v = vld1q_f32(chunk.as_ptr());
             vst1q_f32(chunk.as_mut_ptr(), compute(v, op));
@@ -495,6 +510,99 @@ mod neon {
                 vmulq_f32(vmulq_n_f32(v, 0.5), erfc)
             }
         }
+    }
+
+    /// `compute` on four vectors, each step on all four before the next:
+    /// every lane gets the same operations in the same order.
+    #[inline(always)]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn compute4(v: [float32x4_t; 4], op: Op) -> [float32x4_t; 4] {
+        let one = vdupq_n_f32(1.0);
+        let mut out = [one; 4];
+        match op {
+            Op::Exp => return exp4(v),
+            Op::Silu => {
+                let mut neg = v;
+                for i in 0..4 {
+                    neg[i] = vnegq_f32(v[i]);
+                }
+                let e = exp4(neg);
+                for i in 0..4 {
+                    out[i] = vdivq_f32(v[i], vaddq_f32(one, e[i]));
+                }
+            }
+            Op::Sigmoid => {
+                let mut neg = v;
+                for i in 0..4 {
+                    neg[i] = vnegq_f32(v[i]);
+                }
+                let e = exp4(neg);
+                for i in 0..4 {
+                    out[i] = vdivq_f32(one, vaddq_f32(one, e[i]));
+                }
+            }
+            Op::Tanh => {
+                let two = vdupq_n_f32(2.0);
+                let mut neg = v;
+                for i in 0..4 {
+                    neg[i] = vnegq_f32(vmulq_f32(two, v[i]));
+                }
+                let e = exp4(neg);
+                for i in 0..4 {
+                    out[i] = vsubq_f32(vdivq_f32(two, vaddq_f32(one, e[i])), one);
+                }
+            }
+            Op::Gelu => {
+                for i in 0..4 {
+                    out[i] = compute(v[i], op);
+                }
+            }
+        }
+        out
+    }
+
+    /// `exp` on four vectors, step by step.
+    #[inline(always)]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn exp4(x: [float32x4_t; 4]) -> [float32x4_t; 4] {
+        let mut x = x;
+        let mut n_int = [vdupq_n_s32(0); 4];
+        let mut n = [vdupq_n_f32(0.0); 4];
+        let mut r = [vdupq_n_f32(0.0); 4];
+        for i in 0..4 {
+            x[i] = vminq_f32(vmaxq_f32(x[i], vdupq_n_f32(LOW)), vdupq_n_f32(HIGH));
+        }
+        for i in 0..4 {
+            n_int[i] = vcvtnq_s32_f32(vmulq_n_f32(x[i], LOG2E));
+        }
+        for i in 0..4 {
+            n[i] = vcvtq_f32_s32(n_int[i]);
+        }
+        for i in 0..4 {
+            r[i] = vfmsq_n_f32(x[i], n[i], LN2_HI);
+        }
+        for i in 0..4 {
+            r[i] = vfmsq_n_f32(r[i], n[i], LN2_LO);
+        }
+        let mut p = [vdupq_n_f32(0.0); 4];
+        for c in POLY {
+            for i in 0..4 {
+                p[i] = vfmaq_f32(vdupq_n_f32(c), p[i], r[i]);
+            }
+        }
+        let mut y = [vdupq_n_f32(0.0); 4];
+        for i in 0..4 {
+            y[i] = vfmaq_f32(
+                vaddq_f32(r[i], vdupq_n_f32(1.0)),
+                p[i],
+                vmulq_f32(r[i], r[i]),
+            );
+        }
+        for i in 0..4 {
+            let two_n = vshlq_n_s32::<23>(vaddq_s32(n_int[i], vdupq_n_s32(127)));
+            y[i] = vmulq_f32(y[i], vreinterpretq_f32_s32(two_n));
+        }
+        y
     }
 
     #[inline(always)]

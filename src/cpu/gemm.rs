@@ -90,15 +90,27 @@ impl Blocks {
         Self { codes, scales }
     }
 
-    /// The values as f32: `code * scale`.
+    /// The values as f32: `code * scale`, in parallel spans (a load
+    /// widens about 600 million values of Parakeet this way).
     pub fn to_f32(&self) -> Vec<f32> {
-        self.codes
-            .as_chunks::<Q8_0_BLOCK>()
-            .0
-            .iter()
-            .zip(&self.scales)
-            .flat_map(|(block, scale)| block.iter().map(move |c| f32::from(*c) * scale))
-            .collect()
+        const SPAN_BLOCKS: usize = 2048;
+        // Whole blocks that have a scale, as a zip of the two would give.
+        let blocks = (self.codes.len() / Q8_0_BLOCK).min(self.scales.len());
+        let mut out = vec![0.0f32; blocks * Q8_0_BLOCK];
+        team::chunks_mut(&mut out, SPAN_BLOCKS * Q8_0_BLOCK, |span, values| {
+            let first = span * SPAN_BLOCKS;
+            let codes = &self.codes[first * Q8_0_BLOCK..][..values.len()];
+            for ((out, block), scale) in values
+                .chunks_mut(Q8_0_BLOCK)
+                .zip(codes.chunks(Q8_0_BLOCK))
+                .zip(&self.scales[first..])
+            {
+                for (o, c) in out.iter_mut().zip(block) {
+                    *o = f32::from(*c) * scale;
+                }
+            }
+        });
+        out
     }
 }
 
@@ -139,7 +151,6 @@ impl Q8 {
         }
     }
 
-    #[cfg(feature = "gpu")]
     fn to_f32(&self, n: usize, k: usize) -> Vec<f32> {
         let mut out = vec![0.0f32; n * k];
         for row in 0..n {
@@ -470,6 +481,19 @@ impl Dense {
             Weights::Q8(weight) => upload_wide(&weight.to_f32(n, k), n, k, bias),
             Weights::Int8(weight) => upload_wide(&weight.dequant_f32(), n, k, bias),
         }
+    }
+
+    /// The layer with int8-storage weights (`Weights::Q8`) widened to f32
+    /// once, the values each product would widen: a product then gives the
+    /// same values. For a small layer that runs one row at a time (the
+    /// transducer's joint), where widening its weights costs more than the
+    /// product. Other weights stay as they are.
+    pub(crate) fn widened(mut self) -> Self {
+        if let Weights::Q8(weight) = &self.weight {
+            let values = weight.to_f32(self.out_features, self.in_features);
+            self.weight = Weights::F32(Store::weights(values));
+        }
+        self
     }
 
     /// `x` is `rows x in_features`; the result is `rows x out_features`.

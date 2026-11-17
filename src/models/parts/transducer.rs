@@ -32,7 +32,10 @@ impl DecoderLayer {
             precision,
             Precision::F32 | Precision::Int8 | Precision::Q8_0
         ) {
-            return Dense::load_cpu(t, &[(name, out)], inp).map(Self::Dense);
+            // Widened once: the joint runs one row per decoder step, and
+            // widening its weights in each step cost 4 times the product.
+            return Dense::load_cpu(t, &[(name, out)], inp)
+                .map(|layer| Self::Dense(layer.widened()));
         }
         let weight = t.f16_bits(&format!("{name}.weight"), out * inp)?;
         let bias = t.f32_len(&format!("{name}.bias"), out)?;

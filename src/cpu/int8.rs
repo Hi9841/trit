@@ -185,6 +185,46 @@ pub(super) fn quantize_code(value: f32, scale: f32) -> i8 {
     (value / scale).round_ties_even().clamp(-127.0, 127.0) as i8
 }
 
+/// `group_scale` of the group's largest magnitude, and `quantize_code` of
+/// each value into `codes`, four lanes at a time: the same values for
+/// finite inputs (the maximum does not depend on the order, `frintn` rounds
+/// half to even). A row with a NaN or an infinity takes the scalar path: there
+/// the order of the maximum matters.
+#[cfg(target_arch = "aarch64")]
+fn quantize_group_neon(span: &[f32], codes: &mut [i8; GROUP]) -> f32 {
+    use std::arch::aarch64::*;
+    assert_eq!(span.len(), GROUP);
+    // SAFETY: NEON is part of every arm64 CPU; `span` and `codes` hold
+    // GROUP values, read and written 16 at a time.
+    unsafe {
+        let p = span.as_ptr();
+        let mut most = [vdupq_n_f32(0.0); 4];
+        for i in 0..GROUP / 16 {
+            for (j, most) in most.iter_mut().enumerate() {
+                *most = vmaxnmq_f32(*most, vabsq_f32(vld1q_f32(p.add(16 * i + 4 * j))));
+            }
+        }
+        let most = vmaxnmq_f32(vmaxnmq_f32(most[0], most[1]), vmaxnmq_f32(most[2], most[3]));
+        let scale = group_scale(vmaxnmvq_f32(most));
+        let divisor = vdupq_n_f32(scale);
+        let (low, high) = (vdupq_n_f32(-127.0), vdupq_n_f32(127.0));
+        for i in 0..GROUP / 16 {
+            let mut q = [vdupq_n_s32(0); 4];
+            for (j, q) in q.iter_mut().enumerate() {
+                let v = vrndnq_f32(vdivq_f32(vld1q_f32(p.add(16 * i + 4 * j)), divisor));
+                *q = vcvtq_s32_f32(vminq_f32(vmaxq_f32(v, low), high));
+            }
+            let first = vcombine_s16(vmovn_s32(q[0]), vmovn_s32(q[1]));
+            let second = vcombine_s16(vmovn_s32(q[2]), vmovn_s32(q[3]));
+            vst1q_s8(
+                codes.as_mut_ptr().add(16 * i),
+                vcombine_s8(vmovn_s16(first), vmovn_s16(second)),
+            );
+        }
+        scale
+    }
+}
+
 impl Int8 {
     /// Whether a `n x k` layer fits the kernels: whole groups and whole tiles.
     pub fn fits(n: usize, k: usize) -> bool {
@@ -269,6 +309,30 @@ impl Int8 {
             for r in 0..rows {
                 let out_row = block * rows + r;
                 row(out_row, &mut values);
+                #[cfg(target_arch = "aarch64")]
+                {
+                    // A row with a NaN or an infinity takes the scalar path below.
+                    if values.iter().all(|v| v.is_finite()) {
+                        let mut codes = [0i8; GROUP];
+                        for g in 0..groups {
+                            let span = &values[g * GROUP..(g + 1) * GROUP];
+                            let scale = quantize_group_neon(span, &mut codes);
+                            // SAFETY: each block belongs to one task; the buffers outlive the step.
+                            unsafe {
+                                *all_s
+                                    .slice_mut((block * groups + g) * rows + r, 1)
+                                    .as_mut_ptr() = scale
+                            };
+                            // Every arm64 layout keeps 4 inputs of a row together.
+                            for (i, four) in codes.as_chunks::<4>().0.iter().enumerate() {
+                                let at = path.at(k, out_row, g * GROUP + 4 * i);
+                                // SAFETY: as above.
+                                unsafe { all_w.slice_mut(at, 4) }.copy_from_slice(four);
+                            }
+                        }
+                        continue;
+                    }
+                }
                 for g in 0..groups {
                     let span = &values[g * GROUP..(g + 1) * GROUP];
                     let max = span.iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -402,10 +466,24 @@ impl Int8 {
                 self.sdot_task(&q, block, ptr)
             }),
             #[cfg(target_arch = "aarch64")]
-            // SAFETY: Path::detect confirmed the int8 matrix multiply feature.
-            Path::NeonMmla => team::for_each(self.n / rows, |block| unsafe {
-                self.mmla_task(&q, block, ptr)
-            }),
+            Path::NeonMmla => {
+                let x = paired(&q, self.k, self.k / self.group);
+                let blocks = self.n / rows;
+                // Row blocks per task: the task of a short product (a decoder
+                // step, one frame) must outweigh claiming it, while every
+                // thread still gets two tasks.
+                let work = x.pairs * 2 * self.k * rows;
+                let per_task = MIN_TASK_WORK
+                    .div_ceil(work.max(1))
+                    .clamp(1, (blocks / (2 * team::threads())).max(1));
+                // SAFETY: Path::detect confirmed the int8 matrix multiply
+                // feature; each task writes the columns of its own blocks.
+                team::for_each(blocks.div_ceil(per_task), |task| unsafe {
+                    for block in task * per_task..((task + 1) * per_task).min(blocks) {
+                        self.mmla_task(&x, q.m, block, ptr);
+                    }
+                })
+            }
         }
         out
     }
@@ -668,70 +746,47 @@ impl Int8 {
         }
     }
 
-    /// One 8-output block over every frame, 4 frames (two pairs) per tile.
+    /// One 8-output block over every frame pair, two pairs per tile.
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "i8mm")]
-    unsafe fn mmla_task(&self, q: &Quantized, block: usize, out: OutPtr) {
-        let mut frame = 0;
-        while frame + 4 <= q.m {
-            self.mmla_tile::<2>(q, block, frame, 4, out);
-            frame += 4;
+    unsafe fn mmla_task(&self, x: &Paired, m: usize, block: usize, out: OutPtr) {
+        let mut pair = 0;
+        while pair + 2 <= x.pairs {
+            self.mmla_tile::<2>(x, m, block, pair, out);
+            pair += 2;
         }
-        match q.m - frame {
-            0 => {}
-            frames @ (1 | 2) => self.mmla_tile::<1>(q, block, frame, frames, out),
-            frames => self.mmla_tile::<2>(q, block, frame, frames, out),
+        if pair < x.pairs {
+            self.mmla_tile::<1>(x, m, block, pair, out);
         }
     }
 
-    /// 8 outputs (four row pairs) by `frames` frames, at most `2 * P`, in `P`
-    /// frame pairs. `smmla` takes 8 inputs of two frames and 8 of two rows,
-    /// and adds the four dot products, `[f0 r0, f0 r1, f1 r0, f1 r1]`. A
-    /// missing frame of the last pair reads as zeros and is not stored. The
-    /// f32 steps are those of `neon_tile`, so both give the same values.
+    /// 8 outputs (four row pairs) by `P` frame pairs from `pair0`. `smmla`
+    /// takes 8 inputs of two frames and 8 of two rows, and adds the four dot
+    /// products, `[f0 r0, f0 r1, f1 r0, f1 r1]`. A frame past `m` (the second
+    /// of the last pair) reads as zeros and is not stored. The f32 steps are
+    /// those of `neon_tile`, so both give the same values.
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
     #[allow(clippy::needless_range_loop)]
     unsafe fn mmla_tile<const P: usize>(
         &self,
-        q: &Quantized,
+        x: &Paired,
+        m: usize,
         block: usize,
-        frame0: usize,
-        frames: usize,
+        pair0: usize,
         out: OutPtr,
     ) {
         use std::arch::aarch64::*;
         let (k, k8s, groups) = (self.k, self.k / 8, self.k / self.group);
         let spans = self.group / 16;
-        let zero = vdupq_n_s8(0);
+        let codes = x.values.as_ptr().add(pair0 * 2 * k);
+        let weights = self.weights.as_ptr().add(block * k8s * 64);
         let mut acc = [[vdupq_n_f32(0.0); 4]; P];
         for g in 0..groups {
             let mut dots = [[vdupq_n_s32(0); 4]; P];
             for k16 in g * spans..(g + 1) * spans {
-                let load = |f: usize| {
-                    if f < frames {
-                        vld1q_s8(q.values.as_ptr().add((frame0 + f) * k + k16 * 16))
-                    } else {
-                        zero
-                    }
-                };
-                // Pair p, half h: inputs 8h..8h+8 of frames 2p and 2p + 1.
-                let mut x = [[zero; 2]; P];
-                for p in 0..P {
-                    let (a, b) = (
-                        vreinterpretq_s64_s8(load(2 * p)),
-                        vreinterpretq_s64_s8(load(2 * p + 1)),
-                    );
-                    x[p] = [
-                        vreinterpretq_s8_s64(vzip1q_s64(a, b)),
-                        vreinterpretq_s8_s64(vzip2q_s64(a, b)),
-                    ];
-                }
                 for half in 0..2 {
-                    let w = self
-                        .weights
-                        .as_ptr()
-                        .add((block * k8s + k16 * 2 + half) * 64);
+                    let w = weights.add((k16 * 2 + half) * 64);
                     let w = [
                         vld1q_s8(w),
                         vld1q_s8(w.add(16)),
@@ -739,35 +794,35 @@ impl Int8 {
                         vld1q_s8(w.add(48)),
                     ];
                     for p in 0..P {
+                        let pair = vld1q_s8(codes.add(p * 2 * k + k16 * 32 + half * 16));
                         for r in 0..4 {
-                            dots[p][r] = smmla(dots[p][r], x[p][half], w[r]);
+                            dots[p][r] = smmla(dots[p][r], pair, w[r]);
                         }
                     }
                 }
             }
             let scales = self.scales.as_ptr().add((block * groups + g) * 8);
-            let xscale = |f: usize| {
-                if f < frames {
-                    q.scales[(frame0 + f) * groups + g]
-                } else {
-                    0.0
-                }
-            };
+            let mut xs = [vdupq_n_f32(0.0); P];
             for p in 0..P {
-                let xs = vcombine_f32(vdup_n_f32(xscale(2 * p)), vdup_n_f32(xscale(2 * p + 1)));
-                for r in 0..4 {
-                    let ws = vld1_f32(scales.add(2 * r));
-                    let scale = vmulq_f32(vcombine_f32(ws, ws), xs);
+                xs[p] = vld1q_f32(x.scales.as_ptr().add(((pair0 + p) * groups + g) * 4));
+            }
+            for r in 0..4 {
+                // [w 2r, w 2r+1] twice.
+                let ws = vreinterpretq_f32_u64(vdupq_n_u64(std::ptr::read_unaligned(
+                    scales.add(2 * r).cast::<u64>(),
+                )));
+                for p in 0..P {
+                    let scale = vmulq_f32(ws, xs[p]);
                     acc[p][r] = vfmaq_f32(acc[p][r], vcvtq_f32_s32(dots[p][r]), scale);
                 }
             }
         }
         for p in 0..P {
+            let first = 2 * (pair0 + p);
             for r in 0..4 {
                 let column = block * 8 + 2 * r;
-                let first = frame0 + 2 * p;
                 vst1_f32(out.0.add(first * self.n + column), vget_low_f32(acc[p][r]));
-                if 2 * p + 1 < frames {
+                if first + 1 < m {
                     vst1_f32(
                         out.0.add((first + 1) * self.n + column),
                         vget_high_f32(acc[p][r]),
@@ -775,6 +830,99 @@ impl Int8 {
                 }
             }
         }
+    }
+}
+
+/// The quantized frames in pairs for `smmla`: for pair `p` and inputs
+/// `8j..8j+8`, 16 bytes at `(p * k / 8 + j) * 16`, the codes of frame 2p
+/// and then those of frame 2p + 1 (zeros past the last frame). Scales as
+/// `[pair][group]` of `[x0, x0, x1, x1]`, the order of `smmla`'s results.
+#[cfg(target_arch = "aarch64")]
+struct Paired {
+    pairs: usize,
+    values: Vec<i8>,
+    scales: Vec<f32>,
+}
+
+#[cfg(target_arch = "aarch64")]
+thread_local! {
+    static PAIRED: std::cell::RefCell<Vec<i8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Drop for Paired {
+    fn drop(&mut self) {
+        let values = std::mem::take(&mut self.values);
+        PAIRED.with(|cell| *cell.borrow_mut() = values);
+    }
+}
+
+/// Least work of an `smmla` product task, in multiply-adds of whole tiles.
+/// A decoder step (one frame) had 320 tasks of about 0.1 us each, and the
+/// claims took longer than the work: grouped, its products ran 3 times
+/// faster on the OnePlus 13R. A frame of a take's encoder is far above it.
+#[cfg(target_arch = "aarch64")]
+const MIN_TASK_WORK: usize = 800_000;
+
+/// Frame pairs that one task of `paired` writes.
+#[cfg(target_arch = "aarch64")]
+const PAIRS_PER_TASK: usize = 4;
+
+#[cfg(target_arch = "aarch64")]
+fn paired(q: &Quantized, k: usize, groups: usize) -> Paired {
+    use std::arch::aarch64::*;
+    let (m, pairs) = (q.m, q.m.div_ceil(2));
+    // Reuse this thread's buffer: a fresh one would fault in new pages.
+    let mut values = PAIRED.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    if values.len() < pairs * 2 * k {
+        values.resize(pairs * 2 * k, 0);
+    }
+    let mut scales = vec![0.0f32; pairs * groups * 4];
+    let (all_values, all_scales) = (
+        team::SendPtr::new(&mut values),
+        team::SendPtr::new(&mut scales),
+    );
+    team::for_each(pairs.div_ceil(PAIRS_PER_TASK), |task| {
+        for p in task * PAIRS_PER_TASK..((task + 1) * PAIRS_PER_TASK).min(pairs) {
+            let (f0, f1) = (2 * p, 2 * p + 1);
+            // SAFETY: each pair belongs to one task; the buffers outlive the step.
+            let (dst, scales) = unsafe {
+                (
+                    all_values.slice_mut(p * 2 * k, 2 * k),
+                    all_scales.slice_mut(p * groups * 4, groups * 4),
+                )
+            };
+            let a = &q.values[f0 * k..(f0 + 1) * k];
+            let b = (f1 < m).then(|| &q.values[f1 * k..(f1 + 1) * k]);
+            for j in 0..k / 16 {
+                // SAFETY: NEON is part of every arm64 CPU; `a` and `b` hold k
+                // bytes and `dst` 2k, so 16 bytes at 16j and 32 at 32j fit.
+                unsafe {
+                    let x0 = vreinterpretq_s64_s8(vld1q_s8(a.as_ptr().add(16 * j)));
+                    let x1 = match b {
+                        Some(b) => vreinterpretq_s64_s8(vld1q_s8(b.as_ptr().add(16 * j))),
+                        None => vdupq_n_s64(0),
+                    };
+                    let at = dst.as_mut_ptr().add(32 * j);
+                    vst1q_s8(at, vreinterpretq_s8_s64(vzip1q_s64(x0, x1)));
+                    vst1q_s8(at.add(16), vreinterpretq_s8_s64(vzip2q_s64(x0, x1)));
+                }
+            }
+            for g in 0..groups {
+                let x0 = q.scales[f0 * groups + g];
+                let x1 = if f1 < m {
+                    q.scales[f1 * groups + g]
+                } else {
+                    0.0
+                };
+                scales[4 * g..4 * g + 4].copy_from_slice(&[x0, x0, x1, x1]);
+            }
+        }
+    });
+    Paired {
+        pairs,
+        values,
+        scales,
     }
 }
 

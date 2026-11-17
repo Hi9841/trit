@@ -838,8 +838,8 @@ Parakeet Redux. Other models run on the GPU and gain little; a decoder step
   count.
 - **CPU:** x86-64 with AVX-512 or AVX2 (with F16C) is fast; int8 also uses
   AVX-VNNI. arm64 runs NEON, and uses `sdot` and `smmla` when the CPU has
-  them. The scalar path gives the same text and is much slower. Only
-  x86-64 Windows has been measured.
+  them. The scalar path gives the same text and is much slower. x86-64
+  Windows and one Android phone (Snapdragon 8 Gen 3) have been measured.
 - **Whisper** always encodes a full 30 s window, so a short clip costs as
   much as a long one.
 

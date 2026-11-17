@@ -3173,3 +3173,68 @@ clip. Redux: no change (0.991 as a guard of SI-039; 81 and 172 errors).
 - Clippy of Rust 1.100: `fgemm.rs:48` and `audio/mel.rs:202` fail `-D warnings` in the base
   commit. CI uses the stable toolchain, so its lint step fails at the next push.
 
+## Session 2026-11-18 (arm64: an Android phone, from TDT for Android)
+
+Measured on a OnePlus 13R (Snapdragon 8 Gen 3: 1 Cortex-X4, 5 Cortex-A720, 2 Cortex-A520;
+the team has the 6 fast cores) with Parakeet Unified English (Q8_0 GGUF) as `int8`, in TDT
+for Android's copy of Trit 0.11.0, then ported to 0.13.0 here. Screen on: in doze the shell
+benchmark stalls for about 200 ms at random and the products run at about 70 % speed.
+Bit-exact gate: hashes of every changed function's output, and the text of 81 takes on the
+phone (Trit 0.13.0 against this branch: 0 differ, `int8` and `q8_0`).
+
+### SI-042 `smmla` int8 product: the frames paired once per product
+
+- Profile: the int8 products were 77 % of the encoder. Per accumulator and 128-input group the
+  tile issued 16 `smmla`, 4 frame zips, and about 5 epilogue operations: 63 % of the vector
+  slots were `smmla`.
+- Change: `paired` writes the quantized frames once per product as 16-byte rows (8 codes of
+  frame 2p, then 8 of frame 2p+1, zeros past the last frame) and the scales as
+  `[x0, x0, x1, x1]`; the tile loads them as they are. The f32 steps are those of
+  `neon_tile`.
+- One block's 8 products, 6 threads, 200 rows: 438-458 -> 527-563 GMAC/s (screen off;
+  817 with the screen on). Output hash equal at 200, 41, and 7 rows. Session 2 of the phone
+  saw no gain with Q8_0's 32-input groups, where the zips were 10 % of the slots.
+
+### SI-043 exp, SiLU, sigmoid, tanh: four NEON vectors at a time
+
+- SiLU took about 43 cycles per vector on an A720: one vector's exp and divide are a chain
+  of about 30 operations, and the core keeps too few in flight.
+- `compute4` and `exp4` run each step on four vectors. Hashes of the four functions over 1M
+  inputs equal. SiLU per 1M values: A720 5.83 -> 2.81 ms, X4 1.66 -> 1.38 ms.
+
+### SI-044 the joint widened once at load (every CPU)
+
+- The joint (1,030 x 640) is a shape the int8 kernels cannot take, so it runs on int8
+  storage with f32 math, and each call widened its weights into a 164 KB panel per task.
+- `Dense::widened` keeps the widened f32 weights from the load (2 MB more); the product
+  uses the same tiles, so the same values. Decoder of a 21 s take on the phone: joint 24.5
+  -> 6.6 ms. On the 7950X3D (8 cores, AVX-512), 81 takes, 3 rounds: decoder 271-288 ->
+  184-186 ms; texts equal on AVX-512 and `TRIT_ISA=avx2`, `int8` and `auto`.
+
+### SI-045 one-row int8 products: row blocks grouped per task (arm64)
+
+- A decoder step's LSTM product had 320 tasks of about 0.1 us each; the claims took longer.
+- Each task gets at least 800K multiply-adds, and each thread at least two tasks. One-row
+  products 42-47 -> 99-136 GMAC/s; 7 rows 175-256 -> 250-333; 200 rows unchanged.
+  With SI-044: decoder of a 21 s take 39.7 -> 15.3 ms.
+- x86-64 has the same cause (the profile: the LSTM product 2,560 x 1,280 with one row, 72 ms
+  of which 61 over the floor, 81 takes): not changed here, about 0.75 ms per take.
+- Not kept: tasks by ranges of frames for tall products (the subsampler's 17K x 256): no gain.
+
+### SI-046 load: NEON group quantizer, parallel Q8_0 widening
+
+- `Int8::quantize` divided one weight at a time, and `Blocks::to_f32` ran on one thread.
+- arm64: `quantize_group_neon` (rows with a NaN or an infinity take the scalar code: there
+  the order of the maximum matters); every CPU: `to_f32` in parallel spans. Same weights
+  (the cache file is not written again). Load with cache on the phone: 812-841 ->
+  571-584 ms; on the 7950X3D a load and a 1.1 s clip: 728-788 -> 643-719 ms.
+
+### Totals on the phone (Trit 0.11.0 + SI-042 to SI-046, screen on, 5 takes of 53.5 s)
+
+| Build | Round 1 | Round 2 | Round 3 |
+|---|---|---|---|
+| before | 1,298 ms | 1,171 ms | 1,176 ms |
+| after | 1,075 ms | 942 ms | 928 ms |
+
+Reviewed by GPT-6.2 Sol (high, read-only); its findings are in SI-046 (NaN rows) and in
+`Blocks::to_f32` (a malformed block list keeps the old length, no panic).
