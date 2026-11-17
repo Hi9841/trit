@@ -45,9 +45,8 @@ impl Level {
     /// to f32 once for a block of more than 4 rows.
     fn widens_in_tile(self) -> bool {
         #[cfg(target_arch = "x86_64")]
-        if self == Level::Avx512 {
-            return true;
-        }
+        return self == Level::Avx512;
+        #[cfg(not(target_arch = "x86_64"))]
         false
     }
 }

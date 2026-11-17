@@ -74,6 +74,14 @@ struct Shared {
     /// worker with no job after it parks at once: the 3 ms of spin after the
     /// last step of a call were 21 ms of CPU for each Parakeet call.
     rest: AtomicUsize,
+    /// The threads that take tasks, the caller included: worker `i` takes
+    /// tasks while `i + 1 < active`. Android moves an app between sets of
+    /// cores as its state changes (the cpuset of a service has fewer cores
+    /// than that of the app on screen). Team threads spin, so a team with
+    /// more threads than its cores keeps a core from the thread that holds
+    /// the step's last task, and each step waits for a time slice. The
+    /// others sit out (`fit_to`).
+    active: AtomicUsize,
     lock: Mutex<()>,
     wake: Condvar,
 }
@@ -116,6 +124,7 @@ impl Team {
             parked: AtomicUsize::new(0),
             // No generation has this value, so no worker rests before a call ends.
             rest: AtomicUsize::new(usize::MAX),
+            active: AtomicUsize::new(threads.max(1)),
             lock: Mutex::new(()),
             wake: Condvar::new(),
         });
@@ -130,7 +139,7 @@ impl Team {
                     set_priority(ABOVE_NORMAL);
                     keep_full_speed();
                     set_ideal(ideal_cpu(domain, index + 1, threads));
-                    work(&for_worker);
+                    work(&for_worker, index, domain);
                 });
             match spawned {
                 Ok(handle) => handles.push(handle),
@@ -212,6 +221,34 @@ impl Team {
             if busy(current) - busy(domain) >= MOVE_AT_BUSY_GAP {
                 self.move_to(domain);
             }
+        }
+    }
+
+    /// Android: lets as many threads take tasks as the team's cores that
+    /// `allowed` (the cores the calling thread may use now, 0 when unknown)
+    /// holds, and all of the team's cores outside it. With no team core in
+    /// `allowed`, the count of `allowed`.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn fit_to(&self, allowed: usize) {
+        let all = self.workers + 1;
+        let usable = if allowed == 0 {
+            all
+        } else {
+            let mask = match self.domain.load(Ordering::Relaxed) & allowed {
+                0 => allowed,
+                mask => mask,
+            };
+            (mask.count_ones() as usize).clamp(1, all)
+        };
+        self.set_active(usable);
+    }
+
+    fn set_active(&self, active: usize) {
+        let s = &*self.shared;
+        let before = s.active.swap(active, Ordering::AcqRel);
+        if active > before {
+            let _lock = s.lock.lock();
+            s.wake.notify_all();
         }
     }
 
@@ -306,11 +343,21 @@ fn run_tasks(s: &Shared) -> Option<Box<dyn Any + Send>> {
     }
 }
 
-fn work(s: &Shared) {
+/// `domain`: the cores to go back to after a park (Android only).
+#[cfg_attr(not(target_os = "android"), allow(unused_variables))]
+fn work(s: &Shared, index: usize, domain: usize) {
     INSIDE.set(true);
     // A fixed start, so a worker that starts late still sees the first job.
     let mut seen = 0;
     loop {
+        if index + 1 >= s.active.load(Ordering::Acquire) {
+            let mut lock = s.lock.lock();
+            while index + 1 >= s.active.load(Ordering::Acquire) {
+                s.wake.wait(&mut lock);
+            }
+            // `seen` stays old, so this worker joins the job that runs now:
+            // `on_every_thread` needs each thread in its job.
+        }
         let mut idle_since = Instant::now();
         let mut spins = 0u32;
         loop {
@@ -329,6 +376,11 @@ fn work(s: &Shared) {
                     s.wake.wait(&mut lock);
                 }
                 s.parked.fetch_sub(1, Ordering::SeqCst);
+                // Android resets the affinity of every thread of an app that
+                // moves to another cpuset. A parked worker starts a read,
+                // and gets its cores back here, once per read.
+                #[cfg(target_os = "android")]
+                set_affinity(domain);
                 idle_since = Instant::now();
             } else {
                 std::hint::spin_loop();
@@ -361,6 +413,10 @@ pub fn enter(slot: usize) -> Entered {
     let previous = CURRENT.replace(slot);
     let team = team();
     team.steer();
+    // Before `set_affinity` below: a new thread may use the cores of the
+    // process's cpuset.
+    #[cfg(target_os = "android")]
+    team.fit_to(thread_mask());
     let domain = team.domain.load(Ordering::Relaxed);
     Entered {
         previous,
@@ -776,6 +832,21 @@ fn set_affinity(_mask: usize) -> usize {
     0
 }
 
+/// Android: the processors the calling thread may run on, 0 when unknown.
+/// For a thread that did not set its own, that is the app's cpuset now.
+#[cfg(target_os = "android")]
+pub(super) fn thread_mask() -> usize {
+    extern "C" {
+        fn sched_getaffinity(pid: i32, size: usize, mask: *mut usize) -> i32;
+    }
+    let mut mask = 0usize;
+    // SAFETY: pid 0 is the calling thread; the mask is `size` bytes.
+    match unsafe { sched_getaffinity(0, std::mem::size_of::<usize>(), &mut mask) } {
+        0 => mask,
+        _ => 0,
+    }
+}
+
 /// Runs `run` once on every thread of every started team, the workers
 /// included: work that must happen on each thread, such as returning the
 /// memory a thread's allocator keeps. Each task waits until every thread of
@@ -791,6 +862,9 @@ pub fn on_every_thread(run: impl Fn() + Sync) {
     }
     for team in TEAM.iter().filter_map(OnceLock::get) {
         let threads = team.workers + 1;
+        // Every thread takes a task, also those that sit out.
+        let active = team.shared.active.load(Ordering::Acquire);
+        team.set_active(threads);
         let started = AtomicUsize::new(0);
         let gave_up = AtomicBool::new(false);
         team.for_each(threads, &|_| {
@@ -805,6 +879,13 @@ pub fn on_every_thread(run: impl Fn() + Sync) {
             }
             run();
         });
+        // A caller that changed the count meanwhile keeps its own.
+        let _ = team.shared.active.compare_exchange(
+            threads,
+            active,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
         if gave_up.load(Ordering::Relaxed) {
             run();
         }

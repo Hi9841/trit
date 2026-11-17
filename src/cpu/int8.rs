@@ -433,17 +433,19 @@ impl Int8 {
         let q = Quantized::grouped(self.isa, x, m, self.k, self.group, self.half_scales);
         let ptr = OutPtr(out.as_mut_ptr());
         let rows = self.path.rows();
+        // The multiply-adds of one block of `rows` outputs over the frames.
+        let block_work = q.m * self.k * rows;
         match self.path {
-            Path::Scalar => team::for_each(self.n, |row| self.scalar_row(&q, row, ptr)),
+            Path::Scalar => grouped(self.n, q.m * self.k, |row| self.scalar_row(&q, row, ptr)),
             #[cfg(target_arch = "x86_64")]
             // SAFETY: Path::detect confirmed the CPU features.
-            Path::Vnni512 => team::for_each(self.n / (2 * rows), |task| unsafe {
+            Path::Vnni512 => grouped(self.n / (2 * rows), 2 * block_work, |task| unsafe {
                 self.vnni_task(&q, task, bias, ptr)
             }),
             #[cfg(target_arch = "x86_64")]
             // SAFETY: Path::detect confirmed the CPU features: AVX-VNNI, or
             // AVX-512 VNNI (with VL), which runs the EVEX form.
-            Path::Vnni256 => team::for_each(self.n / rows, |block| unsafe {
+            Path::Vnni256 => grouped(self.n / rows, block_work, |block| unsafe {
                 if is_x86_feature_detected!("avxvnni") {
                     self.vnni256_vex(&q, block, ptr)
                 } else {
@@ -452,36 +454,28 @@ impl Int8 {
             }),
             #[cfg(target_arch = "x86_64")]
             // SAFETY: Isa::detect confirmed the CPU features.
-            Path::Avx2 => team::for_each(self.n / rows, |block| unsafe {
+            Path::Avx2 => grouped(self.n / rows, block_work, |block| unsafe {
                 self.avx2_task(&q, block, ptr)
             }),
             #[cfg(target_arch = "aarch64")]
             // SAFETY: NEON is part of every arm64 CPU.
-            Path::Neon => team::for_each(self.n / rows, |block| unsafe {
+            Path::Neon => grouped(self.n / rows, block_work, |block| unsafe {
                 self.neon_task::<neon::Smull>(&q, block, ptr)
             }),
             #[cfg(target_arch = "aarch64")]
             // SAFETY: Isa::detect confirmed the dot product feature.
-            Path::NeonDot => team::for_each(self.n / rows, |block| unsafe {
+            Path::NeonDot => grouped(self.n / rows, block_work, |block| unsafe {
                 self.sdot_task(&q, block, ptr)
             }),
             #[cfg(target_arch = "aarch64")]
             Path::NeonMmla => {
                 let x = paired(&q, self.k, self.k / self.group);
-                let blocks = self.n / rows;
-                // Row blocks per task: the task of a short product (a decoder
-                // step, one frame) must outweigh claiming it, while every
-                // thread still gets two tasks.
+                // A tile reads whole frame pairs: an odd last frame costs a pair.
                 let work = x.pairs * 2 * self.k * rows;
-                let per_task = MIN_TASK_WORK
-                    .div_ceil(work.max(1))
-                    .clamp(1, (blocks / (2 * team::threads())).max(1));
                 // SAFETY: Path::detect confirmed the int8 matrix multiply
                 // feature; each task writes the columns of its own blocks.
-                team::for_each(blocks.div_ceil(per_task), |task| unsafe {
-                    for block in task * per_task..((task + 1) * per_task).min(blocks) {
-                        self.mmla_task(&x, q.m, block, ptr);
-                    }
+                grouped(self.n / rows, work, |block| unsafe {
+                    self.mmla_task(&x, q.m, block, ptr)
                 })
             }
         }
@@ -857,12 +851,26 @@ impl Drop for Paired {
     }
 }
 
-/// Least work of an `smmla` product task, in multiply-adds of whole tiles.
-/// A decoder step (one frame) had 320 tasks of about 0.1 us each, and the
-/// claims took longer than the work: grouped, its products ran 3 times
-/// faster on the OnePlus 13R. A frame of a take's encoder is far above it.
-#[cfg(target_arch = "aarch64")]
+/// Least work of a product task, in multiply-adds of whole tiles. A
+/// decoder step (one frame) had 320 tasks of about 0.1 us each on arm64,
+/// and the claims took longer than the work: grouped, its products ran 3
+/// times faster on the OnePlus 13R. A block of a take's encoder is far above
+/// it, so its tasks stay one block each.
 const MIN_TASK_WORK: usize = 800_000;
+
+/// Runs `run` for each of `units` units of `work` multiply-adds, in tasks
+/// of whole units: at least `MIN_TASK_WORK` each, while every thread still
+/// gets two tasks. Each unit is the same work in any task.
+fn grouped(units: usize, work: usize, run: impl Fn(usize) + Sync) {
+    let per_task = MIN_TASK_WORK
+        .div_ceil(work.max(1))
+        .clamp(1, (units / (2 * team::threads())).max(1));
+    team::for_each(units.div_ceil(per_task), |task| {
+        for unit in task * per_task..((task + 1) * per_task).min(units) {
+            run(unit);
+        }
+    });
+}
 
 /// Frame pairs that one task of `paired` writes.
 #[cfg(target_arch = "aarch64")]

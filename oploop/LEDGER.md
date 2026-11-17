@@ -3238,3 +3238,50 @@ phone (Trit 0.13.0 against this branch: 0 differ, `int8` and `q8_0`).
 
 Reviewed by GPT-6.2 Sol (high, read-only); its findings are in SI-046 (NaN rows) and in
 `Blocks::to_f32` (a malformed block list keeps the old length, no panic).
+
+## Session 2026-11-18 (later): the rest of the phone's changes
+
+### SI-047 a product task of every int8 path has whole blocks of at least 800K multiply-adds
+
+- SI-045 grouped the row blocks of one-row products on the `smmla` path only. `grouped` now
+  splits the tasks of every path (scalar, VNNI 512, VNNI 256, AVX2, NEON, `sdot`) the same
+  way. Each block is the same work in any task: the same bits.
+- 7950X3D, 8 threads, 81 takes, 3 rounds, profile build: the LSTM product (2,560 x 1,280, one
+  row) 58-62 ms against 60-67 ms, the decoder 157-167 ms against 161-179 ms. No change on
+  x86-64: there the one-row product waits on its 3.1 MB of weights, not on its 80 claims.
+  Kept for arm64 (`sdot` and NEON have the cause of SI-045; not measured on such a CPU) and
+  as one rule for all paths.
+- Texts: 0 differ against 0.14.0 on the 81 takes with AVX-512 (3 rounds), `TRIT_ISA=avx2`,
+  and `auto`.
+
+### SI-048 Android: the team fits the cpuset of the app
+
+- From TDT for Android 0.6.2 (it was only in that app's copy of Trit). Android moves an app
+  between cpusets (a service often has fewer cores than the app on screen). The team started
+  one thread per fast core and never looked at the cpuset, so 6 spinning threads could share 5
+  cores, and each step waited for a time slice for the thread with its last task.
+- `Team::fit_to` at each `enter`: as many threads take tasks as the cpuset has team cores; the
+  others wait on the condition variable. A worker that wakes from a park pins itself to its
+  cores again (Android resets the affinity of an app's threads on a move).
+  `on_every_thread` lets every thread take its task, also those that sit out.
+- Emulator (x86-64, 4 cores, rooted), the process in a cpuset of 2 cores, Redux, a 12.3 s
+  clip: 519-625 ms before, 289-331 ms after (1 thread alone: 514-568 ms). All 4 cores:
+  171-444 against 175-253 ms. On the OnePlus 13R the bubble's cpuset holds all 8 cores, so
+  this does not change that phone.
+- Merged with 0.12.0's `rest` (a worker parks at once after the last step of a call): the
+  check of `active` comes before the spin, the park and its new pin after it. Other
+  systems: `active` stays at all threads.
+- Check of the merge (emulator, x86-64, 4 cores, not rooted, Redux, 5 takes, 2 rounds):
+  the same text as 0.14.0 in every run; all cores 893-904 against 900-968 ms.
+- Limit: the team follows the cores of the calling thread. A caller that pins itself to
+  fewer cores than its cpuset gets fewer threads. `taskset 3` binds only the caller (the
+  workers pin themselves to the team's cores again), so 0.14.0 ran on 4 cores and this
+  build on 2: 1,432 against 929 ms in round 2. In a cpuset the kernel binds every thread,
+  and this build is the faster one (the numbers above). TDT does not pin its threads.
+
+### Lint
+
+`fgemm.rs` `widens_in_tile` and `audio/mel.rs` `Fft::run` gave the two findings of the new
+stable clippy that failed `-D warnings` since 0.13.0. Rewritten in the same steps (a
+`cfg` return; an iterator over `reversed`). Clippy with `-D warnings` is clean for
+x86-64 Windows and aarch64-linux-android.

@@ -741,11 +741,17 @@ Threads:
   quota). With `TRIT_FAST_CORES=1`, on a Windows CPU with several efficiency
   classes and 4 or more cores of the highest class, the team uses only those
   cores, pinned. This is off by default: it is not measured on such a CPU yet.
+- Android: one thread per core of the fastest class (from sysfs), pinned.
+  Android puts an app into a smaller set of cores as its state changes (a
+  service often gets fewer cores than the app on screen). At each call the
+  team lets only as many threads take tasks as that set has team cores; the
+  others wait, and a parked thread gets its cores back when it wakes. The
+  team reads the set from the calling thread: a caller that pins itself to
+  fewer cores gets fewer threads.
 - macOS: one thread per performance core (`hw.perflevel0.physicalcpu`).
   macOS has no affinity masks, so each team thread runs at the
   user-interactive QoS class, and macOS keeps it on a performance core. A
   team with a thread on an efficiency core runs at the speed of that core.
-- Android: the fast cores only.
 
 macOS: build on the Mac with `cargo build --release --workspace` (Apple
 Silicon or Intel); Trit needs no other tool. The GPU path uses Metal (see
