@@ -3022,3 +3022,154 @@ to 84 % of their floor, so the next lines are the ones with no product in them:
   written. The FastConformer has its own softmax (one row at a time, a scalar maximum and
   sum) and does not use `exp_sums` yet.
 
+### SI-040 beam scores: the maximum in lanes, `exp` with the ordered sum, and a top list that skips
+
+- Journey: J1 (Whisper tiny), J3 (Moonshine tiny); Canary uses the same search.
+- Profile (P-19, and `prof45.exe`): the score job is 560 to 672 ms of a run of 8,200 to
+  8,700 ms (7 to 8 %), 106 to 127 us for each step; `kernel_bench beam all 51865 5` gives
+  84 us for a step and 75 us for one beam. A beam's task: a scalar maximum (one chain over
+  51,865 values), a copy with the subtraction to a buffer of 207 KB, `exp` over the buffer,
+  a scalar sum (one chain, 31 us), and the top 6 tokens (a scalar pass with two tests for
+  each value).
+- Hypothesis: the task takes `activation::max`, then `activation::exp_sums` on blocks of
+  1,024 logits copied to the stack with one running sum (the same `exp` of the same
+  subtraction, the same adds in the same order: the same bits; a block is a multiple of
+  every lane count), and a top list that first tests 32 values against the least value
+  that can still get in and skips them when none can. The sum chain stays (3 cycles for
+  each value: 31 us for Whisper); the `exp` runs beside it, and the other passes go from
+  about 40 us to about 5 us. Expected: `kernel_bench beam` 84 to about 45 us for a step;
+  the score job about 0.6 of its time; Whisper tiny about 0.975 for each clip, Moonshine
+  tiny about 0.98.
+- The sums of fewer than 8 rows on the levels without AVX-512 must stay in registers (one
+  row is the case of a beam): a copy of the loop for each count of rows.
+- Test: `kernel_bench beam` gives the same hash before and after on every path; 0 texts
+  differ (`ab.py`); `bench/paths.py`; Canary on 3 clips.
+
+- Change: `beam::log_sum_exp` (the lane maximum, then `exp_sums` on blocks of 1,024 logits
+  with one running sum; the buffer of each thread for the exponentials is gone), `beam::top`
+  (a test of 32 values with no branch for each value, then the old loop for a block that
+  has a value above the floor; a NaN counts as above, as before). In `activation.rs`:
+  `exp_sums` for one row on the AVX-512 level adds the 16 values of a register with scalar
+  adds (the columns of 8 rows put 3 times the operations beside the one chain: 42 us
+  against 31 us of chain for 51,865 values), and the other levels have a copy of the sum
+  loop for each count of rows (`add_side`), so the sums stay in registers.
+- Result, the kernel (`kb45.exe` against `kb46.exe`, in turns, the same hash in each case):
+
+  | Case | Before | After | Ratio |
+  |---|---:|---:|---:|
+  | AVX-512, 5 beams x 51,865, 3 cores of other load | 84 and 87 us for each step | 57 and 56 us | 0.66 |
+  | AVX-512, 1 beam x 51,865 | 77 us | 50 us | 0.65 |
+  | AVX-512, 5 beams x 32,768 | 56 us | 36 us | 0.65 |
+  | The same three, 16 cores of other load | 121, 105, 77 us | 55, 45, 37 us | 0.46, 0.43, 0.48 |
+  | `TRIT_ISA=avx2`, 5 beams x 51,865, 16 cores of other load | 127 us | 76 us | 0.60 |
+  | `TRIT_ISA=scalar`, the same | 232 us | 188 us | 0.81 |
+  | `TRIT_KERNELS=v2 TRIT_ISA=scalar`, the same | 181 us | 130 us | 0.72 |
+
+- Result, the stage (`prof45.exe` and `prof46.exe` in turns, 200 clips, 4 to 6 cores of
+  other load): the score job of Whisper tiny 771 to 342 ms and 706 to 359 ms (0.44 and
+  0.51); of Moonshine tiny 403 to 220 ms (0.55). 0 of 200 texts differ for both.
+- Result, a clip (`ab.py`, B45 against B46, 200 `clean` clips, 4 rounds). Other sessions
+  ran builds and a virtual machine through all of this part (up to 22 cores), so each run
+  started on a quiet computer and most got load:
+
+  | Model | Order | Per-clip ratio of B46 | Paired p | Rounds | Load after |
+  |---|---|---:|---:|---|---:|
+  | Whisper tiny | B45 first | 0.964 | 8.3e-20 | 40.3-42.3 and 37.4-43.1 ms (15 %) | 1.4 cores |
+  | Whisper tiny | B46 first | 0.978 | 6e-10 | 38.4-40.4 and 38.9-41.8 ms (8 %) | 0.3 cores |
+  | Moonshine tiny | B45 first | 0.981 | 0.032 | 19.0-20.4 and 18.1-20.9 ms (15 %) | 1.6 cores |
+  | Moonshine tiny | B45 first, second set | 0.970 | 2.4e-17 | 18.6-21.0 and 18.0-18.6 ms (13 %) | 1.5 cores |
+  | 10 more runs (`ab-040b.log`) and the Redux guard | | 0.87 to 1.22 | | do not count: rounds spread by 36 to 126 % | 0.9 to 22 cores |
+
+  0 texts differ in all 16 runs; errors 231, 133, and 253 (81 and 172) on both sides.
+- Decision: KEEP, by the rule of the contract for Whisper tiny (0.964 and 0.978 in the two
+  orders, p < 0.01, rounds inside 20 %), with this limit: the computer was not quiet in
+  either run (the medians are 1 to 3 ms above the quiet 37 to 38 ms). The stage shows the
+  cause (the score job at half its time, 4 % of a run). Moonshine tiny has no run in the
+  second order that counts: no claim for a clip. Measure both again on a quiet computer.
+- Release 0.13.0 (2026-11-17): the code of this entry is NOT in the release. The owner's
+  rule for the release: only what is proved, and this entry has no A/B on a quiet computer.
+  The code stays as the top commit of the local branch `oploop` until that A/B.
+- Gates (B45 against B46): the same text on 3 clips for Whisper tiny, Moonshine tiny, and
+  Canary 1B v2 with no setting, `TRIT_KERNELS=v2`, `TRIT_ISA=avx2`, `TRIT_ISA=scalar`, and
+  both; `bench/paths.py`: Whisper tiny with its known scalar text, Moonshine tiny the same
+  text on every path; 4 threads x 20 calls: 0 wrong texts for Whisper tiny, Moonshine
+  tiny, and Canary 1B v2; fmt; clippy as before.
+
+### SI-041 int8 product with many rows: a task takes a range of frames, not a range of outputs
+
+- Written while the A/B of SI-040 ran; the probe code was written and not built.
+- Journey: J1 (Whisper tiny: every encoder product has 1,500 rows). Voxtral and MOSS run the
+  same encoder. J4 as a guard (Redux has int8 products of 5 to 250 rows in its decoder and
+  none in its encoder).
+- Profile (P-19, the table of products): the int8 products of the encoder take 1,420 ms of
+  9,286 ms (15.3 %) with their quantizer, and their floor is 543 ms: 28 to 46 % of the
+  floor for each shape, the largest gap that is left.
+- Cause, from the code (`Int8::forward_biased`, `vnni_task`): a task is 32 outputs over
+  all frames. For the second product of a feed-forward block (384 x 1,536, 1,500 rows) that
+  is 12 tasks for 16 threads, each task reads all 2.3 MB of the quantized input (more than
+  the 1 MB L2 of a core, so 12 times through the L3), and writes its 128 bytes of each
+  frame 1.5 to 6 KB apart over a buffer of 2.3 to 9.2 MB.
+- Hypothesis: with many rows, a task takes a range of frames and all outputs: for each 32
+  outputs, the tiles of its frames. The input of a task (48 frames: 18 to 74 KB) and its
+  output (74 to 295 KB) stay in the L2 of its thread, the weights of 32 outputs (12 to
+  49 KB) stay in the L1 or L2 while the frames of the task go by, and 1,500 rows give 32
+  tasks for 16 threads. Each output is the same sums in the same order: the same bits.
+  Expected: the encoder int8 products from 1,420 to about 950 ms; Whisper tiny about 0.95
+  for each clip.
+- Bound first: `kernel_bench int8 all <n> <k> 1500` with the probe (frames for each task,
+  and the least rows for the split) against the head, for the 5 shapes of the encoder; then
+  rows of 6 to 750 for the rule.
+- Test: 0 texts differ (`ab.py`); `bench/paths.py`; Canary on 3 clips (its products have
+  the rows of a clip); the second kernel set keeps its own tasks.
+- Bound test (a probe build, `kernel_bench int8 all <n> <k> <m>`, the product with its
+  quantizer; 5 to 6 cores of other load, so the times of 16 threads are rough):
+
+  | Shape, 1,500 rows | 16 threads, tasks by outputs | 16 threads, by frames (24) | 1 thread, by outputs | 1 thread, by frames |
+  |---|---:|---:|---:|---:|
+  | 384 x 1,536 | 0.36 to 0.58 ms | 0.36 to 0.37 ms | 3.24 ms | 3.22 to 3.26 ms |
+  | 1,536 x 384 | 0.29 to 0.33 ms | 0.33 ms | 2.99 ms | 3.06 ms |
+  | 1,152 x 384 | 0.30 ms | 0.26 ms | 2.24 ms | 2.29 to 2.33 ms |
+  | 384 x 384 | 0.13 to 0.15 ms | 0.10 ms | 0.80 ms | 0.83 ms |
+
+  With 96 to 768 rows the split by frames is slower or the same for each shape (too few
+  tasks), and slower for 4,096 x 1,024 at each count of rows.
+- The cause in the hypothesis is wrong. On one thread the two splits take the same time,
+  and the product with its quantizer runs at 0.27 to 0.30 T multiply-adds for each second:
+  84 to 91 % of the peak of one core (0.326 T). So the input that goes through the L3
+  costs nothing that this test can see, and the kernel is near its floor. What the 16
+  threads lose is in the scaling: a layer of 384 outputs is 12 tasks for 16 threads (at
+  most 12 times one thread), and the quantizer reads 2.3 to 9.2 MB of f32.
+- Decision: NOT BUILT as written; the probe is not in the repository. What is left of it:
+  more tasks for a layer of 384 outputs (each 32 outputs in 3 ranges of frames). The
+  second product of a feed-forward block and the 384 x 384 products are 567 ms of a run of
+  9,286 ms, so at most 1.5 % of a clip: measure it on a quiet computer.
+
+### Journeys, the start of this session (B41) against the head with SI-040 (B46)
+
+Not measured as one A/B: other sessions used 5 to 22 cores from the A/B of SI-040 on. From
+the two entries: Whisper tiny 0.971 and 0.968 (SI-039, quiet), then 0.964 and 0.978
+(SI-040, not quiet), so about 0.94 for a clip against B41 and about 0.84 against the start
+of 2026-11-16 (B37). Moonshine tiny: 0.990 and 0.988 for SI-039; SI-040 is not shown for a
+clip. Redux: no change (0.991 as a guard of SI-039; 81 and 172 errors).
+
+### Next (after SI-041; this replaces the list above)
+
+- On a quiet computer: B41 against B46 for Whisper tiny and Moonshine tiny in both orders
+  (`oploop/results/s1117/ab-quiet.sh` repeats a run that got other load), and B45 against
+  B46 again.
+- `exp_sums` for the AVX2 and NEON levels: the columns of 8 rows of 8 (or 4) values. On
+  this CPU `TRIT_ISA=avx2` gives the text and a first time; most computers without
+  AVX-512 run this level.
+- The FastConformer softmax (`fastconformer.rs`, one row at a time with a scalar maximum
+  and sum) through `activation::max` and `exp_sums`: about 1 % of a Redux take of 6 s and
+  3 % of a window of 60 s by the count of SI-027. Measure with `long-clean`.
+- More tasks for an int8 layer of 384 outputs with many rows (the rest of SI-041).
+- The feed-forward block of the audio encoder by ranges of frames: the first product, the
+  GELU, and the quantizer of the second product on 6 to 24 frames at a time, so no buffer
+  of 9.2 MB of f32 is written, read for the GELU, and read again by the quantizer. GELU
+  stays a pass over a block in the L1 (SI-038: not inside the tile).
+- The token table and the cross-attention values of a decoder step wait on memory. A
+  smaller table or f16 values change the logits: a WER decision of the owner.
+- Clippy of Rust 1.100: `fgemm.rs:48` and `audio/mel.rs:202` fail `-D warnings` in the base
+  commit. CI uses the stable toolchain, so its lint step fails at the next push.
+
