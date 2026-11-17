@@ -202,6 +202,13 @@ fn difference(a: &[f32], b: &[f32]) -> (usize, f32) {
     )
 }
 
+/// FNV-1a of the bits of `values`.
+fn hash(values: &[f32]) -> u64 {
+    values.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, v| {
+        (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 /// Rounds for a product of `work` multiply-adds: about 0.3 s of them.
 fn rounds_for(work: usize) -> usize {
     (60_000_000_000usize / work.max(1)).clamp(15, 4000)
@@ -215,11 +222,9 @@ fn compared(
 ) -> String {
     let reference = second();
     let (other, gap) = difference(&first(), &reference);
-    // FNV-1a of the second set's bits: equal on every path and CPU when the
-    // second set gives the same values everywhere.
-    let hash = reference.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, v| {
-        (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3)
-    });
+    // Equal on every path and CPU when the second set gives the same values
+    // everywhere.
+    let hash = hash(&reference);
     let (a, b, ratio) = in_turns(
         rounds_for(work),
         || {
@@ -256,9 +261,12 @@ fn numbers(args: &[String], from: usize) -> Vec<usize> {
 /// One line per result. `args`: `peak [one|all]` (the clock and the most
 /// products of a core), `ternary|int8|f32|f16 <one|all> <n> <k> <m>...` (the
 /// first set alone), `ternary2|int82|q8_02|f322|f162|nn2 <one|all> <n> <k>
-/// <m>...` (the first set against the second, in turns), or `attention
+/// <m>...` (the first set against the second, in turns), `attention
 /// <one|all> <tq> <tk> <d> <heads> [layers] [cold]` (the attention of
-/// `layers.rs`; `cold` empties the caches before each timed round). `one` is the team
+/// `layers.rs`; `cold` empties the caches before each timed round), `softmax
+/// <one|all> <rows> <width> [tasks]` (the softmax of an attention task), or
+/// `beam <one|all> <vocabulary> [beams]` (the score job of a beam search
+/// step). `one` is the team
 /// of one L3 domain, `all` the team of all cores. Run it with `TRIT_KERNELS`
 /// not set, so that the first set is the first set.
 pub fn run(args: &[String]) -> Vec<String> {
@@ -464,9 +472,7 @@ pub fn run(args: &[String]) -> Vec<String> {
             let q = rng.activations(tq, d);
             let attend =
                 |kv| crate::layers::attention_with((&q, d), kv, tq, (d, heads), false);
-            let hash = attend(&kv[0]).iter().fold(0xcbf2_9ce4_8422_2325u64, |h, v| {
-                (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3)
-            });
+            let hash = hash(&attend(&kv[0]));
             let rounds = (2_000_000_000 / (tq * tk * d * layers).max(1)).clamp(15, 4000);
             // With `cold`, every thread first reads 40 MB that the attention
             // does not use, as the token table of a decoder step does: the
@@ -505,8 +511,89 @@ pub fn run(args: &[String]) -> Vec<String> {
                 copy_median * each
             ));
         }
+        "softmax" => {
+            // `softmax <one|all> <rows> <width> [tasks]`: each task takes the
+            // softmax of its own block of scores, as an attention task does.
+            // The time is the thread time of the softmax alone.
+            let shape = numbers(args, 2);
+            let (rows, width) = (shape[0], shape[1]);
+            let tasks = shape.get(2).copied().unwrap_or(1);
+            let _team = enter(spread);
+            let scores: Vec<f32> = (0..rows * width).map(|_| 6.0 * rng.unit()).collect();
+            let mut blocks = vec![0.0f32; tasks * rows * width];
+            let nanos = std::sync::atomic::AtomicU64::new(0);
+            let relaxed = std::sync::atomic::Ordering::Relaxed;
+            let mut times: Vec<f64> = (0..402)
+                .map(|_| {
+                    nanos.store(0, relaxed);
+                    crate::cpu::team::chunks_mut(&mut blocks, rows * width, |_, block| {
+                        block.copy_from_slice(&scores);
+                        let start = Instant::now();
+                        crate::layers::softmax_rows(block, width, |_| width);
+                        nanos.fetch_add(start.elapsed().as_nanos() as u64, relaxed);
+                    });
+                    nanos.load(relaxed) as f64 / (tasks * rows) as f64
+                })
+                .skip(2)
+                .collect();
+            times.sort_by(f64::total_cmp);
+            lines.push(format!(
+                "softmax {rows} rows x {width}, {tasks} tasks: least {:.1} ns, median {:.1} ns of thread time for each row; hash {:016x}",
+                times[0],
+                times[times.len() / 2],
+                hash(&blocks)
+            ));
+        }
+        "beam" => {
+            // `beam <one|all> <vocabulary> [beams]`: the score job of one
+            // beam search step, one task for each beam.
+            let shape = numbers(args, 2);
+            let vocabulary = shape[0];
+            let beams = shape.get(1).copied().unwrap_or(5);
+            let _team = enter(spread);
+            let logits: Vec<Vec<f32>> = (0..beams)
+                .map(|_| (0..vocabulary).map(|_| 12.0 * rng.unit()).collect())
+                .collect();
+            #[derive(Clone)]
+            struct Scored {
+                max: f32,
+                log_sum: f32,
+                offers: Vec<(usize, f32)>,
+            }
+            let empty = Scored {
+                max: 0.0,
+                log_sum: 0.0,
+                offers: Vec::with_capacity(beams + 2),
+            };
+            let mut scored = vec![empty; beams];
+            let mut times: Vec<f64> = (0..2002)
+                .map(|_| {
+                    let start = Instant::now();
+                    crate::cpu::team::chunks_mut(&mut scored, 1, |beam, scored| {
+                        let scored = &mut scored[0];
+                        (scored.max, scored.log_sum) =
+                            crate::models::parts::beam::log_sum_exp(&logits[beam]);
+                        crate::models::parts::beam::top(&logits[beam], beams + 1, &mut scored.offers);
+                    });
+                    start.elapsed().as_secs_f64() * 1e6
+                })
+                .skip(2)
+                .collect();
+            times.sort_by(f64::total_cmp);
+            let mut values = Vec::new();
+            for beam in &scored {
+                values.extend([beam.max, beam.log_sum]);
+                values.extend(beam.offers.iter().flat_map(|(token, logit)| [*token as f32, *logit]));
+            }
+            lines.push(format!(
+                "beam scores, {beams} beams x {vocabulary}: least {:.2} us, median {:.2} us for each step; hash {:016x}",
+                times[0],
+                times[times.len() / 2],
+                hash(&values)
+            ));
+        }
         _ => lines.push(
-            "usage: kernel_bench peak [one|all] | ternary2|int82|q8_02|f322|f162|nn2 <one|all> <n> <k> <m>... | attention <one|all> <tq> <tk> <d> <heads> [layers] [cold]"
+            "usage: kernel_bench peak [one|all] | ternary2|int82|q8_02|f322|f162|nn2 <one|all> <n> <k> <m>... | attention <one|all> <tq> <tk> <d> <heads> [layers] [cold] | softmax <one|all> <rows> <width> [tasks] | beam <one|all> <vocabulary> [beams]"
                 .into(),
         ),
     }

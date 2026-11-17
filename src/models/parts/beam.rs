@@ -245,7 +245,7 @@ pub fn search<S: Clone + Send>(
 /// The maximum of `logits` and `log sum exp(logits - max)`, so that
 /// `log softmax(x) = (x - max) - log_sum`. The exponentials go to a buffer
 /// that each thread reuses: no vector the size of the vocabulary per call.
-fn log_sum_exp(logits: &[f32]) -> (f32, f32) {
+pub(crate) fn log_sum_exp(logits: &[f32]) -> (f32, f32) {
     thread_local! {
         static EXPS: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
     }
@@ -261,7 +261,7 @@ fn log_sum_exp(logits: &[f32]) -> (f32, f32) {
 
 /// The `count` largest values with their indices, largest first, in `best`,
 /// which has room for `count + 1`.
-fn top(values: &[f32], count: usize, best: &mut Vec<(usize, f32)>) {
+pub(crate) fn top(values: &[f32], count: usize, best: &mut Vec<(usize, f32)>) {
     best.clear();
     for (i, &v) in values.iter().enumerate() {
         if v == f32::NEG_INFINITY || (best.len() == count && v <= best[count - 1].1) {
