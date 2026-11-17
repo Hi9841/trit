@@ -71,6 +71,86 @@ pub fn gelu(values: &mut [f32]) {
     apply(values, Op::Gelu);
 }
 
+/// The largest of `values`; minus infinity for no values. A NaN is not a
+/// value, as for `f32::max`. A maximum does not depend on the order of its
+/// values, so it comes from lanes; one chain over the values takes 2 to 3
+/// cycles for each value. Only a zero can come out with the other sign.
+pub fn max(values: &[f32]) -> f32 {
+    match level() {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: the level was detected from the CPU.
+        Level::Avx512 => unsafe { avx512::max(values) },
+        _ => {
+            let (chunks, tail) = values.as_chunks::<16>();
+            let mut best = [f32::NEG_INFINITY; 16];
+            for chunk in chunks {
+                for (best, value) in best.iter_mut().zip(chunk) {
+                    // One instruction for each 4 or 8 values; `f32::max` is 5.
+                    if *value > *best {
+                        *best = *value;
+                    }
+                }
+            }
+            let lanes = best.iter().chain(tail).copied();
+            lanes.fold(f32::NEG_INFINITY, f32::max)
+        }
+    }
+}
+
+/// The rows that `exp_sums` takes side by side. The sum of a row is a chain:
+/// each add waits for the one before it. A CPU runs about 8 chains at once.
+pub const SIDE: usize = 8;
+
+/// `v = exp(v - shifts[r])` for each value of row `r` of `rows` (rows of
+/// `width`), and each new value added to `sums[r]`, in the order of the row:
+/// the bits of an `exp` pass and then a sum pass, without the wait between
+/// them. A softmax is this with the maximum of each row as its shift.
+pub fn exp_sums(rows: &mut [f32], width: usize, shifts: &[f32], sums: &mut [f32]) {
+    assert!(rows.len() == shifts.len() * width && sums.len() == shifts.len());
+    if width == 0 {
+        return;
+    }
+    let groups = rows.chunks_mut(SIDE * width);
+    for ((group, shifts), sums) in groups.zip(shifts.chunks(SIDE)).zip(sums.chunks_mut(SIDE)) {
+        match level() {
+            #[cfg(target_arch = "x86_64")]
+            // SAFETY: the level was detected from the CPU.
+            Level::Avx512 => unsafe { avx512::exp_sums(group, width, shifts, sums) },
+            _ => {
+                for (row, shift) in group.chunks_exact_mut(width).zip(shifts) {
+                    row.iter_mut().for_each(|v| *v -= shift);
+                    apply(row, Op::Exp);
+                }
+                add_columns(group, width, sums);
+            }
+        }
+    }
+}
+
+/// Adds the values of each row of `group` (rows of `width`) to the sum of
+/// that row: for each column, one add of each row, so the chains of the rows
+/// run side by side.
+fn add_columns(group: &[f32], width: usize, sums: &mut [f32]) {
+    assert!(group.len() == sums.len() * width);
+    if let Ok(kept) = <&mut [f32; SIDE]>::try_from(&mut *sums) {
+        // A constant count of sums in a local array: they stay in registers.
+        let mut sum = *kept;
+        for column in 0..width {
+            for (r, sum) in sum.iter_mut().enumerate() {
+                // SAFETY: `group` has `SIDE` rows of `width`, and `column < width`.
+                *sum += unsafe { *group.get_unchecked(r * width + column) };
+            }
+        }
+        *kept = sum;
+    } else {
+        for column in 0..width {
+            for (r, sum) in sums.iter_mut().enumerate() {
+                *sum += group[r * width + column];
+            }
+        }
+    }
+}
+
 fn apply(values: &mut [f32], op: Op) {
     match level() {
         #[cfg(target_arch = "x86_64")]
@@ -114,7 +194,7 @@ fn exp_scalar(x: f32) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 mod avx512 {
-    use super::{Op, ERFC, FRAC_1_SQRT_2, HIGH, LN2_HI, LN2_LO, LOG2E, LOW, POLY};
+    use super::{Op, ERFC, FRAC_1_SQRT_2, HIGH, LN2_HI, LN2_LO, LOG2E, LOW, POLY, SIDE};
     use std::arch::x86_64::*;
 
     #[target_feature(enable = "avx512f")]
@@ -129,6 +209,117 @@ mod avx512 {
             let v = _mm512_maskz_loadu_ps(mask, tail.as_ptr());
             _mm512_mask_storeu_ps(tail.as_mut_ptr(), mask, compute(v, op));
         }
+    }
+
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn max(values: &[f32]) -> f32 {
+        let (chunks, tail) = values.as_chunks::<16>();
+        let (fours, rest) = chunks.as_chunks::<4>();
+        // `vmaxps` gives its second operand when the first is NaN: the best so far.
+        let mut best = [_mm512_set1_ps(f32::NEG_INFINITY); 4];
+        for four in fours {
+            for (best, chunk) in best.iter_mut().zip(four) {
+                *best = _mm512_max_ps(_mm512_loadu_ps(chunk.as_ptr()), *best);
+            }
+        }
+        for chunk in rest {
+            best[0] = _mm512_max_ps(_mm512_loadu_ps(chunk.as_ptr()), best[0]);
+        }
+        if !tail.is_empty() {
+            let mask: __mmask16 = ((1u32 << tail.len()) - 1) as u16;
+            let v = _mm512_mask_loadu_ps(best[0], mask, tail.as_ptr());
+            best[0] = _mm512_max_ps(v, best[0]);
+        }
+        let best = _mm512_max_ps(
+            _mm512_max_ps(best[0], best[1]),
+            _mm512_max_ps(best[2], best[3]),
+        );
+        _mm512_reduce_max_ps(best)
+    }
+
+    /// `super::exp_sums` for the rows of `group`, at most `SIDE`. The sums
+    /// of the rows are the 8 lanes of one register: the 16 exponentials of
+    /// each row turn into 16 columns (one value of each row), and the
+    /// columns are added in sequence, so each row adds its values in order.
+    /// One add for each value from memory took 1.5 cycles; this takes 48
+    /// operations for 128 values, and the next `exp` runs beside the adds.
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn exp_sums(group: &mut [f32], width: usize, shifts: &[f32], sums: &mut [f32]) {
+        let rows = shifts.len();
+        assert!(rows <= SIDE && group.len() == rows * width && sums.len() == rows);
+        let mut held = [0.0f32; SIDE];
+        held[..rows].copy_from_slice(sums);
+        let mut sum = _mm256_loadu_ps(held.as_ptr());
+        // A row that is not there is zeros, and its sum is not kept.
+        let mut e = [_mm512_setzero_ps(); SIDE];
+        let (steps, tail) = (width / 16, width % 16);
+        for step in 0..steps {
+            for r in 0..rows {
+                // SAFETY: row `r` has `width` values, and `step * 16 + 16 <= width`.
+                let at = group.as_mut_ptr().add(r * width + step * 16);
+                e[r] = exp(_mm512_sub_ps(
+                    _mm512_loadu_ps(at),
+                    _mm512_set1_ps(shifts[r]),
+                ));
+                _mm512_storeu_ps(at, e[r]);
+            }
+            for column in columns(&e) {
+                sum = _mm256_add_ps(sum, column);
+            }
+        }
+        if tail > 0 {
+            let mask: __mmask16 = ((1u32 << tail) - 1) as u16;
+            for r in 0..rows {
+                // SAFETY: the mask keeps the load and the store inside row `r`.
+                let at = group.as_mut_ptr().add(r * width + steps * 16);
+                let v = _mm512_maskz_loadu_ps(mask, at);
+                e[r] = exp(_mm512_sub_ps(v, _mm512_set1_ps(shifts[r])));
+                _mm512_mask_storeu_ps(at, mask, e[r]);
+            }
+            for column in &columns(&e)[..tail] {
+                sum = _mm256_add_ps(sum, *column);
+            }
+        }
+        _mm256_storeu_ps(held.as_mut_ptr(), sum);
+        sums.copy_from_slice(&held[..rows]);
+    }
+
+    /// The 16 columns of 8 rows of 16 values: lane `r` of column `j` is
+    /// value `j` of row `r`.
+    #[target_feature(enable = "avx512f")]
+    unsafe fn columns(rows: &[__m512; SIDE]) -> [__m256; 16] {
+        // Each 128-bit part `a` of a register is on its own in these steps.
+        // Two rows: values 0 and 1 of both, then values 2 and 3.
+        let mut two = [_mm512_setzero_ps(); 8];
+        for pair in 0..4 {
+            two[2 * pair] = _mm512_unpacklo_ps(rows[2 * pair], rows[2 * pair + 1]);
+            two[2 * pair + 1] = _mm512_unpackhi_ps(rows[2 * pair], rows[2 * pair + 1]);
+        }
+        // Four rows: `four[4 * half + b]` has value `4 * a + b` of rows 0 to 3
+        // (`half` 0) or 4 to 7 (`half` 1) in its part `a`.
+        let mut four = [_mm512_setzero_ps(); 8];
+        for half in 0..2 {
+            let t = &two[4 * half..];
+            four[4 * half] = _mm512_shuffle_ps::<0x44>(t[0], t[2]);
+            four[4 * half + 1] = _mm512_shuffle_ps::<0xEE>(t[0], t[2]);
+            four[4 * half + 2] = _mm512_shuffle_ps::<0x44>(t[1], t[3]);
+            four[4 * half + 3] = _mm512_shuffle_ps::<0xEE>(t[1], t[3]);
+        }
+        // Eight rows: parts 0 and 1 of both halves side by side, then 2 and 3.
+        let first = _mm512_setr_epi32(0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23);
+        let second =
+            _mm512_setr_epi32(8, 9, 10, 11, 24, 25, 26, 27, 12, 13, 14, 15, 28, 29, 30, 31);
+        let high = |v: __m512| _mm256_castpd_ps(_mm512_extractf64x4_pd::<1>(_mm512_castps_pd(v)));
+        let mut columns = [_mm256_setzero_ps(); 16];
+        for b in 0..4 {
+            let low = _mm512_permutex2var_ps(four[b], first, four[4 + b]);
+            let rest = _mm512_permutex2var_ps(four[b], second, four[4 + b]);
+            columns[b] = _mm512_castps512_ps256(low);
+            columns[4 + b] = high(low);
+            columns[8 + b] = _mm512_castps512_ps256(rest);
+            columns[12 + b] = high(rest);
+        }
+        columns
     }
 
     #[target_feature(enable = "avx512f")]

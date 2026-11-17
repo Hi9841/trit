@@ -2899,3 +2899,126 @@ calling thread: Whisper tiny 0.998, Moonshine tiny 1.055. Not built again. The s
   (52 values for each head) and SI-036 are not measured on them.
 - Clippy of Rust 1.100: `fgemm.rs:48` and `audio/mel.rs:202` fail `-D warnings` in the base
   commit. CI uses the stable toolchain, so its lint step fails at the next push.
+
+## Session 2026-11-17 (the passes of a softmax and of a beam score: the ordered sum is a chain)
+
+Branch `oploop`, head `88174e8`. Baseline builds: `oploop/baseline/B41.dll` and `prof41.exe`
+(the head code), `kb44.exe` (the head with the two new bench modes).
+
+### P-19 what is not a matrix product (`prof41.exe`, Whisper tiny, 200 `clean` clips, 9,286 ms, quiet)
+
+`oploop/results/s1116/si038-prof41-2.txt`. The products of the encoder attention run at 79
+to 84 % of their floor, so the next lines are the ones with no product in them:
+
+| Line | Time | Share of the run |
+|---|---:|---:|
+| Beam search: score job, wall (5,296 steps, 140 us each) | 744 ms | 8.0 % |
+| Attention: softmax, thread time (7.2 million encoder rows and 0.6 million decoder rows of 1,500 values) | 7,499 ms | about 5 % as wall |
+
+- New bench modes (`kernel_bench softmax <one|all> <rows> <width> [tasks]` and `beam
+  <one|all> <vocabulary> [beams]`), on `kb44.exe`, quiet, 5.11 GHz:
+
+  | Case | Time | Cycles |
+  |---|---:|---:|
+  | Softmax, 128 rows x 1,500 (an encoder task), 1 and 16 tasks | 655 and 672 ns for each row | 3,400 for each row, 36 for each 16 values |
+  | Softmax, 5 rows x 1,500 (the cross-attention of a step) | 1,290 ns for each row | 6,600 for each row |
+  | Beam scores, 5 beams x 51,865 (Whisper) | 84 us for each step | |
+  | Beam scores, 1 beam x 51,865 | 75 us | 383,000: 118 for each 16 values |
+  | Beam scores, 5 beams x 32,768 (Moonshine) | 54 us | |
+
+- The floor of both is `exp`: 19 cycles for each 16 values (the probe of SI-038). So the
+  softmax of an encoder task is at 53 % of its floor, the softmax of a decoder step at 27 %,
+  and a beam score at 16 %.
+- Cause: each makes its passes one after the other. The softmax of 8 rows: the maximum (8
+  scalar chains), the subtraction, `exp`, the sum (8 scalar chains), the scale; each pass
+  reads the 48 KB of the 8 rows again. A beam score: the maximum (one scalar chain over
+  51,865 values), a copy with the subtraction to a buffer of 207 KB, `exp`, the sum (one
+  chain: 3 cycles for each value, 31 us, with the CPU idle around it), the top tokens (a
+  scalar pass).
+- What the same-bits rule allows: a maximum does not depend on the order of its values, so
+  it can run in lanes (SI-032 showed this, and was under 2 % alone). The sum must add the
+  values of a row in their order, but nothing says that `exp` must end before the sum
+  starts: one pass can make the 16 exponentials of a register and add them to the chain,
+  and the CPU then runs the `exp` of the next registers while the chain waits for its adds.
+
+### SI-039 softmax: the maximum in lanes, and `exp` with the ordered sum in one pass
+
+- Journey: J1 (Whisper tiny), J3 (Moonshine tiny). Every family that calls
+  `layers::attention_with` or `attention_steps` gets it. J4 as a guard (the FastConformer
+  has its own softmax).
+- Profile: P-19.
+- Hypothesis: `activation::max` gives the maximum of a row from 16 lanes, and
+  `activation::exp_sums` takes up to 8 rows side by side: for each 16 values of each row,
+  `exp(v - max)` in place, then the 16 values added to the sum of that row in their order.
+  Each value is the same `exp` of the same subtraction, and each sum adds the same values
+  in the same order from 0: the same bits. On the AVX-512 level the pass is one loop; the
+  other levels take blocks of 64 values through the `exp` they have now (a block is a
+  multiple of every lane count, so the same values go through the tail code as before).
+  Expected: the softmax of an encoder task from 655 to about 450 ns for each row, of a
+  decoder step from 1,290 to about 450 ns; Whisper tiny about 0.975 for each clip.
+- Test: `kernel_bench softmax` gives the same hash before and after, also with
+  `TRIT_ISA=avx2` and `scalar` and with `TRIT_KERNELS=v2`; 0 texts differ (`ab.py`);
+  `bench/paths.py`.
+- Change: `activation::max`, `activation::exp_sums`, and `activation::SIDE` (8 rows side by
+  side) in `src/cpu/activation.rs`; `layers::softmax_rows` calls them, and `fold_rows` is
+  gone. On the AVX-512 level `exp_sums` keeps the sums of the 8 rows in the 8 lanes of one
+  register: the 16 exponentials of each row are turned into 16 columns (24 shuffles and 8
+  extracts for 128 values), and 16 vector adds in sequence give each row its ordered sum.
+  The other levels keep their passes (subtract, `exp`, the sums of 8 rows side by side);
+  only their maximum now comes from 16 lanes.
+- Three forms did not work, with the same bits each time (`kernel_bench softmax all 128
+  1500 1`, start 655 ns for each row):
+  - The 16 adds of a row from a buffer after its `exp`: 815 ns.
+  - The sums one step behind, one scalar add of each row in turn: 818 ns. The disassembly
+    shows the cause: the compiler made one vector add of the 8 scalar adds and fills it with
+    a gather of 8 loads. A probe gave 460 ns of the 852 ns to the sums, 1.5 cycles for each
+    value.
+  - On the other levels, blocks of 64 values: AVX2 753 to 1,074 ns. And a lane maximum
+    with `f32::max` costs 5 instructions for each vector (215 ns for each row on AVX2); a
+    comparison and a store are one.
+- Result, the kernel (`kb44.exe` against `kb45.exe`, in turns, quiet, the same hash in each
+  case, also with `TRIT_KERNELS=v2`):
+
+  | Case | Before | After | Ratio |
+  |---|---:|---:|---:|
+  | AVX-512, 128 rows x 1,500, 1 and 16 tasks | 660 and 675 ns for each row | 485 and 496 ns | 0.73 |
+  | AVX-512, 5 rows x 1,500 | 1,290 ns | 550 ns | 0.43 |
+  | AVX-512, 128 rows x 300 and x 40 | 146 and 33 ns | 103 and 22 ns | 0.71 and 0.67 |
+  | `TRIT_ISA=avx2`, 128 rows and 5 rows x 1,500 | 753 and 1,380 ns | 716 and 1,260 ns | 0.95 and 0.91 |
+  | `TRIT_ISA=scalar`, 128 rows x 1,500 (3 pairs) | 2,430 to 2,540 ns | 2,440 to 2,540 ns | the same |
+
+  After the change the softmax of an encoder task is 26.5 cycles for each 16 values: `exp`
+  alone is 15 in this loop (a probe), the maximum 3, the scale 4.5, the sums 4.
+- Result, the stage (`prof41.exe` and `prof45.exe` in turns, 2 pairs, Whisper tiny, 200
+  clips, quiet): softmax thread time 6,948 to 4,225 ms and 7,044 to 4,245 ms (0.61 and
+  0.60); the attention, wall, 2,775 to 2,529 ms and 2,795 to 2,533 ms; the run 8,696 to
+  8,182 ms and 8,631 to 8,337 ms. 0 of 200 texts differ.
+- Result, a clip (`ab.py`, B41 against B45, 200 `clean` clips, 4 rounds, 0.05 to 0.2 cores
+  of other load; `oploop/results/s1117/ab-039-*.txt`):
+
+  | Model | Order | Per-clip ratio of B45 | Paired p | CPU time of a round | Rounds |
+  |---|---|---:|---:|---:|---|
+  | Whisper tiny | B41 first | 0.971 | 4.7e-22 | 0.975 | 38.3-39.0 and 37.2-38.1 ms |
+  | Whisper tiny | B45 first | 0.968 | 1.1e-25 | 0.967 | 36.7-37.3 and 37.4-38.3 ms |
+  | Whisper tiny, the last build, other load | B45 first | 0.960 | 1.9e-25 | 0.985 | 39.3-46.2 and 42.8-49.4 ms |
+  | Moonshine tiny | B41 first | 0.990 | 6.2e-11 | 0.994 | 17.7-18.5 and 18.5-18.8 ms |
+  | Moonshine tiny | B45 first | 0.988 | 1.8e-22 | 0.997 | 17.4-18.5 and 17.5-18.5 ms |
+  | Redux, `clean` and `other`, 3 rounds (guard) | B41 first | 0.991 | no claim | 1.008 | 29.6-30.0 and 29.2-29.6 ms |
+
+  0 texts differ in every run; errors 231, 133, and 253 (81 and 172) on both sides.
+- Decision: KEEP. Whisper tiny 0.971 and 0.968 in the two orders (the forecast was 0.975).
+  Moonshine tiny gets 1 % in both orders: under the 2 % of the contract, no claim.
+- Gates: `bench/paths.py` with the change: Whisper tiny with its known scalar text,
+  Moonshine tiny the same text on every path. B41 against B45 on 3 clips, with no setting,
+  `TRIT_KERNELS=v2`, `TRIT_ISA=avx2`, `TRIT_ISA=scalar`, and both: the same text for
+  Whisper tiny, Moonshine tiny, and Canary 1B v2. `ab.py` with `TRIT_ISA=avx2` on both
+  sides: 0 of 200 texts differ for Whisper tiny (228 errors) and Moonshine tiny; with
+  `scalar`: 0 of 200 for Whisper tiny (233 errors). 4 threads x 20 calls
+  (`oploop/results/s1117/threads.py`): 0 wrong texts for Whisper tiny, Moonshine tiny, and
+  Redux. Memory after the run: 1,060 and 1,056 MB private, 257 and 254 MB peak. fmt;
+  clippy as before (the two findings of the base commit allowed); `trit skill --check`.
+- Limits: the speed is measured on the AVX-512 level of this CPU. The AVX2 and NEON
+  levels keep their passes: an 8 x 8 transposition for them is the same idea and is not
+  written. The FastConformer has its own softmax (one row at a time, a scalar maximum and
+  sum) and does not use `exp_sums` yet.
+
