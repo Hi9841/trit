@@ -226,12 +226,17 @@ pub unsafe extern "C" fn trit_load_ex(
 ) -> *mut Trit {
     guard(std::ptr::null_mut(), || {
         let explicit = path_arg(model_dir, "model_dir")?;
-        let options = load_options(precision, device)?;
-        let dir = trit::find_model(explicit).ok_or_else(|| trit::missing_model(explicit))?;
-        let engine = Trit::load_with(&dir, &options)?;
-        trit::release_memory();
-        Ok(Box::into_raw(Box::new(engine)))
+        load_engine(explicit, &load_options(precision, device)?)
     })
+}
+
+/// The engine of `explicit` (as `trit::find_model` takes it), loaded with
+/// `options`, then the memory of the load given back.
+fn load_engine(explicit: Option<&Path>, options: &LoadOptions) -> Result<*mut Trit, String> {
+    let dir = trit::find_model(explicit).ok_or_else(|| trit::missing_model(explicit))?;
+    let engine = Trit::load_with(&dir, options)?;
+    trit::release_memory();
+    Ok(Box::into_raw(Box::new(engine)))
 }
 
 const LOAD_KEYS: &str = "precision, device, cache";
@@ -266,10 +271,7 @@ pub unsafe extern "C" fn trit_load_json(
                 }
             }
         }
-        let dir = trit::find_model(explicit).ok_or_else(|| trit::missing_model(explicit))?;
-        let engine = Trit::load_with(&dir, &load)?;
-        trit::release_memory();
-        Ok(Box::into_raw(Box::new(engine)))
+        load_engine(explicit, &load)
     })
 }
 
