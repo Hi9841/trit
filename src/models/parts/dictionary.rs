@@ -101,8 +101,7 @@ impl Dictionary {
             .map(|id| tokenizer.piece(id).replace(WORD_START, ""))
             .collect();
         let keys = text.iter().map(|piece| key(piece)).collect();
-        // A later term with the same letters replaces an earlier one: the
-        // user's "pnpm" wins over the built-in "PNPM".
+        // A later term with the same letters replaces an earlier one.
         let mut seen: HashMap<Vec<char>, usize> = HashMap::new();
         let mut skipped = Vec::new();
         let mut entries: Vec<Term> = Vec::new();

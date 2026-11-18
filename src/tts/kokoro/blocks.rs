@@ -38,7 +38,6 @@ impl AdaIn {
     pub fn apply(&self, x: &[f32], frames: usize, style: &[f32]) -> Buf {
         let c = self.channels;
         let (scale, shift) = scale_shift(&self.fc, style, c);
-        // Mean and variance per channel, in f64, column by column.
         let mut mean = vec![0.0f64; c];
         let mut square = vec![0.0f64; c];
         for row in x.chunks_exact(c) {

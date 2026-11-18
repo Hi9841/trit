@@ -566,7 +566,6 @@ impl Coupling {
         let mut skip = Buf::zeroed(frames * hidden);
         for (i, (input, res_skip)) in self.wavenet.iter().enumerate() {
             let mut gate = input.forward(&h, frames, None);
-            // tanh of the first half times the sigmoid of the second, per row.
             team::chunks_mut(&mut gate, 2 * hidden * 16, |_, rows| {
                 for row in rows.chunks_exact_mut(2 * hidden) {
                     let (a, b) = row.split_at_mut(hidden);

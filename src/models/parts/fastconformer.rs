@@ -687,7 +687,6 @@ impl Subsampling {
         let x = self.pw1.forward_relu(&x, h2 * w2);
         let (x, h3, w3) = depthwise(&x, (h2, w2, ch), self.pad, &self.dw2);
         let x = self.pw2.forward_relu(&x, h3 * w3);
-        // Flatten per frame as channel-major: index = c * w3 + w.
         let mut flat = Buf::scratch(h3 * ch * w3);
         team::chunks_mut(&mut flat, ch * w3, |h, row| {
             for w in 0..w3 {

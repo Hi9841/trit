@@ -212,7 +212,6 @@ impl Encoder {
                     row[..lo].fill(0.0);
                     row[hi + 1..].fill(0.0);
                 });
-                // V of these keys, transposed: `hd x m`.
                 let mut v_t = vec![0.0f32; hd * m];
                 for j in 0..m {
                     for e in 0..hd {
