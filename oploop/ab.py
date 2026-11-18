@@ -33,9 +33,47 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bench"))
 
 
+def allow_old_libraries() -> None:
+    """Lets the binding load a trit_ffi build that is older than it (side A
+    of an A/B is often an old build): a function the build does not export
+    is a stub that fails when called, and `trit_load_json` loads through
+    `trit_load_ex`, without the cache option."""
+    import ctypes
+
+    class Missing:
+        def __init__(self, name: str):
+            self.name = name
+
+        def __call__(self, *_):
+            raise RuntimeError(f"this trit_ffi build has no {self.name}")
+
+    class OldLibrary(ctypes.CDLL):
+        def __getattr__(self, name: str):
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                if name != "trit_load_json":
+                    stub = Missing(name)
+                    setattr(self, name, stub)
+                    return stub
+
+            def load_json(model, options):
+                asked = json.loads(options or b"{}")
+                if asked.get("cache"):
+                    raise RuntimeError("this trit_ffi build is older than the cache option")
+                arg = lambda key: asked[key].encode() if asked.get(key) is not None else None
+                return self.trit_load_ex(model, arg("precision"), arg("device"))
+
+            self.trit_load_json = load_json
+            return load_json
+
+    ctypes.CDLL = OldLibrary
+
+
 def side(model: str, sets: list[str], cleanup: bool) -> None:
     """One side, in its own process: prints one JSON line."""
     sys.path.insert(0, str(ROOT / "bindings" / "python"))
+    allow_old_libraries()
     import trit
 
     if cleanup:

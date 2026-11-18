@@ -103,10 +103,8 @@ def _library() -> ctypes.CDLL:
         "trit_phonemes": ([ptr, text, text], ptr),
     }
     for fn, (args, result) in signatures.items():
-        # An older library has fewer functions (an A/B of two builds, `oploop/ab.py`).
-        if hasattr(lib, fn):
-            getattr(lib, fn).argtypes = args
-            getattr(lib, fn).restype = result
+        getattr(lib, fn).argtypes = args
+        getattr(lib, fn).restype = result
     return lib
 
 
@@ -218,12 +216,7 @@ class Trit:
         options = {"device": device, "cache": cache}
         if precision is not None:
             options["precision"] = precision
-        if hasattr(_lib, "trit_load_json"):
-            handle = _lib.trit_load_json(_arg(model), json.dumps(options).encode())
-        elif cache:
-            raise TritError("this trit-ffi library is older than the cache option; build it again")
-        else:
-            handle = _lib.trit_load_ex(_arg(model), _arg(precision), _arg(device))
+        handle = _lib.trit_load_json(_arg(model), json.dumps(options).encode())
         if not handle:
             raise _error()
         self._handle = handle
