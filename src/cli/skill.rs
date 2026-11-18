@@ -43,8 +43,7 @@ fn skill_text() -> String {
     for command in COMMANDS.iter().filter(|command| command.in_skill) {
         text.push_str(&format!(
             "## {}\n\n```text\n{}\n```\n\n",
-            command.name,
-            command.help_text()
+            command.name, command.help
         ));
     }
     text.push_str("## Get a model\n\n`trit models` lists the known models, where each is, and its download command. Pass a name or a folder to `--model`.\n\n| Name | Family | Languages | MB |\n|---|---|---|---:|\n");

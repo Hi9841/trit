@@ -30,7 +30,7 @@ fn tokens_per_second(language: &str) -> f32 {
 }
 /// Beams unless the caller sets `Options::beam`: on the 456 English test
 /// clips 5 beams gave 557 and 415 errors (tiny, base), greedy 653 and 477.
-pub(crate) const BEAMS: usize = 5;
+const BEAMS: usize = 5;
 /// Whose beam search rules to follow: those of Transformers, Moonshine's
 /// reference implementation (557 and 415 errors, OpenAI's 561 and 417).
 const BEAM_RULES: crate::models::parts::beam::Rules =

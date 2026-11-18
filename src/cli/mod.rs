@@ -72,7 +72,7 @@ pub fn run() -> ExitCode {
         Err(code) => return code,
     };
     if parsed.help {
-        println!("{}", command.help_text());
+        println!("{}", command.help);
         return ExitCode::SUCCESS;
     }
     (command.run)(&parsed).unwrap_or_else(|code| code)
@@ -139,23 +139,6 @@ fn load_found<M>(
         )
     })?;
     Ok((dir, model))
-}
-
-impl Command {
-    /// `help` with the facts it names filled in from the library, so the
-    /// text and the code cannot drift.
-    fn help_text(&self) -> String {
-        use trit::facts::{CANARY_BEAMS, MAX_BEAMS, MOONSHINE_BEAMS, WHISPER_BEAMS};
-        let whisper_moonshine = if WHISPER_BEAMS == MOONSHINE_BEAMS {
-            format!("{WHISPER_BEAMS} for Whisper and Moonshine")
-        } else {
-            format!("{WHISPER_BEAMS} for Whisper, {MOONSHINE_BEAMS} for Moonshine")
-        };
-        self.help
-            .replace("{whisper_moonshine_beams}", &whisper_moonshine)
-            .replace("{canary_beams}", &CANARY_BEAMS.to_string())
-            .replace("{max_beams}", &MAX_BEAMS.to_string())
-    }
 }
 
 struct Parsed {

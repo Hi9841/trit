@@ -6,7 +6,7 @@ use std::sync::Arc;
 /// The most beams `Options::beam` gives. Each beam keeps its own decoder
 /// caches: Whisper tiny with 10^8 beams held 14 GB within a minute, and
 /// still grew.
-pub(crate) const MAX_BEAMS: usize = 16;
+const MAX_BEAMS: usize = 16;
 
 /// How to transcribe. `Options::default()` lets the model choose.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

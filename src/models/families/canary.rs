@@ -109,7 +109,7 @@ pub struct Canary {
 const WINDOW_SAMPLES: usize = 40 * crate::SAMPLE_RATE as usize;
 
 /// Beams unless the caller sets `Options::beam`: greedy.
-pub(crate) const BEAMS: usize = 1;
+const BEAMS: usize = 1;
 
 /// Self-attention keys and values per layer: the state of one beam.
 type Caches = (Vec<Vec<f32>>, Vec<Vec<f32>>);

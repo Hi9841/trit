@@ -360,7 +360,7 @@ impl Decoded {
 
 /// Beams unless the caller sets `Options::beam`: on the 456 English test
 /// clips 5 beams gave 768 and 479 errors (tiny, base.en), greedy 894 and 519.
-pub(crate) const BEAMS: usize = 5;
+const BEAMS: usize = 5;
 /// Whose beam search rules to follow: Transformers' gave 768 and 479 errors
 /// (tiny, base.en), OpenAI's 782 and 472; Transformers' runtime made 772 and 479.
 const BEAM_RULES: crate::models::parts::beam::Rules =

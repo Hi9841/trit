@@ -54,18 +54,6 @@ pub use tts::{
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Facts that the help of the CLI and the skill state, taken from the code
-/// that holds them.
-#[doc(hidden)]
-pub mod facts {
-    /// The most beams `Options::beam` gives.
-    pub const MAX_BEAMS: usize = crate::options::MAX_BEAMS;
-    /// The beams of Whisper, Moonshine, and Canary when `Options::beam` is 0.
-    pub const WHISPER_BEAMS: usize = crate::models::families::whisper::BEAMS;
-    pub const MOONSHINE_BEAMS: usize = crate::models::families::moonshine::BEAMS;
-    pub const CANARY_BEAMS: usize = crate::models::families::canary::BEAMS;
-}
-
 /// Times the kernels in isolation (`examples/kernel_bench.rs`).
 #[doc(hidden)]
 pub fn kernel_bench(args: &[String]) -> Vec<String> {
