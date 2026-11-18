@@ -1,7 +1,7 @@
 // What the site says about Trit, in one place: the homepage, the FAQ,
 // llms.txt and the structured data all read it, so they say the same thing.
 // The numbers come from the benchmark and the catalog (data.ts).
-import { benchDate, benches, catalog, DEFAULT_MODEL, isSpeechToText, lead, redux, sizeOf } from "./data";
+import { benchDate, benches, catalog, CLIPS, DEFAULT_MODEL, isSpeechToText, lead, redux, sizeOf } from "./data";
 import { links } from "./links";
 import { readRepo } from "./repo";
 
@@ -20,7 +20,7 @@ export const whatIs =
 
 const leads = benches.map(lead);
 const runtimes = new Set(benches.flatMap((b) => b.runs.map((r) => r.runtime)));
-const clips = 456;
+const clips = CLIPS;
 const times = (x: number) => `${x.toFixed(1)}×`;
 
 /** Trit's default has the fewest errors over all clips, or a tie, for every model. */

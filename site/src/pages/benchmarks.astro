@@ -8,6 +8,7 @@ import {
   benchDate,
   benches,
   cleanup,
+  CLIPS,
   cleanupMetrics,
   lead,
   medalTable,
@@ -123,7 +124,7 @@ const sameFileCells = (r: (typeof sameFileModels)[number]["quants"][number]["run
   `${r.other_wer.toFixed(2)} %`,
   `${r.errors}`,
   mb(r.run_ws_mb),
-  r.same_text_as_transcribe_cpp === undefined ? "—" : `${r.same_text_as_transcribe_cpp} / 456`,
+  r.same_text_as_transcribe_cpp === undefined ? "—" : `${r.same_text_as_transcribe_cpp} / ${CLIPS}`,
 ];
 
 const cells = (r: Run) => [
@@ -307,7 +308,7 @@ const cells = (r: Run) => [
           default (AVX-512) and with AVX2, the instruction set of the transcribe.cpp build.
         </p>
         <p class="meta">
-          {sameFileDate} · 456 clips · a time is the median clean clip of three rounds ·{" "}
+          {sameFileDate} · {CLIPS} clips · a time is the median clean clip of three rounds ·{" "}
           <a href={links.sameFileResults}>raw results</a> · <a href={links.sameFileBench}>bench/gguf.py</a>
         </p>
       </div>
@@ -460,7 +461,7 @@ const cells = (r: Run) => [
 
     <section class="grid report">
       <div class="prose">
-        <h2 id="errors">Errors over all 456 clips</h2>
+        <h2 id="errors">Errors over all {CLIPS} clips</h2>
         <Fragment set:html={errors} />
         <h2 id="method">How the numbers were measured</h2>
         <Fragment set:html={method} />

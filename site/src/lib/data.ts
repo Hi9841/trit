@@ -85,6 +85,9 @@ export const DEFAULT_MODEL = "parakeet-redux";
 // Written by bench/runtimes_report.py from the raw results: CPU only,
 // the test's models, the engines the harness runs today.
 
+/** The English clips of every benchmark run (bench/runtimes.py and bench/gguf.py). */
+export const CLIPS = 456;
+
 export interface Run {
   engine: string;
   runtime: string;
@@ -102,7 +105,7 @@ export interface Run {
   rounds: number;
   clean: number;
   other: number;
-  /** WER over all 456 clips. */
+  /** WER over all `CLIPS` clips. */
   all: number;
   errors: number;
   load_mb: number;
@@ -298,7 +301,7 @@ export interface SameFileRun {
   rounds: number;
   speed: number;
   run_ws_mb: number;
-  /** Clips (of 456) where Trit wrote the same text as transcribe.cpp. */
+  /** Clips (of `CLIPS`) where Trit wrote the same text as transcribe.cpp. */
   same_text_as_transcribe_cpp?: number;
 }
 
