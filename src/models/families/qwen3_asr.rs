@@ -10,7 +10,7 @@
 use crate::audio::whisper_mel::WhisperMel;
 use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::layers::{add_into, attention, linear, stacked, Gelu, Norm};
+use crate::layers::{add_into, attention, linear, sinusoids, stacked, Gelu, Norm};
 use crate::models::files::Files;
 use crate::models::parts::causal_lm::{CausalLm, TokenBudget};
 use crate::models::{speech_windows, Family};
@@ -296,7 +296,7 @@ impl AudioEncoder {
                 linear(t, &format!("{p}.conv2d3"), ch, ch * 9)?,
             ],
             conv_out: linear(t, &format!("{p}.conv_out"), d, ch * c.bins())?,
-            positions: sinusoids(c.max_positions, d),
+            positions: sinusoids(c.max_positions, d, 0, 10_000f64.ln(), 1.0),
             layers,
             norm: Norm::load(t, &format!("{p}.ln_post"), d)?,
             proj1: linear(t, &format!("{p}.proj1"), d, d)?,
@@ -415,20 +415,4 @@ fn conv2d(map: &[f32], (bins, times, channels): (usize, usize, usize), conv: &De
         }
     });
     conv.forward(&columns, out_bins * out_times)
-}
-
-/// Whisper's sinusoids: `[sin | cos]` of position times
-/// `exp(-i * ln(10000) / (d/2 - 1))`.
-fn sinusoids(length: usize, d: usize) -> Vec<f32> {
-    let half = d / 2;
-    let increment = 10_000f64.ln() / (half as f64 - 1.0);
-    let mut table = vec![0.0f32; length * d];
-    for position in 0..length {
-        for i in 0..half {
-            let angle = position as f64 * (-increment * i as f64).exp();
-            table[position * d + i] = angle.sin() as f32;
-            table[position * d + half + i] = angle.cos() as f32;
-        }
-    }
-    table
 }

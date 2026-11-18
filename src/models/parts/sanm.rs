@@ -8,7 +8,7 @@
 use crate::audio::kaldi_fbank::{FbankShape, KaldiFbank};
 use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::layers::{add_into, attention, linear, Norm};
+use crate::layers::{add_into, attention, linear, sinusoids, Norm};
 
 /// FunASR's layer norm epsilon.
 const NORM_EPS: f32 = 1e-12;
@@ -192,7 +192,8 @@ impl Encoder {
     pub fn encode(&self, mut x: Buf, t: usize) -> Buf {
         let s = &self.shape;
         let scale = (s.d as f32).sqrt();
-        let positions = sinusoids(t, s.input);
+        // FunASR's `SinusoidalPositionEncoder` counts positions from 1.
+        let positions = sinusoids(t, s.input, 1, 10_000f64.ln(), 1.0);
         team::chunks_mut(&mut x, s.input, |i, row| {
             for (v, p) in row.iter_mut().zip(&positions[i * s.input..][..s.input]) {
                 *v = *v * scale + p;
@@ -208,21 +209,4 @@ impl Encoder {
         }
         self.tp_norm.apply(&x, s.d)
     }
-}
-
-/// FunASR's `SinusoidalPositionEncoder`: positions from 1, sines then
-/// cosines over `depth / 2` timescales spaced `ln(10000) / (depth / 2 - 1)`.
-fn sinusoids(t: usize, depth: usize) -> Vec<f32> {
-    let half = depth / 2;
-    let step = (10_000f64).ln() / (half - 1) as f64;
-    let mut out = vec![0.0f32; t * depth];
-    for (i, row) in out.chunks_exact_mut(depth).enumerate() {
-        let position = (i + 1) as f64;
-        for k in 0..half {
-            let angle = position * (-(k as f64) * step).exp();
-            row[k] = angle.sin() as f32;
-            row[half + k] = angle.cos() as f32;
-        }
-    }
-    out
 }

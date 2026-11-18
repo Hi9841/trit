@@ -11,7 +11,7 @@ use crate::audio::mel::MelFrontend;
 use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team};
 use crate::layers::{
-    add_into, argmax, attention, attention_with, linear, stacked, HeadMajor, Norm,
+    add_into, argmax, attention, attention_with, linear, sinusoids, stacked, HeadMajor, Norm,
 };
 use crate::models::files::Files;
 use crate::models::parts::fastconformer::{
@@ -349,7 +349,7 @@ impl Family for Canary {
             // file interleaves sine and cosine); else the Transformers table.
             positions: match t.has("model.decoder.pos_enc") {
                 true => t.f32_len("model.decoder.pos_enc", c.max_tokens * d)?,
-                false => sinusoids(c.max_tokens, d),
+                false => nemo_sinusoids(c.max_tokens, d),
             },
             tokenizer: Tokenizer::parse(&files.read("tokenizer.json")?)?,
             dictionary: RwLock::new(None),
@@ -384,18 +384,7 @@ impl Family for Canary {
 
 /// NeMo's `FixedPositionalEncoding`: `[sin | cos]` of position times
 /// `exp(-i * ln(10000^((d-2)/d)) / (d/2 - 1))`, divided by `sqrt(d)`.
-fn sinusoids(length: usize, d: usize) -> Vec<f32> {
-    let half = d / 2;
+fn nemo_sinusoids(length: usize, d: usize) -> Vec<f32> {
     let max_timescale = 10_000f64.powf((d as f64 - 2.0) / d as f64);
-    let increment = max_timescale.ln() / (half as f64 - 1.0);
-    let scale = 1.0 / (d as f64).sqrt();
-    let mut table = vec![0.0f32; length * d];
-    for pos in 0..length {
-        for i in 0..half {
-            let angle = pos as f64 * (-increment * i as f64).exp();
-            table[pos * d + i] = (angle.sin() * scale) as f32;
-            table[pos * d + half + i] = (angle.cos() * scale) as f32;
-        }
-    }
-    table
+    sinusoids(length, d, 0, max_timescale.ln(), 1.0 / (d as f64).sqrt())
 }

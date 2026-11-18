@@ -223,6 +223,24 @@ pub fn add_into(x: &mut [f32], y: &[f32]) {
     });
 }
 
+/// A fixed position table, `rows x d`: row `p` is `[sin | cos]` of
+/// `(first + p) * exp(-i * ln_timescale / (d/2 - 1))` for `i < d/2`, times
+/// `scale`. Whisper's table is `first` 0, `ln_timescale` `ln(10000)`, `scale` 1.
+pub fn sinusoids(rows: usize, d: usize, first: usize, ln_timescale: f64, scale: f64) -> Vec<f32> {
+    let half = d / 2;
+    let increment = ln_timescale / (half as f64 - 1.0);
+    let mut table = vec![0.0f32; rows * d];
+    for (p, row) in table.chunks_exact_mut(d.max(1)).enumerate() {
+        let position = (first + p) as f64;
+        for i in 0..half {
+            let angle = position * (-increment * i as f64).exp();
+            row[i] = (angle.sin() * scale) as f32;
+            row[half + i] = (angle.cos() * scale) as f32;
+        }
+    }
+    table
+}
+
 /// Rotary positions on the first `dims` values of each head. Pair `i`
 /// turns by `position * base^(-2i / dims)`. Interleaved pairs are values
 /// `2i` and `2i + 1` (Moonshine); halves pairs are `i` and `i + dims / 2`
