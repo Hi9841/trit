@@ -57,7 +57,8 @@ def side(model: str, sets: list[str], cleanup: bool) -> None:
     import runtimes
 
     runtimes.np = numpy  # runtimes.py imports numpy only in its own child processes
-    from runtimes import edits, read_clip
+    from runtimes import read_clip
+    from words import edits
     from whisper_normalizer.english import EnglishTextNormalizer
 
     normalize = EnglishTextNormalizer()

@@ -50,6 +50,8 @@ from scipy.io import wavfile
 from scipy.signal import resample_poly
 from whisper_normalizer.english import EnglishTextNormalizer
 
+from words import edits
+
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "target" / "tts"
 CORPORA = ["corpus.txt", "tech-corpus.txt"]
@@ -67,16 +69,6 @@ def sentences() -> list[tuple[str, str]]:
                 clip, text = line.split("|", 1)
                 rows.append((clip, text.strip()))
     return rows
-
-
-def edits(ref: list[str], hyp: list[str]) -> int:
-    prev = list(range(len(hyp) + 1))
-    for i, r in enumerate(ref):
-        cur = [i + 1] + [0] * len(hyp)
-        for j, h in enumerate(hyp):
-            cur[j + 1] = min(prev[j] + (r != h), prev[j + 1] + 1, cur[j] + 1)
-        prev = cur
-    return prev[-1]
 
 
 def write(path: Path, wave: np.ndarray, rate: int) -> None:

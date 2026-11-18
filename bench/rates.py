@@ -39,7 +39,8 @@ def main() -> None:
     from whisper_normalizer.english import EnglishTextNormalizer
 
     runtimes.np = np
-    from runtimes import edits, read_clip
+    from runtimes import read_clip
+    from words import edits
 
     normalize = EnglishTextNormalizer()
     engine = trit.Trit(positional[0])

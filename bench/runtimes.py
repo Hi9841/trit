@@ -30,6 +30,8 @@ from pathlib import Path
 
 warnings.filterwarnings("ignore")  # library deprecation noise; results are on stdout
 
+from words import edits
+
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "target" / "runtimes"
 CPU_THREADS = os.cpu_count() // 2  # physical cores; SMT siblings only add contention
@@ -445,16 +447,6 @@ def read_clip(path: Path):
             break
         end -= frame
     return samples[: min(end + 150 * 16, len(samples))]
-
-
-def edits(ref: list[str], hyp: list[str]) -> int:
-    prev = list(range(len(hyp) + 1))
-    for i, r in enumerate(ref):
-        cur = [i + 1] + [0] * len(hyp)
-        for j, h in enumerate(hyp):
-            cur[j + 1] = min(prev[j] + (r != h), prev[j + 1] + 1, cur[j] + 1)
-        prev = cur
-    return prev[-1]
 
 
 def child(name: str, sets: list[str]) -> None:

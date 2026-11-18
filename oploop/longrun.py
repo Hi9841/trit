@@ -84,7 +84,7 @@ def main() -> None:
     runs = int(option("--runs", "3"))
     sets = option("--sets", "long-clean,long-other,very-long").split(",")
     folders = [str(CLIPS / s) for s in sets]
-    from runtimes import edits
+    from words import edits
     from whisper_normalizer.english import EnglishTextNormalizer
 
     normalize = EnglishTextNormalizer()

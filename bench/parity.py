@@ -24,20 +24,12 @@ import sys
 import unicodedata
 from pathlib import Path
 
+from words import edits
+
 ROOT = Path(__file__).resolve().parents[1]
 CLIPS = ROOT / "bench" / "clips"
 OUT = ROOT / "target" / "parity"
 BIN = ROOT / "bench" / "gguf" / "target" / "release"
-
-
-def edits(ref: list, hyp: list) -> int:
-    prev = list(range(len(hyp) + 1))
-    for i, r in enumerate(ref):
-        cur = [i + 1] + [0] * len(hyp)
-        for j, h in enumerate(hyp):
-            cur[j + 1] = min(prev[j] + (r != h), prev[j + 1] + 1, cur[j] + 1)
-        prev = cur
-    return prev[-1]
 
 
 def chars(text: str) -> list[str]:

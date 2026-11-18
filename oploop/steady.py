@@ -68,7 +68,8 @@ def side(model: str, tests: list[str]) -> None:
     import runtimes
 
     runtimes.np = np
-    from runtimes import edits, read_clip
+    from runtimes import read_clip
+    from words import edits
     from whisper_normalizer.english import EnglishTextNormalizer
 
     t0 = time.perf_counter()

@@ -20,6 +20,8 @@ import sys
 import time
 from pathlib import Path
 
+from words import edits
+
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / "models"
 OUT = ROOT / "target" / "runtimes"
@@ -140,16 +142,6 @@ def cases():
                 raw = re.sub(r"[^\w\s']", " ", target.lower())
                 rows.append((" ".join(raw.split()), target))
     return rows + CARD
-
-
-def edits(ref, hyp):
-    prev = list(range(len(hyp) + 1))
-    for i, a in enumerate(ref):
-        cur = [i + 1] + [0] * len(hyp)
-        for j, b in enumerate(hyp):
-            cur[j + 1] = min(prev[j] + (a != b), prev[j + 1] + 1, cur[j] + 1)
-        prev = cur
-    return prev[-1]
 
 
 def child(name):

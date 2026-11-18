@@ -28,6 +28,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from words import edits
+
 ROOT = Path(__file__).resolve().parents[1]
 CLIPS = ROOT / "bench" / "clips"
 OUT = ROOT / "target" / "gguf"
@@ -78,16 +80,6 @@ def run_round(models_dir: Path, only: set[str] | None, round_: int) -> None:
                     env={**os.environ, **env},
                     check=True,
                 )
-
-
-def edits(ref: list[str], hyp: list[str]) -> int:
-    prev = list(range(len(hyp) + 1))
-    for i, r in enumerate(ref):
-        cur = [i + 1] + [0] * len(hyp)
-        for j, h in enumerate(hyp):
-            cur[j + 1] = min(prev[j] + (r != h), prev[j + 1] + 1, cur[j] + 1)
-        prev = cur
-    return prev[-1]
 
 
 def report() -> None:
