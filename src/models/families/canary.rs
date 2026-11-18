@@ -9,9 +9,9 @@
 
 use crate::audio::mel::MelFrontend;
 use crate::config::Json;
-use crate::cpu::{buf::Buf, gemm::Dense, team};
+use crate::cpu::{buf::Buf, gemm::Dense};
 use crate::layers::{
-    add_into, argmax, attention, attention_with, linear, sinusoids, stacked, HeadMajor, Norm,
+    add_into, argmax, attention, attention_with, linear, relu, sinusoids, stacked, HeadMajor, Norm,
 };
 use crate::models::files::Files;
 use crate::models::parts::fastconformer::{
@@ -279,9 +279,7 @@ impl Canary {
             add_into(&mut x, &layer.cross_out.forward(&att, m));
             let normed = layer.norm_mlp.apply(&x, d);
             let mut hidden = layer.fc1.forward(&normed, m);
-            team::chunks_mut(&mut hidden, c.ffn, |_, row| {
-                row.iter_mut().for_each(|v| *v = v.max(0.0))
-            });
+            relu(&mut hidden);
             add_into(&mut x, &layer.fc2.forward(&hidden, m));
         }
         let last = self.norm.apply(&x[(m - 1) * d..], d);
