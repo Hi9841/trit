@@ -477,7 +477,7 @@ impl Gpu {
         }
         encoder.copy_buffer_to_buffer(&y_buf, 0, &staging, 0, y_bytes);
         self.queue.submit([encoder.finish()]);
-        let values = readback(&self.instance, &staging, y_bytes);
+        let values = readback(&staging, y_bytes);
         let scope_error = pop_scopes(scopes);
         if values.is_err() {
             // The map of this buffer can still be pending, and a second map
@@ -817,28 +817,39 @@ impl Drop for Unmap<'_> {
     }
 }
 
-pub(crate) fn readback(
-    instance: &wgpu::Instance,
+/// Maps the first `bytes` of `staging` after the last submission, waits at
+/// most `READBACK_LIMIT`, and gives the mapped bytes to `read`. A buffer
+/// that mapped is unmapped again, also on an error. `what` names the read
+/// in its errors.
+pub(crate) fn read_mapped<T>(
     staging: &wgpu::Buffer,
     bytes: u64,
-) -> Result<Vec<f32>, String> {
+    what: &str,
+    read: impl FnOnce(&[u8]) -> Result<T, String>,
+) -> Result<T, String> {
     let slice = staging.slice(..bytes);
     let (send, recv) = mpsc::sync_channel(1);
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = send.send(result);
     });
-    let _ = instance;
-    wait_for_device("gpu readback")?;
+    wait_for_device(what)?;
     recv.try_recv()
-        .map_err(|_| "gpu readback did not complete".to_string())?
-        .map_err(|error| format!("gpu readback: {error}"))?;
+        .map_err(|_| format!("{what} did not complete"))?
+        .map_err(|error| format!("{what}: {error}"))?;
     let _unmap = Unmap(staging);
     let view = slice
         .get_mapped_range()
-        .map_err(|error| format!("gpu readback: {error}"))?;
-    let values = bytemuck::try_cast_slice(&view)
-        .map_err(|error| format!("gpu readback: {error}"))?
-        .to_vec();
+        .map_err(|error| format!("{what}: {error}"))?;
+    let value = read(&view);
     drop(view);
-    Ok(values)
+    value
+}
+
+/// The `f32` values of the first `bytes` of `staging`.
+pub(crate) fn readback(staging: &wgpu::Buffer, bytes: u64) -> Result<Vec<f32>, String> {
+    read_mapped(staging, bytes, "gpu readback", |view| {
+        bytemuck::try_cast_slice(view)
+            .map(<[f32]>::to_vec)
+            .map_err(|error| format!("gpu readback: {error}"))
+    })
 }

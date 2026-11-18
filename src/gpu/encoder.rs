@@ -1007,7 +1007,7 @@ impl Inner {
         let out = self.output().clone();
         encoder.copy_buffer_to_buffer(&out, 0, &self.act.staging, 0, bytes);
         self.queue.submit([encoder.finish()]);
-        let values = readback(&self.instance, &self.act.staging, bytes);
+        let values = readback(&self.act.staging, bytes);
         if values.is_err() {
             // The map of this buffer can still be pending, and a second map
             // fails. The next encode makes a new buffer.
@@ -1015,7 +1015,7 @@ impl Inner {
         }
         let stamped = stamp_read
             .as_ref()
-            .map(|buffer| read_stamps(&self.instance, buffer, stamp_bytes));
+            .map(|buffer| read_stamps(buffer, stamp_bytes));
         super::pop_scopes(scopes)?;
         if let Some(stamped) = stamped {
             match stamped {
@@ -1556,37 +1556,15 @@ fn layout(device: &wgpu::Device, kinds: &[SlotKind], label: &str) -> wgpu::BindG
     })
 }
 
-fn read_stamps(
-    instance: &wgpu::Instance,
-    staging: &wgpu::Buffer,
-    bytes: u64,
-) -> Result<Vec<u64>, String> {
-    let slice = staging.slice(..bytes);
-    let (send, recv) = std::sync::mpsc::sync_channel(1);
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = send.send(result);
-    });
-    let _ = instance;
-    super::wait_for_device("gpu timestamp read")?;
-    recv.try_recv()
-        .map_err(|_| "gpu timestamp read did not complete".to_string())?
-        .map_err(|error| format!("gpu timestamp read: {error}"))?;
-    let ticks = match slice.get_mapped_range() {
-        Ok(view) => {
-            let mut ticks = Vec::with_capacity(view.len() / 8);
-            for chunk in view.as_chunks::<8>().0 {
-                ticks.push(u64::from_le_bytes(*chunk));
-            }
-            drop(view);
-            ticks
-        }
-        Err(error) => {
-            staging.unmap();
-            return Err(format!("gpu timestamp read: {error}"));
-        }
-    };
-    staging.unmap();
-    Ok(ticks)
+fn read_stamps(staging: &wgpu::Buffer, bytes: u64) -> Result<Vec<u64>, String> {
+    super::read_mapped(staging, bytes, "gpu timestamp read", |view| {
+        Ok(view
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
+            .collect())
+    })
 }
 
 fn report_times(period_ns: f32, names: &[&str], ticks: &[u64]) {
