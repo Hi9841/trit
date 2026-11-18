@@ -45,7 +45,7 @@ impl Family for CanaryQwen {
         device: Device,
     ) -> Result<Self, String> {
         let t = files.tensors(precision, device)?;
-        let config = conformer::Config::parse(json)?;
+        let config = conformer::Config::parse(json, conformer::HeadKind::Encoder)?;
         let frontend = MelFrontend::new(config.mels).normalized(config.normalize_features);
         let width = config.hidden;
         let encoder = conformer::Parakeet::load(&t, config)?;

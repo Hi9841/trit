@@ -15,7 +15,7 @@ use crate::layers::{
 };
 use crate::models::files::Files;
 use crate::models::parts::fastconformer::{
-    Config as EncoderConfig, Parakeet as Encoder, MIN_FRAMES,
+    Config as EncoderConfig, HeadKind, Parakeet as Encoder, MIN_FRAMES,
 };
 use crate::models::parts::logit_bias::{self as bias, Bias, BiasWeights};
 use crate::models::{windowed, Family};
@@ -291,7 +291,7 @@ impl Family for Canary {
         device: Device,
     ) -> Result<Self, String> {
         let c = Config::parse(config)?;
-        let encoder_config = EncoderConfig::parse(config)?;
+        let encoder_config = EncoderConfig::parse(config, HeadKind::Encoder)?;
         let t = files.tensors(precision, device)?;
         let frontend = MelFrontend::new(encoder_config.mels);
         let width = encoder_config.hidden;

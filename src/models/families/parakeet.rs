@@ -173,7 +173,13 @@ impl Family for Parakeet {
     ) -> Result<Self, String> {
         let json = config;
         let tensors = files.tensors(precision, device)?;
-        let config = model::Config::parse(json)?;
+        let head = match json.str("model_type") {
+            Some("parakeet_tdt") => model::HeadKind::Transducer,
+            Some("parakeet_rnnt" | "gigaam_rnnt") => model::HeadKind::Rnnt,
+            Some("parakeet_ctc" | "gigaam_ctc" | "medasr") => model::HeadKind::Ctc,
+            other => return Err(format!("config.json: no encoder for `{other:?}`")),
+        };
+        let config = model::Config::parse(json, head)?;
         let frontend = Frontend::load(json, &tensors, &config)?;
         let model = model::Parakeet::load(&tensors, config)?;
         // The weight file is no longer needed; free it before the position

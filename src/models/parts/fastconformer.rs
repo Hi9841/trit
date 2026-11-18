@@ -246,14 +246,8 @@ pub enum HeadKind {
 }
 
 impl Config {
-    pub fn parse(json: &Json) -> Result<Self, String> {
-        let head = match json.str("model_type") {
-            Some("parakeet_tdt") => HeadKind::Transducer,
-            Some("parakeet_rnnt" | "gigaam_rnnt") => HeadKind::Rnnt,
-            Some("parakeet_ctc" | "gigaam_ctc" | "medasr") => HeadKind::Ctc,
-            Some("canary" | "canary_qwen") => HeadKind::Encoder,
-            other => return Err(format!("config.json: no encoder for `{other:?}`")),
-        };
+    /// The encoder of `json` with the head that the family names.
+    pub fn parse(json: &Json, head: HeadKind) -> Result<Self, String> {
         let enc = |key: &str| json.num(&format!("encoder_config.{key}"));
         // Only the shapes this engine implements are accepted.
         let (factor, kernel, stride) = (
