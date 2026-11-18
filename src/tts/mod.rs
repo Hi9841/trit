@@ -124,8 +124,12 @@ pub fn voice_accent(name: &str) -> &'static str {
 /// `PHONEMIZER_FALLBACKS` names them) in the usual places, as `phonemize`
 /// and a Kokoro voice find it; `None` for another accent.
 pub fn find_phonemizer_fallback(accent: &str) -> Option<std::path::PathBuf> {
-    let (_, repo) = PHONEMIZER_FALLBACKS.iter().find(|(a, _)| *a == accent)?;
-    fallback_dir(None, *repo == FALLBACK_GB)
+    let british = match accent {
+        "us" => false,
+        "gb" => true,
+        _ => return None,
+    };
+    fallback_dir(None, british)
 }
 
 /// The folder of the fallback for unknown words of an accent: in `near`
