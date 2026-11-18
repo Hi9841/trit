@@ -1777,16 +1777,11 @@ impl Parakeet {
         // A GPU result returns before the speaker kernel, cancel, and out_norm below.
         // `Encoder::record` does not run those steps. `gpu_shape` keeps them off.
         #[cfg(feature = "gpu")]
-        if let Some(encoder) = &self.gpu_encoder {
-            if t >= GPU_MIN_FRAMES && crate::gpu::usable() {
-                let d = self.config.hidden;
-                match encoder.encode(&x, t, |reach| relative_positions(reach + 1, d)) {
-                    Ok(encoded) => {
-                        crate::gpu::worked();
-                        return (encoded, t);
-                    }
-                    Err(error) => crate::gpu::failed(&error),
-                }
+        if let Some(encoder) = self.gpu_encoder.as_ref().filter(|_| t >= GPU_MIN_FRAMES) {
+            let d = self.config.hidden;
+            let positions = |reach| relative_positions(reach + 1, d);
+            if let Some(encoded) = crate::gpu::try_run(|| encoder.encode(&x, t, positions)) {
+                return (encoded, t);
             }
         }
         // A short take, or a GPU failure, uses the CPU products.

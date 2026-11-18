@@ -271,14 +271,8 @@ impl Ternary {
         let _product = crate::prof::product(crate::prof::Product::Ternary, self.n, self.k, m);
         #[cfg(feature = "gpu")]
         if let Some(layer) = &self.gpu {
-            if !crate::gpu::host_products() && crate::gpu::usable() {
-                match layer.forward(x, m, false) {
-                    Ok(out) => {
-                        crate::gpu::worked();
-                        return out;
-                    }
-                    Err(error) => crate::gpu::failed(&error),
-                }
+            if let Some(out) = crate::gpu::try_product(|| layer.forward(x, m, false)) {
+                return out;
             }
         }
         if let Some(layer) = &self.v2 {

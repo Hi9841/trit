@@ -507,16 +507,9 @@ impl Dense {
 
     fn forward_then(&self, x: &[f32], rows: usize, relu: bool) -> Buf {
         #[cfg(feature = "gpu")]
-        if let Some(layer) = &self.gpu {
-            if rows >= crate::gpu::MIN_ROWS && !crate::gpu::host_products() && crate::gpu::usable()
-            {
-                match layer.forward(x, rows, relu) {
-                    Ok(out) => {
-                        crate::gpu::worked();
-                        return out;
-                    }
-                    Err(error) => crate::gpu::failed(&error),
-                }
+        if let Some(layer) = self.gpu.as_ref().filter(|_| rows >= crate::gpu::MIN_ROWS) {
+            if let Some(out) = crate::gpu::try_product(|| layer.forward(x, rows, relu)) {
+                return out;
             }
         }
         let n = self.out_features;

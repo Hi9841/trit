@@ -51,16 +51,46 @@ pub(crate) fn use_host_products(host: bool) {
     HOST_PRODUCTS.with(|flag| flag.set(host));
 }
 
-pub(crate) fn host_products() -> bool {
+fn host_products() -> bool {
     HOST_PRODUCTS.with(|flag| flag.get())
 }
 
 /// Whether calls still try the GPU.
-pub(crate) fn usable() -> bool {
+fn usable() -> bool {
     FAILURES.load(Ordering::Relaxed) < MAX_FAILURES
 }
 
-pub(crate) fn failed(error: &str) {
+/// The fallback protocol of every GPU call: runs `work` while calls still
+/// try the GPU, and gives its result, or `None` after a failure (logged and
+/// counted: 3 in sequence turn the GPU off), so the caller runs the CPU.
+#[inline(always)]
+pub(crate) fn try_run<T>(work: impl FnOnce() -> Result<T, String>) -> Option<T> {
+    if !usable() {
+        return None;
+    }
+    match work() {
+        Ok(value) => {
+            worked();
+            Some(value)
+        }
+        Err(error) => {
+            failed(&error);
+            None
+        }
+    }
+}
+
+/// `try_run` for one product: none while the caller runs its products on
+/// the CPU (`use_host_products`).
+#[inline(always)]
+pub(crate) fn try_product<T>(work: impl FnOnce() -> Result<T, String>) -> Option<T> {
+    if host_products() {
+        return None;
+    }
+    try_run(work)
+}
+
+fn failed(error: &str) {
     log_fallback(error);
     if FAILURES.fetch_add(1, Ordering::Relaxed) + 1 == MAX_FAILURES {
         crate::log(&format!(
@@ -69,7 +99,7 @@ pub(crate) fn failed(error: &str) {
     }
 }
 
-pub(crate) fn worked() {
+fn worked() {
     if FAILURES.load(Ordering::Relaxed) != 0 && usable() {
         FAILURES.store(0, Ordering::Relaxed);
     }
