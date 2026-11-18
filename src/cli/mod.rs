@@ -13,6 +13,7 @@ mod speak;
 mod transcribe;
 
 use output::toon;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// `Err` is a failure already printed.
@@ -87,6 +88,58 @@ fn error(message: &str, help: &str) -> ExitCode {
     println!("error: {}", toon(message));
     println!("help: {}", toon(help));
     ExitCode::FAILURE
+}
+
+/// One kind of model the commands load: how to find it and how to name it.
+struct Kind {
+    find: fn(Option<&Path>) -> Option<PathBuf>,
+    missing: fn(Option<&Path>) -> String,
+    /// As the error names it: `cannot load the <what>`.
+    what: &'static str,
+    /// The fix when no folder is found.
+    help: &'static str,
+}
+
+const SPEECH: Kind = Kind {
+    find: trit::find_model,
+    missing: trit::missing_model,
+    what: "model",
+    help: "Run `trit doctor` to see where Trit looks",
+};
+
+const CLEANUP: Kind = Kind {
+    find: trit::find_cleanup_model,
+    missing: trit::missing_cleanup_model,
+    what: "cleanup model",
+    help: "Run `trit doctor` to see where Trit looks",
+};
+
+const VOICE: Kind = Kind {
+    find: trit::find_voice,
+    missing: trit::missing_voice,
+    what: "voice",
+    help: "Run `trit models` to list the voices",
+};
+
+/// The folder of `kind` for `explicit` (a `--model` value), loaded by
+/// `load`, then the memory of the load given back.
+fn load_found<M>(
+    kind: &Kind,
+    explicit: Option<&str>,
+    load: impl FnOnce(&Path) -> Result<M, String>,
+) -> Result<(PathBuf, M), ExitCode> {
+    let explicit = explicit.map(Path::new);
+    let Some(dir) = (kind.find)(explicit) else {
+        return Err(error(&(kind.missing)(explicit), kind.help));
+    };
+    let model = load(&dir).map_err(|e| {
+        error(
+            &format!("cannot load the {}: {e}", kind.what),
+            "Run `trit doctor`",
+        )
+    })?;
+    trit::release_memory();
+    Ok((dir, model))
 }
 
 struct Parsed {

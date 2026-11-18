@@ -1,8 +1,7 @@
 //! `trit clean`, and the cleanup flags of `trit transcribe`.
 
 use super::output::toon;
-use super::{error, load_options, usage_error, Command, Format, Outcome, Parsed};
-use std::path::Path;
+use super::{load_found, load_options, usage_error, Command, Format, Outcome, Parsed, CLEANUP};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -61,19 +60,10 @@ pub(super) fn load_cleaner(
     explicit: Option<&str>,
     options: &trit::LoadOptions,
 ) -> Result<trit::Cleaner, ExitCode> {
-    let explicit = explicit.map(Path::new);
-    let Some(dir) = trit::find_cleanup_model(explicit) else {
-        return Err(error(
-            &trit::missing_cleanup_model(explicit),
-            "Run `trit doctor` to see where Trit looks",
-        ));
-    };
-    trit::Cleaner::load_with(&dir, options).map_err(|e| {
-        error(
-            &format!("cannot load the cleanup model: {e}"),
-            "Run `trit doctor`",
-        )
+    load_found(&CLEANUP, explicit, |dir| {
+        trit::Cleaner::load_with(dir, options)
     })
+    .map(|(_, cleaner)| cleaner)
 }
 
 fn run(parsed: &Parsed) -> Outcome {

@@ -2,7 +2,9 @@
 
 use super::clean::{load_cleaner, style};
 use super::output::{print_help, slashes, tilde, toon};
-use super::{error, load_options, usage_error, Command, Format, Outcome, Parsed};
+use super::{
+    error, load_found, load_options, usage_error, Command, Format, Outcome, Parsed, SPEECH,
+};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -133,16 +135,9 @@ fn run(parsed: &Parsed) -> Outcome {
     let cleaner = (parsed.switch("--cleanup") || parsed.value("--cleanup-model").is_some())
         .then(|| load_cleaner(parsed.value("--cleanup-model"), &load))
         .transpose()?;
-    let explicit = parsed.value("--model").map(Path::new);
-    let Some(model_dir) = trit::find_model(explicit) else {
-        return Err(error(
-            &trit::missing_model(explicit),
-            "Run `trit doctor` to see where Trit looks",
-        ));
-    };
-    let engine = trit::Trit::load_with(&model_dir, &load)
-        .map_err(|e| error(&format!("cannot load the model: {e}"), "Run `trit doctor`"))?;
-    trit::release_memory();
+    let (model_dir, engine) = load_found(&SPEECH, parsed.value("--model"), |dir| {
+        trit::Trit::load_with(dir, &load)
+    })?;
     engine
         .check(&options)
         .map_err(|e| usage_error(&e, "--language en; without --language the model detects it"))?;

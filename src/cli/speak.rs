@@ -1,8 +1,8 @@
 //! `trit speak`, `trit phonemes`, and `trit voices`.
 
 use super::output::{print_help, slashes, tilde, toon};
-use super::{error, usage_error, Command, Format, Outcome, Parsed};
-use std::path::{Path, PathBuf};
+use super::{error, load_found, usage_error, Command, Format, Outcome, Parsed, VOICE};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -85,16 +85,7 @@ pub(super) const VOICES: Command = Command {
 const SPEAK_EXAMPLE: &str = "trit speak \"<text>\" --speed 1.1 --noise 0.5 --seed 7";
 
 fn load_voice(parsed: &Parsed) -> Result<(PathBuf, trit::Voice), ExitCode> {
-    let explicit = parsed.value("--model").map(Path::new);
-    let Some(dir) = trit::find_voice(explicit) else {
-        return Err(error(
-            &trit::missing_voice(explicit),
-            "Run `trit models` to list the voices",
-        ));
-    };
-    let voice = trit::Voice::load(&dir)
-        .map_err(|e| error(&format!("cannot load the voice: {e}"), "Run `trit doctor`"))?;
-    Ok((dir, voice))
+    load_found(&VOICE, parsed.value("--model"), trit::Voice::load)
 }
 
 fn voicing(parsed: &Parsed) -> Result<trit::Voicing, ExitCode> {
