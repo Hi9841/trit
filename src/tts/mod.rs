@@ -84,16 +84,36 @@ const FALLBACK_GB: &str = "PeterReid/graphemes_to_phonemes_en_gb";
 /// Each accent and the repository of its fallback.
 pub const PHONEMIZER_FALLBACKS: [(&str, &str); 2] = [("us", FALLBACK_US), ("gb", FALLBACK_GB)];
 
+/// Whether a Kokoro voice is British (`b…`) or American (`a…`), from the
+/// first letter of its name; `None` for a voice that does not speak English.
+fn british(name: &str) -> Option<bool> {
+    match name.chars().next() {
+        Some('a') => Some(false),
+        Some('b') => Some(true),
+        _ => None,
+    }
+}
+
 /// The accent of a Kokoro voice, from the first letters of its name.
 pub fn voice_accent(name: &str) -> &'static str {
-    let mut letters = name.chars();
-    match (letters.next(), letters.next()) {
-        (Some('a'), Some('f')) => "American female",
-        (Some('a'), Some('m')) => "American male",
-        (Some('b'), Some('f')) => "British female",
-        (Some('b'), Some('m')) => "British male",
+    match (british(name), name.chars().nth(1)) {
+        (Some(false), Some('f')) => "American female",
+        (Some(false), Some('m')) => "American male",
+        (Some(true), Some('f')) => "British female",
+        (Some(true), Some('m')) => "British male",
         _ => "not English (give phonemes)",
     }
+}
+
+/// The folder of the fallback for unknown words of an accent: in `near`
+/// first (the folder that holds the voice), else in the usual places.
+fn fallback_dir(near: Option<&Path>, british: bool) -> Option<std::path::PathBuf> {
+    let repo = if british { FALLBACK_GB } else { FALLBACK_US };
+    let name = repo.rsplit('/').next().unwrap_or(repo);
+    near.map(|folder| folder.join(name))
+        .into_iter()
+        .chain(crate::candidates(repo))
+        .find(|dir| crate::is_model(dir))
 }
 
 enum Model {
@@ -115,36 +135,22 @@ struct KokoroVoice {
 impl KokoroVoice {
     /// The phonemizer of a voice: British for `b…` voices, American for `a…`.
     fn english(&self, voice: &str) -> Result<&english::English, String> {
-        let british = match voice.trim().chars().next() {
-            Some('a') => false,
-            Some('b') => true,
-            _ => {
-                return Err(format!(
-                    "voice {voice} does not speak English; the phonemizer is English (a… and b… voices): pass phonemes with `phonemes`"
-                ))
-            }
-        };
-        let (cell, repo) = if british {
-            (&self.british, FALLBACK_GB)
+        let british = british(voice.trim()).ok_or_else(|| {
+            format!(
+                "voice {voice} does not speak English; the phonemizer is English (a… and b… voices): pass phonemes with `phonemes`"
+            )
+        })?;
+        let cell = if british {
+            &self.british
         } else {
-            (&self.american, FALLBACK_US)
+            &self.american
         };
         cell.get_or_init(|| {
-            english::English::load(british, fallback_dir(&self.dir, repo).as_deref())
+            english::English::load(british, fallback_dir(self.dir.parent(), british).as_deref())
         })
         .as_ref()
         .map_err(Clone::clone)
     }
-}
-
-/// The folder of a fallback model: next to the voice folder, else in the usual places.
-fn fallback_dir(voice: &Path, repo: &str) -> Option<std::path::PathBuf> {
-    let name = repo.rsplit('/').next().unwrap_or(repo);
-    let sibling = voice.parent().map(|p| p.join(name));
-    sibling
-        .into_iter()
-        .chain(crate::candidates(repo))
-        .find(|dir| crate::is_model(dir))
 }
 
 pub struct Voice {
@@ -443,14 +449,7 @@ fn kokoro_voice(model: &Kokoro, voicing: &Voicing) -> Result<String, String> {
 /// (`PeterReid/graphemes_to_phonemes_en_us` or `_gb`, when found); else
 /// they get none.
 pub fn phonemize(text: &str, british: bool, fallback: bool) -> Result<String, String> {
-    let repo = if british { FALLBACK_GB } else { FALLBACK_US };
-    let dir = if fallback {
-        crate::candidates(repo)
-            .into_iter()
-            .find(|d| crate::is_model(d))
-    } else {
-        None
-    };
+    let dir = fallback.then(|| fallback_dir(None, british)).flatten();
     let english = english::English::load(british, dir.as_deref())?;
     let lines: Result<Vec<String>, String> =
         text.lines().map(|line| english.phonemize(line)).collect();
