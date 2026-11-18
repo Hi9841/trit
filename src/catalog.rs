@@ -789,73 +789,19 @@ pub const CATALOG: &[Known] = &[
 ];
 
 impl Known {
-    /// The files Trit reads from a folder of this kind.
+    /// The files Trit reads from a folder of this kind: the list of its
+    /// family row (`FAMILIES`), of its voice row (`tts::KIND_FILES`), or the
+    /// files of a Hugging Face folder (the cleanup model).
     pub fn files(&self) -> Vec<&'static str> {
         if let Some(file) = self.file {
             return vec![file];
         }
-        let files: &[&str] = match self.kind {
-            "whisper" => &[
-                "config.json",
-                "generation_config.json",
-                "tokenizer.json",
-                "model.safetensors",
-            ],
-            "wav2vec2" => &[
-                "config.json",
-                "preprocessor_config.json",
-                "tokenizer_config.json",
-                "vocab.json",
-                "model.safetensors",
-            ],
-            "kokoro" => &[
-                "config.json",
-                "kokoro-v1_0.pth",
-                "voices/af_alloy.pt",
-                "voices/af_aoede.pt",
-                "voices/af_bella.pt",
-                "voices/af_heart.pt",
-                "voices/af_jessica.pt",
-                "voices/af_kore.pt",
-                "voices/af_nicole.pt",
-                "voices/af_nova.pt",
-                "voices/af_river.pt",
-                "voices/af_sarah.pt",
-                "voices/af_sky.pt",
-                "voices/am_adam.pt",
-                "voices/am_echo.pt",
-                "voices/am_eric.pt",
-                "voices/am_fenrir.pt",
-                "voices/am_liam.pt",
-                "voices/am_michael.pt",
-                "voices/am_onyx.pt",
-                "voices/am_puck.pt",
-                "voices/am_santa.pt",
-                "voices/bf_alice.pt",
-                "voices/bf_emma.pt",
-                "voices/bf_isabella.pt",
-                "voices/bf_lily.pt",
-                "voices/bm_daniel.pt",
-                "voices/bm_fable.pt",
-                "voices/bm_george.pt",
-                "voices/bm_lewis.pt",
-            ],
-            "g2p" => &["config.json", "generation_config.json", "model.safetensors"],
-            "vits" => &[
-                "config.json",
-                "tokenizer_config.json",
-                "vocab.json",
-                "model.safetensors",
-            ],
-            "qwen3_asr" => &[
-                "config.json",
-                "tokenizer_config.json",
-                "vocab.json",
-                "merges.txt",
-                "model.safetensors",
-            ],
-            _ => &["config.json", "tokenizer.json", "model.safetensors"],
-        };
+        let files = crate::models::FAMILIES
+            .iter()
+            .find(|row| row.model_type == self.kind)
+            .map(|row| row.files)
+            .or_else(|| crate::tts::files_of(self.kind))
+            .unwrap_or(crate::models::HF_FILES);
         files.to_vec()
     }
 
@@ -876,3 +822,67 @@ impl Known {
 pub fn known(name: &str) -> Option<&'static Known> {
     CATALOG.iter().find(|k| k.name == name || k.repo == name)
 }
+
+/// The index of the entry `name` in `CATALOG`; a name that is not there
+/// fails the build.
+const fn index(name: &str) -> usize {
+    let mut i = 0;
+    while i < CATALOG.len() {
+        if same(CATALOG[i].name, name) {
+            return i;
+        }
+        i += 1;
+    }
+    panic!("a default is not in CATALOG")
+}
+
+const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The default of each kind of model: what `find_model`,
+/// `find_cleanup_model`, and `find_voice` (in this order) look for, and
+/// the phonemizer fallbacks (American, British).
+pub(crate) const DEFAULT_MODEL: &Known = &CATALOG[index("parakeet-redux")];
+pub(crate) const DEFAULT_CLEANUP: &Known = &CATALOG[index("s1-mini")];
+pub(crate) const DEFAULT_VOICES: [&Known; 2] = [
+    &CATALOG[index("kokoro-82m")],
+    &CATALOG[index("mms-tts-eng")],
+];
+pub(crate) const PHONEMIZER_FALLBACK: [&Known; 2] = [
+    &CATALOG[index("graphemes_to_phonemes_en_us")],
+    &CATALOG[index("graphemes_to_phonemes_en_gb")],
+];
+
+/// Every `kind` of `CATALOG` is a `model_type` of `FAMILIES`, a voice kind
+/// of `tts::KIND_FILES`, or `cleanup`: else the build fails.
+const _: () = {
+    let mut i = 0;
+    while i < CATALOG.len() {
+        let kind = CATALOG[i].kind;
+        let mut known = same(kind, crate::cleanup::CATALOG_KIND);
+        let mut f = 0;
+        while f < crate::models::FAMILIES.len() {
+            known |= same(kind, crate::models::FAMILIES[f].model_type);
+            f += 1;
+        }
+        let mut v = 0;
+        while v < crate::tts::KIND_FILES.len() {
+            known |= same(kind, crate::tts::KIND_FILES[v].0);
+            v += 1;
+        }
+        assert!(known, "a CATALOG kind has no family or voice");
+        i += 1;
+    }
+};

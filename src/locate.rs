@@ -7,7 +7,7 @@ use crate::tts::{is_kokoro, VOICE_REPOS};
 use std::path::{Path, PathBuf};
 
 /// The Hugging Face repository of the default model.
-pub const MODEL_REPO: &str = "moondream/parakeet-redux";
+pub const MODEL_REPO: &str = crate::catalog::DEFAULT_MODEL.repo;
 /// The files every model folder holds; a family may need more. A large
 /// model may hold `model.safetensors.index.json` and its shards instead of
 /// `model.safetensors`.

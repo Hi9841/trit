@@ -66,6 +66,8 @@ type Load =
 /// how to load it.
 pub struct Row {
     pub model_type: &'static str,
+    /// The files its loader reads from a Hugging Face folder.
+    pub files: &'static [&'static str],
     spread: Spread,
     /// `Device::Auto` selects the GPU: a measurement shows that the family
     /// runs faster there (see `active_device`).
@@ -76,6 +78,7 @@ pub struct Row {
 const fn row<F: Family + 'static>(model_type: &'static str, spread: Spread) -> Row {
     Row {
         model_type,
+        files: HF_FILES,
         spread,
         gpu_gain: false,
         load: |files, config, precision, device| {
@@ -93,6 +96,9 @@ const fn gpu_row<F: Family + 'static>(model_type: &'static str, spread: Spread) 
     }
 }
 
+/// The files of a Hugging Face folder that most families read.
+pub const HF_FILES: &[&str] = &["config.json", "tokenizer.json", "model.safetensors"];
+
 /// Every family, by `model_type`. Tall products (Whisper) use every core.
 pub const FAMILIES: [Row; 21] = [
     gpu_row::<parakeet::Parakeet>("parakeet_tdt", Spread::OneCache),
@@ -101,12 +107,38 @@ pub const FAMILIES: [Row; 21] = [
     row::<parakeet::Parakeet>("gigaam_rnnt", Spread::OneCache),
     row::<parakeet::Parakeet>("gigaam_ctc", Spread::OneCache),
     row::<parakeet::Parakeet>("medasr", Spread::OneCache),
-    row::<whisper::Whisper>("whisper", Spread::AllCores),
+    Row {
+        files: &[
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "model.safetensors",
+        ],
+        ..row::<whisper::Whisper>("whisper", Spread::AllCores)
+    },
     row::<moonshine::Moonshine>("moonshine", Spread::OneCache),
     row::<moonshine::Moonshine>("moonshine_streaming", Spread::OneCache),
     row::<canary::Canary>("canary", Spread::OneCache),
-    row::<wav2vec2::Wav2Vec2>("wav2vec2", Spread::OneCache),
-    row::<qwen3_asr::Qwen3Asr>("qwen3_asr", Spread::OneCache),
+    Row {
+        files: &[
+            "config.json",
+            "preprocessor_config.json",
+            "tokenizer_config.json",
+            "vocab.json",
+            "model.safetensors",
+        ],
+        ..row::<wav2vec2::Wav2Vec2>("wav2vec2", Spread::OneCache)
+    },
+    Row {
+        files: &[
+            "config.json",
+            "tokenizer_config.json",
+            "vocab.json",
+            "merges.txt",
+            "model.safetensors",
+        ],
+        ..row::<qwen3_asr::Qwen3Asr>("qwen3_asr", Spread::OneCache)
+    },
     row::<canary_qwen::CanaryQwen>("canary_qwen", Spread::OneCache),
     row::<fun_asr::FunAsr>("fun_asr_nano", Spread::OneCache),
     row::<granite_speech::GraniteSpeech>("granite_speech", Spread::OneCache),

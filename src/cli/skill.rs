@@ -48,11 +48,13 @@ fn skill_text() -> String {
             entry.name, entry.kind, entry.languages, entry.mb
         ));
     }
-    text.push_str(&format!(
-        "\nExample: `{}`. The default model is {}; `TRIT_MODEL=<dir>` sets another.\n\n",
-        trit::CATALOG[0].download_command(),
-        trit::CATALOG[0].name
-    ));
+    if let Some(default) = trit::known(trit::MODEL_REPO) {
+        text.push_str(&format!(
+            "\nExample: `{}`. The default model is {}; `TRIT_MODEL=<dir>` sets another.\n\n",
+            default.download_command(),
+            default.name
+        ));
+    }
     text.push_str("## Use it from code\n\nRead the README (https://github.com/Hi9841/trit): the Rust API, the C ABI (`include/trit.h`), and bindings for Python, C#, and Node. Any other language with a C FFI uses `include/trit.h` directly.\n");
     text
 }

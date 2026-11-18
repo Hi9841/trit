@@ -53,16 +53,26 @@ export const languagesOf = (languages: string) =>
 
 const CATALOG_RS = readRepo("src/catalog.rs");
 
-// The files Trit reads for each kind, from the match in `Known::files`; `_`
-// is the arm for every other kind.
-const FILES_FN = CATALOG_RS.split("pub fn files")[1]?.split("pub fn download_command")[0] ?? "";
+// The files Trit reads for each kind, as `Known::files` finds them: the
+// list of a family row (`FAMILIES` in src/models/mod.rs) or of a voice row
+// (`KIND_FILES` in src/tts/mod.rs); `_` is `HF_FILES`, for every other kind.
+const MODELS_RS = readRepo("src/models/mod.rs");
+const TTS_RS = readRepo("src/tts/mod.rs");
 
-const FILES = new Map(
-  [...FILES_FN.matchAll(/(?:"(\w+)"|_) => &\[([^\]]*)\]/g)].map((arm) => [
-    arm[1] ?? "_",
-    [...arm[2]!.matchAll(/"([^"]+)"/g)].map((file) => file[1]!),
-  ]),
-);
+const kindFiles = (kind: string, list: string): [string, string[]] => [
+  kind,
+  [...list.matchAll(/"([^"]+)"/g)].map((file) => file[1]!),
+];
+
+const FILES = new Map([
+  kindFiles("_", /HF_FILES: &\[&str\] = &\[([^\]]*)\]/.exec(MODELS_RS)?.[1] ?? ""),
+  ...[...MODELS_RS.matchAll(/files: &\[([^\]]*)\],\s*\.\.row::<[^>]+>\("(\w+)"/g)].map((row) =>
+    kindFiles(row[2]!, row[1]!),
+  ),
+  ...[...(TTS_RS.split("KIND_FILES")[1] ?? "").matchAll(/\(\s*"(\w+)",\s*&\[([^\]]*)\],?\s*\)/g)].map(
+    (row) => kindFiles(row[1]!, row[2]!),
+  ),
+]);
 
 /** The command `trit models` prints: every file named, no glob. */
 export const downloadCommand = (m: Model) =>
@@ -79,7 +89,8 @@ export const catalog: Model[] = [...CATALOG_RS.matchAll(KNOWN)].map((m) => {
   return model;
 });
 
-export const DEFAULT_MODEL = "parakeet-redux";
+/** The default speech model: `DEFAULT_MODEL` of src/catalog.rs. */
+export const DEFAULT_MODEL = /DEFAULT_MODEL: &Known = &CATALOG\[index\("([^"]+)"\)\]/.exec(CATALOG_RS)?.[1] ?? "";
 
 // ---------- benchmarks: bench/benchmarks.json ----------
 // Written by bench/runtimes_report.py from the raw results: CPU only,

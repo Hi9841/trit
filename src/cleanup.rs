@@ -10,7 +10,10 @@ use crate::text::bpe::Bpe;
 use std::path::Path;
 
 /// The Hugging Face repository of the cleanup model.
-pub const CLEANUP_REPO: &str = "superwhisper/s1-mini";
+pub const CLEANUP_REPO: &str = crate::catalog::DEFAULT_CLEANUP.repo;
+
+/// The `kind` of the cleanup model in `CATALOG`.
+pub(crate) const CATALOG_KIND: &str = "cleanup";
 
 const SYSTEM: &str = "You are a text normalizer for speech-to-text transcripts. The input begins \
 with a control line specifying the styling, structure, and context settings; clean the \

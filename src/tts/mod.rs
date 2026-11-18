@@ -25,9 +25,70 @@ use std::path::Path;
 use vits::{Settings, Vits};
 
 /// The Hugging Face repository of the default voice (Kokoro-82M).
-pub const VOICE_REPO: &str = "hexgrad/Kokoro-82M";
+pub const VOICE_REPO: &str = crate::catalog::DEFAULT_VOICES[0].repo;
 /// The voices `find_voice` looks for, in order: Kokoro, then MMS-TTS English.
-pub const VOICE_REPOS: [&str; 2] = [VOICE_REPO, "facebook/mms-tts-eng"];
+pub const VOICE_REPOS: [&str; 2] = [VOICE_REPO, crate::catalog::DEFAULT_VOICES[1].repo];
+
+/// The files of each text-to-speech kind of `CATALOG`: the two voices
+/// (`Voice::load` picks one by these files) and the phonemizer fallback.
+pub(crate) const KIND_FILES: [(&str, &[&str]); 3] = [
+    (
+        "kokoro",
+        &[
+            "config.json",
+            "kokoro-v1_0.pth",
+            "voices/af_alloy.pt",
+            "voices/af_aoede.pt",
+            "voices/af_bella.pt",
+            "voices/af_heart.pt",
+            "voices/af_jessica.pt",
+            "voices/af_kore.pt",
+            "voices/af_nicole.pt",
+            "voices/af_nova.pt",
+            "voices/af_river.pt",
+            "voices/af_sarah.pt",
+            "voices/af_sky.pt",
+            "voices/am_adam.pt",
+            "voices/am_echo.pt",
+            "voices/am_eric.pt",
+            "voices/am_fenrir.pt",
+            "voices/am_liam.pt",
+            "voices/am_michael.pt",
+            "voices/am_onyx.pt",
+            "voices/am_puck.pt",
+            "voices/am_santa.pt",
+            "voices/bf_alice.pt",
+            "voices/bf_emma.pt",
+            "voices/bf_isabella.pt",
+            "voices/bf_lily.pt",
+            "voices/bm_daniel.pt",
+            "voices/bm_fable.pt",
+            "voices/bm_george.pt",
+            "voices/bm_lewis.pt",
+        ],
+    ),
+    (
+        "g2p",
+        &["config.json", "generation_config.json", "model.safetensors"],
+    ),
+    (
+        "vits",
+        &[
+            "config.json",
+            "tokenizer_config.json",
+            "vocab.json",
+            "model.safetensors",
+        ],
+    ),
+];
+
+/// The files of the text-to-speech kind `kind`.
+pub(crate) fn files_of(kind: &str) -> Option<&'static [&'static str]> {
+    KIND_FILES
+        .iter()
+        .find(|(known, _)| *known == kind)
+        .map(|(_, files)| *files)
+}
 
 /// Silence between two sentences of a VITS voice, in seconds. The model
 /// speaks one sentence per pass; a pass ends close to its last sound.
@@ -79,8 +140,8 @@ pub struct Voicing {
 }
 
 /// The Hugging Face repositories of the fallback for unknown words.
-const FALLBACK_US: &str = "PeterReid/graphemes_to_phonemes_en_us";
-const FALLBACK_GB: &str = "PeterReid/graphemes_to_phonemes_en_gb";
+const FALLBACK_US: &str = crate::catalog::PHONEMIZER_FALLBACK[0].repo;
+const FALLBACK_GB: &str = crate::catalog::PHONEMIZER_FALLBACK[1].repo;
 /// Each accent and the repository of its fallback.
 pub const PHONEMIZER_FALLBACKS: [(&str, &str); 2] = [("us", FALLBACK_US), ("gb", FALLBACK_GB)];
 
