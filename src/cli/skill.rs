@@ -6,20 +6,23 @@ use super::{error, Command, Outcome, Parsed, COMMANDS};
 use std::process::ExitCode;
 
 const HELP: &str = "\
-usage: trit skill [--check <file>] [--check-docs <file>]
+usage: trit skill [--check <file>] [--check-docs <file>] [--catalog] [--check-catalog <file>]
   Prints the agent skill (SKILL.md) for Trit. It comes from the same text as the home view.
   --check <file>  exit 1 when <file> differs from the skill this version prints
   --check-docs <file>  exit 1 when the model table of <file> (docs/reference.md) names other models, repositories, or sizes than `trit models`
+  --catalog       print the known models as JSON (site/catalog.json, read by the website)
+  --check-catalog <file>  exit 1 when <file> differs from `trit skill --catalog`
 examples:
   trit skill > skill/SKILL.md
   trit skill --check skill/SKILL.md
-  trit skill --check-docs docs/reference.md";
+  trit skill --check-docs docs/reference.md
+  trit skill --catalog > site/catalog.json";
 
 pub(super) const COMMAND: Command = Command {
     name: "skill",
     help: HELP,
-    values: &["--check", "--check-docs"],
-    switches: &[],
+    values: &["--check", "--check-docs", "--check-catalog"],
+    switches: &["--catalog"],
     in_skill: false,
     run,
 };
@@ -120,30 +123,68 @@ fn check_docs(file: &str) -> Result<(), ExitCode> {
     ))
 }
 
-fn run(parsed: &Parsed) -> Outcome {
-    if let Some(file) = parsed.value("--check-docs") {
-        check_docs(file)?;
-        if parsed.value("--check").is_none() {
-            return Ok(ExitCode::SUCCESS);
-        }
-    }
-    let text = skill_text();
-    let Some(file) = parsed.value("--check") else {
-        print!("{text}");
-        return Ok(ExitCode::SUCCESS);
-    };
+/// The catalog as JSON, for the site: each model with its family name, the
+/// files Trit reads (as the download command), and the default.
+fn catalog_json() -> String {
+    let models: Vec<serde_json::Value> = trit::CATALOG
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "name": entry.name,
+                "repo": entry.repo,
+                "kind": entry.kind,
+                "family": entry.family(),
+                "speech_to_text": entry.is_speech_to_text(),
+                "languages": entry.languages,
+                "mb": entry.mb,
+                "file": entry.file,
+                "download": entry.download_command(),
+            })
+        })
+        .collect();
+    let default = trit::known(trit::MODEL_REPO).map(|entry| entry.name);
+    let catalog = serde_json::json!({ "default": default, "models": models });
+    format!("{catalog:#}\n")
+}
+
+/// Fails when `file` is not `text`, the output of `fix`.
+fn check_generated(file: &str, text: &str, what: &str, fix: &str) -> Result<(), ExitCode> {
     match std::fs::read_to_string(file) {
         Ok(committed) if committed.replace("\r\n", "\n") == text => {
-            println!("skill: {} is current", toon(file));
-            Ok(ExitCode::SUCCESS)
+            println!("{what}: {} is current", toon(file));
+            Ok(())
         }
         Ok(_) => Err(error(
             &format!("{file} is stale"),
-            &format!("trit skill > {file}"),
+            &format!("{fix} > {file}"),
         )),
         Err(e) => Err(error(
             &format!("cannot read {file}: {e}"),
-            &format!("trit skill > {file}"),
+            &format!("{fix} > {file}"),
         )),
     }
+}
+
+fn run(parsed: &Parsed) -> Outcome {
+    if parsed.switch("--catalog") {
+        print!("{}", catalog_json());
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut checked = false;
+    if let Some(file) = parsed.value("--check-docs") {
+        check_docs(file)?;
+        checked = true;
+    }
+    if let Some(file) = parsed.value("--check-catalog") {
+        check_generated(file, &catalog_json(), "catalog", "trit skill --catalog")?;
+        checked = true;
+    }
+    if let Some(file) = parsed.value("--check") {
+        check_generated(file, &skill_text(), "skill", "trit skill")?;
+        checked = true;
+    }
+    if !checked {
+        print!("{}", skill_text());
+    }
+    Ok(ExitCode::SUCCESS)
 }

@@ -61,9 +61,9 @@ jobs:
           cargo clippy --locked -p trit --all-targets -- -D warnings
           cargo check --locked -p trit-ffi --no-default-features
       - name: Skill
-        # The skill is generated; the model table of the reference is written
-        # by hand and checked against the catalog.
-        run: target/release/trit.exe skill --check skill/SKILL.md --check-docs docs/reference.md
+        # The skill and the site's catalog are generated; the model table of
+        # the reference is written by hand and checked against the catalog.
+        run: target/release/trit.exe skill --check skill/SKILL.md --check-docs docs/reference.md --check-catalog site/catalog.json
       - name: Python binding
         shell: bash
         run: |

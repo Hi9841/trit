@@ -4,16 +4,16 @@ import Header from "../components/Header.astro";
 import PageHead from "../components/PageHead.astro";
 import Footer from "../components/Footer.astro";
 import Cmd from "../components/Cmd.astro";
-import { DEFAULT_MODEL, catalog, downloadCommand, familyOf, languagesOf, megabytes, tritCleanup, tritRunOf } from "../lib/data";
+import { DEFAULT_MODEL, catalog, languagesOf, megabytes, tritCleanup, tritRunOf } from "../lib/data";
 import { render, sections } from "../lib/markdown";
 import { links } from "../lib/links";
 import { readRepo, updatedOf } from "../lib/repo";
 import { shelf } from "../lib/sketch";
 
 // Families in the order of the catalog, each with its models.
-const families = [...new Set(catalog.map((m) => familyOf(m.kind)))].map((family) => ({
+const families = [...new Set(catalog.map((m) => m.family))].map((family) => ({
   family,
-  models: catalog.filter((m) => familyOf(m.kind) === family),
+  models: catalog.filter((m) => m.family === family),
 }));
 
 const updated = updatedOf([
@@ -83,7 +83,7 @@ const search = await render(readme.slice(tableEnd + 1).join("\n"), "docs/referen
                     <button
                       class="get button quiet"
                       type="button"
-                      data-copy={downloadCommand(m)}
+                      data-copy={m.download}
                       aria-label={`Copy the download command of ${m.name}`}
                     >
                       Copy download

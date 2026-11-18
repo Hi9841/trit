@@ -1,96 +1,36 @@
 // The facts on the pages, read from the repository at build time.
 import { readRepo } from "./repo";
 
-// ---------- models: src/catalog.rs ----------
+// ---------- models: site/catalog.json ----------
+// Written by `trit skill --catalog` from src/catalog.rs and the family rows;
+// CI fails when it is stale.
 
 export interface Model {
   name: string;
   repo: string;
   kind: string;
+  /** The family as people name it (`Parakeet`, `Text to speech`). */
+  family: string;
+  speech_to_text: boolean;
   languages: string;
   mb: number;
   /** The one file Trit reads (a .nemo or .gguf), when it reads no Hugging Face files. */
-  file?: string;
+  file: string | null;
+  /** The command `trit models` prints: every file named, no glob. */
+  download: string;
 }
 
-const FAMILY = new Map([
-  ["parakeet_tdt", "Parakeet"],
-  ["parakeet_rnnt", "Parakeet"],
-  ["parakeet_ctc", "Parakeet"],
-  ["gigaam_ctc", "GigaAM"],
-  ["gigaam_rnnt", "GigaAM"],
-  ["medasr", "MedASR"],
-  ["canary", "Canary"],
-  ["canary_qwen", "Canary-Qwen"],
-  ["whisper", "Whisper"],
-  ["moonshine", "Moonshine"],
-  ["moonshine_streaming", "Moonshine Streaming"],
-  ["qwen3_asr", "Qwen3-ASR"],
-  ["fun_asr_nano", "Fun-ASR"],
-  ["sensevoice", "SenseVoice"],
-  ["granite_speech", "Granite Speech"],
-  ["granite_speech_nar", "Granite Speech"],
-  ["granite_ctc", "Granite Speech"],
-  ["voxtral", "Voxtral"],
-  ["voxtral_realtime", "Voxtral"],
-  ["moss", "MOSS"],
-  ["wav2vec2", "wav2vec 2.0"],
-  ["cleanup", "Transcript cleanup"],
-  ["kokoro", "Text to speech"],
-  ["g2p", "Text to speech"],
-  ["vits", "Text to speech"],
-]);
+const CATALOG: { default: string; models: Model[] } = JSON.parse(readRepo("site/catalog.json"));
 
-/** The kinds that do not turn speech into text. */
-const NOT_SPEECH = new Set(["cleanup", "kokoro", "g2p", "vits"]);
+export const catalog = CATALOG.models;
 
-export const familyOf = (kind: string) => FAMILY.get(kind) ?? kind;
+/** The default speech model. */
+export const DEFAULT_MODEL = CATALOG.default;
 
-export const isSpeechToText = (m: Model) => !NOT_SPEECH.has(m.kind);
+export const isSpeechToText = (m: Model) => m.speech_to_text;
 
 export const languagesOf = (languages: string) =>
   languages === "en" ? "English" : /^\d+$/.test(languages) ? `${languages} languages` : languages;
-
-const CATALOG_RS = readRepo("src/catalog.rs");
-
-// The files Trit reads for each kind, as `Known::files` finds them: the
-// list of a family row (`FAMILIES` in src/models/mod.rs) or of a voice row
-// (`KIND_FILES` in src/tts/mod.rs); `_` is `HF_FILES`, for every other kind.
-const MODELS_RS = readRepo("src/models/mod.rs");
-const TTS_RS = readRepo("src/tts/mod.rs");
-
-const kindFiles = (kind: string, list: string): [string, string[]] => [
-  kind,
-  [...list.matchAll(/"([^"]+)"/g)].map((file) => file[1]!),
-];
-
-const FILES = new Map([
-  kindFiles("_", /HF_FILES: &\[&str\] = &\[([^\]]*)\]/.exec(MODELS_RS)?.[1] ?? ""),
-  ...[...MODELS_RS.matchAll(/files: &\[([^\]]*)\],\s*\.\.row::<[^>]+>\("(\w+)"/g)].map((row) =>
-    kindFiles(row[2]!, row[1]!),
-  ),
-  ...[...(TTS_RS.split("KIND_FILES")[1] ?? "").matchAll(/\(\s*"(\w+)",\s*&\[([^\]]*)\],?\s*\)/g)].map(
-    (row) => kindFiles(row[1]!, row[2]!),
-  ),
-]);
-
-/** The command `trit models` prints: every file named, no glob. */
-export const downloadCommand = (m: Model) =>
-  `hf download ${m.repo} ${(m.file ? [m.file] : (FILES.get(m.kind) ?? FILES.get("_") ?? [])).join(" ")} --local-dir models/${m.name}`;
-
-const KNOWN =
-  /Known \{\s*name: "([^"]+)",\s*repo: "([^"]+)",\s*kind: "([^"]+)",\s*languages: "([^"]+)",\s*mb: (\d+),\s*file: (?:Some\("([^"]+)"\)|None),/g;
-
-export const catalog: Model[] = [...CATALOG_RS.matchAll(KNOWN)].map((m) => {
-  const model: Model = { name: m[1], repo: m[2], kind: m[3], languages: m[4], mb: Number(m[5]) };
-
-  if (m[6]) model.file = m[6];
-
-  return model;
-});
-
-/** The default speech model: `DEFAULT_MODEL` of src/catalog.rs. */
-export const DEFAULT_MODEL = /DEFAULT_MODEL: &Known = &CATALOG\[index\("([^"]+)"\)\]/.exec(CATALOG_RS)?.[1] ?? "";
 
 // ---------- benchmarks: bench/benchmarks.json ----------
 // Written by bench/runtimes_report.py from the raw results: CPU only,
