@@ -9,6 +9,7 @@
 mod albert;
 mod blocks;
 mod generator;
+mod voice;
 
 use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
@@ -24,8 +25,44 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+pub use voice::KokoroVoice;
 
 /// The style vectors of a voice: one row of `2 * style` per phoneme count.
+/// The files of a Kokoro-82M folder that Trit reads: the config, the
+/// checkpoint, and the 28 voices of the release.
+pub(crate) const FILES: &[&str] = &[
+    "config.json",
+    "kokoro-v1_0.pth",
+    "voices/af_alloy.pt",
+    "voices/af_aoede.pt",
+    "voices/af_bella.pt",
+    "voices/af_heart.pt",
+    "voices/af_jessica.pt",
+    "voices/af_kore.pt",
+    "voices/af_nicole.pt",
+    "voices/af_nova.pt",
+    "voices/af_river.pt",
+    "voices/af_sarah.pt",
+    "voices/af_sky.pt",
+    "voices/am_adam.pt",
+    "voices/am_echo.pt",
+    "voices/am_eric.pt",
+    "voices/am_fenrir.pt",
+    "voices/am_liam.pt",
+    "voices/am_michael.pt",
+    "voices/am_onyx.pt",
+    "voices/am_puck.pt",
+    "voices/am_santa.pt",
+    "voices/bf_alice.pt",
+    "voices/bf_emma.pt",
+    "voices/bf_isabella.pt",
+    "voices/bf_lily.pt",
+    "voices/bm_daniel.pt",
+    "voices/bm_fable.pt",
+    "voices/bm_george.pt",
+    "voices/bm_lewis.pt",
+];
+
 const PACK_ROWS: usize = 510;
 /// The most frames of one pass, about eight minutes of speech: the buffers
 /// of the vocoder grow with the frames, and a request for memory that fails

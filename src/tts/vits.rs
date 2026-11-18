@@ -8,8 +8,10 @@
 use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, team, tensors::Tensors};
 use crate::layers::{Gelu, Norm};
+use crate::tts::characters::Characters;
 use crate::tts::conv::{Conv1d, Depthwise, Upsample};
 use crate::tts::noise::Noise;
+use crate::tts::{in_range, Voicing, NOISE_RANGE, SPEED_RANGE};
 use crate::{Device, Precision};
 use std::cell::RefCell;
 use std::path::Path;
@@ -719,4 +721,129 @@ impl HifiGan {
         activation::tanh(&mut wave);
         wave.to_vec()
     }
+}
+
+/// Silence between two sentences of a VITS voice, in seconds. The model
+/// speaks one sentence per pass; a pass ends close to its last sound.
+const SENTENCE_PAUSE: f32 = 0.3;
+/// Longest part of one VITS pass, in characters. A longer sentence is cut
+/// at its last comma, else its last space, before this length: the text
+/// attention grows with the square of the characters, and the vocoder's
+/// buffers with the length of the audio.
+const MAX_PART_CHARS: usize = 400;
+/// The `noise_duration` a VITS voice takes. A duration is `exp` of a value
+/// that grows with it: MMS-TTS English spoke one sentence in 3.9 s at 0.8
+/// (its own value), 6.0 s at 1.5, 14 s at 2, and 47 s at 2.5.
+const DURATION_NOISE_RANGE: (f32, f32) = (0.0, 2.0);
+
+/// A VITS voice: the model and the characters it reads.
+pub struct VitsVoice {
+    model: Vits,
+    characters: Characters,
+}
+
+impl VitsVoice {
+    pub fn load(dir: &Path) -> Result<Self, String> {
+        Ok(Self {
+            model: Vits::load(dir)?,
+            characters: Characters::open(dir)?,
+        })
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.model.sample_rate
+    }
+
+    /// The text lowercase, only the characters of the vocabulary.
+    pub fn reads(&self, text: &str) -> String {
+        self.characters.reads(text)
+    }
+
+    pub fn reads_nothing_help(&self) -> &'static str {
+        "MMS-TTS English reads the letters a to z, digits 0 to 6, space, apostrophe, and hyphen"
+    }
+
+    /// One pass per sentence (`parts`), with `SENTENCE_PAUSE` before each
+    /// pass after the first.
+    pub fn speak_stream(
+        &self,
+        text: &str,
+        voicing: &Voicing,
+        noise: &mut Noise,
+        on_part: &mut dyn FnMut(&[f32]) -> bool,
+    ) -> Result<(), String> {
+        let model = &self.model;
+        let defaults = model.defaults;
+        let settings = Settings {
+            speed: voicing.speed.unwrap_or(defaults.speed),
+            noise: voicing.noise.unwrap_or(defaults.noise),
+            noise_duration: voicing.noise_duration.unwrap_or(defaults.noise_duration),
+        };
+        in_range("speed", settings.speed, SPEED_RANGE)?;
+        in_range("noise", settings.noise, NOISE_RANGE)?;
+        in_range(
+            "noise_duration",
+            settings.noise_duration,
+            DURATION_NOISE_RANGE,
+        )?;
+        if voicing.phonemes || voicing.voice.is_some() {
+            return Err("a VITS voice reads letters: it has no phoneme input and one voice".into());
+        }
+        let pause = vec![0.0f32; (SENTENCE_PAUSE * model.sample_rate as f32) as usize];
+        let mut first = true;
+        for part in parts(text) {
+            let ids = self.characters.encode(part);
+            if ids.len() <= 1 {
+                continue;
+            }
+            let mut audio = if first { Vec::new() } else { pause.clone() };
+            audio.extend(model.speak(&ids, &settings, noise)?);
+            first = false;
+            if !on_part(&audio) {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `text` cut after each sentence end (`.`, `!`, `?`, `;`, `:` before a
+/// space or the end) and at line breaks, with each part at most
+/// `MAX_PART_CHARS` long.
+fn parts(text: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    for line in text.lines() {
+        let mut start = 0;
+        for (i, c) in line.char_indices() {
+            let end = i + c.len_utf8();
+            let next = line[end..].chars().next();
+            if matches!(c, '.' | '!' | '?' | ';' | ':') && next.is_none_or(char::is_whitespace) {
+                sentences.push(&line[start..end]);
+                start = end;
+            }
+        }
+        sentences.push(&line[start..]);
+    }
+    let mut out = Vec::new();
+    for mut sentence in sentences.into_iter().map(str::trim) {
+        while sentence.chars().count() > MAX_PART_CHARS {
+            let limit = sentence
+                .char_indices()
+                .nth(MAX_PART_CHARS)
+                .map_or(sentence.len(), |(i, _)| i);
+            let head = &sentence[..limit];
+            let cut = head
+                .rfind(',')
+                .map(|i| i + 1)
+                .or_else(|| head.rfind(' '))
+                .filter(|i| *i > 0)
+                .unwrap_or(limit);
+            out.push(sentence[..cut].trim());
+            sentence = sentence[cut..].trim_start();
+        }
+        if !sentence.is_empty() {
+            out.push(sentence);
+        }
+    }
+    out
 }

@@ -17,12 +17,11 @@ mod lstm;
 mod noise;
 mod vits;
 
-use characters::Characters;
 pub use kokoro::is_kokoro;
-use kokoro::Kokoro;
+use kokoro::KokoroVoice;
 use noise::Noise;
 use std::path::Path;
-use vits::{Settings, Vits};
+use vits::VitsVoice;
 
 /// The Hugging Face repository of the default voice (Kokoro-82M).
 pub const VOICE_REPO: &str = crate::catalog::DEFAULT_VOICES[0].repo;
@@ -35,41 +34,7 @@ pub(crate) const FAMILY_NAME: &str = "Text to speech";
 /// The files of each text-to-speech kind of `CATALOG`: the two voices and
 /// the phonemizer fallback.
 pub(crate) const KIND_FILES: [(&str, &[&str]); 3] = [
-    (
-        "kokoro",
-        &[
-            "config.json",
-            "kokoro-v1_0.pth",
-            "voices/af_alloy.pt",
-            "voices/af_aoede.pt",
-            "voices/af_bella.pt",
-            "voices/af_heart.pt",
-            "voices/af_jessica.pt",
-            "voices/af_kore.pt",
-            "voices/af_nicole.pt",
-            "voices/af_nova.pt",
-            "voices/af_river.pt",
-            "voices/af_sarah.pt",
-            "voices/af_sky.pt",
-            "voices/am_adam.pt",
-            "voices/am_echo.pt",
-            "voices/am_eric.pt",
-            "voices/am_fenrir.pt",
-            "voices/am_liam.pt",
-            "voices/am_michael.pt",
-            "voices/am_onyx.pt",
-            "voices/am_puck.pt",
-            "voices/am_santa.pt",
-            "voices/bf_alice.pt",
-            "voices/bf_emma.pt",
-            "voices/bf_isabella.pt",
-            "voices/bf_lily.pt",
-            "voices/bm_daniel.pt",
-            "voices/bm_fable.pt",
-            "voices/bm_george.pt",
-            "voices/bm_lewis.pt",
-        ],
-    ),
+    ("kokoro", kokoro::FILES),
     (
         "g2p",
         &["config.json", "generation_config.json", "model.safetensors"],
@@ -93,26 +58,12 @@ pub(crate) fn files_of(kind: &str) -> Option<&'static [&'static str]> {
         .map(|(_, files)| *files)
 }
 
-/// Silence between two sentences of a VITS voice, in seconds. The model
-/// speaks one sentence per pass; a pass ends close to its last sound.
-const SENTENCE_PAUSE: f32 = 0.3;
-/// Longest part of one VITS pass, in characters. A longer sentence is cut
-/// at its last comma, else its last space, before this length: the text
-/// attention grows with the square of the characters, and the vocoder's
-/// buffers with the length of the audio.
-const MAX_PART_CHARS: usize = 400;
 /// The speeds a voice takes. The frames of a pass grow with `1 / speed`, and
 /// so do the buffers of the vocoder: a speed of 0.000001 asked for more
 /// memory than a computer has, and a request that fails ends the process.
-const SPEED_RANGE: (f32, f32) = (0.25, 4.0);
+pub(super) const SPEED_RANGE: (f32, f32) = (0.25, 4.0);
 /// The noise scale a voice takes (`noise`).
-const NOISE_RANGE: (f32, f32) = (0.0, 4.0);
-/// The `noise_duration` a VITS voice takes. A duration is `exp` of a value
-/// that grows with it: MMS-TTS English spoke one sentence in 3.9 s at 0.8
-/// (its own value), 6.0 s at 1.5, 14 s at 2, and 47 s at 2.5.
-const DURATION_NOISE_RANGE: (f32, f32) = (0.0, 2.0);
-/// The Kokoro voice when none is named (the `kokoro` package's example).
-const DEFAULT_KOKORO_VOICE: &str = "af_heart";
+pub(super) const NOISE_RANGE: (f32, f32) = (0.0, 4.0);
 
 /// Every physical core: the vocoder's products are tall (16000 rows per
 /// second of audio, as Whisper's 1500). On 16 cores in two L3 domains, 8.9 s
@@ -150,7 +101,7 @@ pub const PHONEMIZER_FALLBACKS: [(&str, &str); 2] = [("us", FALLBACK_US), ("gb",
 
 /// Whether a Kokoro voice is British (`b…`) or American (`a…`), from the
 /// first letter of its name; `None` for a voice that does not speak English.
-fn british(name: &str) -> Option<bool> {
+pub(super) fn british(name: &str) -> Option<bool> {
     match name.chars().next() {
         Some('a') => Some(false),
         Some('b') => Some(true),
@@ -179,7 +130,7 @@ pub fn find_phonemizer_fallback(accent: &str) -> Option<std::path::PathBuf> {
 
 /// The folder of the fallback for unknown words of an accent: in `near`
 /// first (the folder that holds the voice), else in the usual places.
-fn fallback_dir(near: Option<&Path>, british: bool) -> Option<std::path::PathBuf> {
+pub(super) fn fallback_dir(near: Option<&Path>, british: bool) -> Option<std::path::PathBuf> {
     let repo = if british { FALLBACK_GB } else { FALLBACK_US };
     let name = repo.rsplit('/').next().unwrap_or(repo);
     near.map(|folder| folder.join(name))
@@ -189,40 +140,8 @@ fn fallback_dir(near: Option<&Path>, british: bool) -> Option<std::path::PathBuf
 }
 
 enum Model {
-    Vits {
-        model: Box<Vits>,
-        characters: Characters,
-    },
+    Vits(Box<VitsVoice>),
     Kokoro(Box<KokoroVoice>),
-}
-
-/// Kokoro and its two phonemizers, each loaded on first use.
-struct KokoroVoice {
-    model: Kokoro,
-    dir: std::path::PathBuf,
-    american: std::sync::OnceLock<Result<english::English, String>>,
-    british: std::sync::OnceLock<Result<english::English, String>>,
-}
-
-impl KokoroVoice {
-    /// The phonemizer of a voice: British for `b…` voices, American for `a…`.
-    fn english(&self, voice: &str) -> Result<&english::English, String> {
-        let british = british(voice.trim()).ok_or_else(|| {
-            format!(
-                "voice {voice} does not speak English; the phonemizer is English (a… and b… voices): pass phonemes with `phonemes`"
-            )
-        })?;
-        let cell = if british {
-            &self.british
-        } else {
-            &self.american
-        };
-        cell.get_or_init(|| {
-            english::English::load(british, fallback_dir(self.dir.parent(), british).as_deref())
-        })
-        .as_ref()
-        .map_err(Clone::clone)
-    }
 }
 
 pub struct Voice {
@@ -252,35 +171,25 @@ impl Voice {
     fn load_now(dir: &Path) -> Result<Self, String> {
         let _team = crate::cpu::enter(SPREAD);
         let model = if kokoro::is_kokoro(dir) {
-            Model::Kokoro(Box::new(KokoroVoice {
-                model: Kokoro::load(dir)?,
-                dir: dir.to_path_buf(),
-                american: std::sync::OnceLock::new(),
-                british: std::sync::OnceLock::new(),
-            }))
+            Model::Kokoro(Box::new(KokoroVoice::load(dir)?))
         } else {
-            Model::Vits {
-                model: Box::new(Vits::load(dir)?),
-                characters: Characters::open(dir)?,
-            }
+            Model::Vits(Box::new(VitsVoice::load(dir)?))
         };
         Ok(Self { model })
     }
 
     pub fn kind(&self) -> &'static str {
         match self.model {
-            Model::Vits { .. } => "vits",
+            Model::Vits(_) => "vits",
             Model::Kokoro(_) => "kokoro",
         }
     }
 
     /// What to tell a caller when this voice reads none of a text.
     pub fn reads_nothing_help(&self) -> &'static str {
-        match self.model {
-            Model::Vits { .. } => {
-                "MMS-TTS English reads the letters a to z, digits 0 to 6, space, apostrophe, and hyphen"
-            }
-            Model::Kokoro(_) => "Run `trit phonemes \"<text>\"` to see what Kokoro reads",
+        match &self.model {
+            Model::Vits(voice) => voice.reads_nothing_help(),
+            Model::Kokoro(voice) => voice.reads_nothing_help(),
         }
     }
 
@@ -288,8 +197,8 @@ impl Voice {
     /// 24000 for Kokoro).
     pub fn sample_rate(&self) -> u32 {
         match &self.model {
-            Model::Vits { model, .. } => model.sample_rate,
-            Model::Kokoro(voice) => voice.model.sample_rate,
+            Model::Vits(voice) => voice.sample_rate(),
+            Model::Kokoro(voice) => voice.sample_rate(),
         }
     }
 
@@ -297,8 +206,8 @@ impl Voice {
     /// empty for a VITS voice, which has one.
     pub fn voices(&self) -> Vec<String> {
         match &self.model {
-            Model::Vits { .. } => Vec::new(),
-            Model::Kokoro(voice) => voice.model.voices(),
+            Model::Vits(_) => Vec::new(),
+            Model::Kokoro(voice) => voice.voices(),
         }
     }
 
@@ -307,8 +216,8 @@ impl Voice {
     /// the phonemes with the default voice (see `phonemes`).
     pub fn reads(&self, text: &str) -> String {
         match &self.model {
-            Model::Vits { characters, .. } => characters.reads(text),
-            Model::Kokoro(_) => self.phonemes(text, &Voicing::default()).unwrap_or_default(),
+            Model::Vits(voice) => voice.reads(text),
+            Model::Kokoro(voice) => voice.reads(text),
         }
     }
 
@@ -316,21 +225,8 @@ impl Voice {
     /// pass, with the accent of `voicing.voice`; a VITS voice gives `reads(text)`.
     pub fn phonemes(&self, text: &str, voicing: &Voicing) -> Result<String, String> {
         match &self.model {
-            Model::Vits { characters, .. } => Ok(characters.reads(text)),
-            Model::Kokoro(voice) => {
-                if voicing.phonemes {
-                    return Ok(text.trim().to_string());
-                }
-                let name = kokoro_voice(&voice.model, voicing)?;
-                let chunks = voice
-                    .english(&name)?
-                    .chunks(text, voice.model.max_phonemes)?;
-                Ok(chunks
-                    .into_iter()
-                    .map(|c| c.phonemes)
-                    .collect::<Vec<_>>()
-                    .join("\n"))
-            }
+            Model::Vits(voice) => Ok(voice.reads(text)),
+            Model::Kokoro(voice) => voice.phonemes(text, voicing),
         }
     }
 
@@ -363,158 +259,23 @@ impl Voice {
         voicing: &Voicing,
         on_part: &mut dyn FnMut(&[f32]) -> bool,
     ) -> Result<(), String> {
-        let check = |name: &str, value: f32, (low, high): (f32, f32)| -> Result<(), String> {
-            // NaN fails both comparisons.
-            if value >= low && value <= high {
-                Ok(())
-            } else {
-                Err(format!("{name} {value} must be from {low} to {high}"))
-            }
-        };
         let _team = crate::cpu::enter(SPREAD);
         let mut noise = Noise::new(voicing.seed);
         match &self.model {
-            Model::Vits { model, characters } => {
-                let defaults = model.defaults;
-                let settings = Settings {
-                    speed: voicing.speed.unwrap_or(defaults.speed),
-                    noise: voicing.noise.unwrap_or(defaults.noise),
-                    noise_duration: voicing.noise_duration.unwrap_or(defaults.noise_duration),
-                };
-                check("speed", settings.speed, SPEED_RANGE)?;
-                check("noise", settings.noise, NOISE_RANGE)?;
-                check(
-                    "noise_duration",
-                    settings.noise_duration,
-                    DURATION_NOISE_RANGE,
-                )?;
-                if voicing.phonemes || voicing.voice.is_some() {
-                    return Err(
-                        "a VITS voice reads letters: it has no phoneme input and one voice".into(),
-                    );
-                }
-                let pause = vec![0.0f32; (SENTENCE_PAUSE * model.sample_rate as f32) as usize];
-                let mut first = true;
-                for part in parts(text) {
-                    let ids = characters.encode(part);
-                    if ids.len() <= 1 {
-                        continue;
-                    }
-                    let mut audio = if first { Vec::new() } else { pause.clone() };
-                    audio.extend(model.speak(&ids, &settings, &mut noise)?);
-                    first = false;
-                    if !on_part(&audio) {
-                        break;
-                    }
-                }
-                Ok(())
-            }
-            Model::Kokoro(voice) => {
-                let model = &voice.model;
-                let speed = voicing.speed.unwrap_or(1.0);
-                let scale = voicing.noise.unwrap_or(1.0);
-                check("speed", speed, SPEED_RANGE)?;
-                check("noise", scale, NOISE_RANGE)?;
-                if voicing.noise_duration.is_some() {
-                    return Err(
-                        "noise_duration is a VITS setting; the timing of Kokoro has no noise"
-                            .into(),
-                    );
-                }
-                let name = kokoro_voice(model, voicing)?;
-                let pack = model.pack(&name)?;
-                let passes: Vec<String> = if voicing.phonemes {
-                    let lines: Vec<String> = text
-                        .lines()
-                        .map(str::trim)
-                        .filter(|l| !l.is_empty())
-                        .map(String::from)
-                        .collect();
-                    if let Some(long) = lines
-                        .iter()
-                        .find(|l| l.chars().count() > model.max_phonemes)
-                    {
-                        return Err(format!(
-                            "a line of {} phonemes is longer than the {} of one pass",
-                            long.chars().count(),
-                            model.max_phonemes
-                        ));
-                    }
-                    lines
-                } else {
-                    voice
-                        .english(&name)?
-                        .chunks(text, model.max_phonemes)?
-                        .into_iter()
-                        .map(|c| c.phonemes)
-                        .collect()
-                };
-                for phonemes in passes {
-                    let audio = model.speak(&phonemes, &pack, speed, scale, &mut noise)?;
-                    if !on_part(&audio) {
-                        break;
-                    }
-                }
-                Ok(())
-            }
+            Model::Vits(voice) => voice.speak_stream(text, voicing, &mut noise, on_part),
+            Model::Kokoro(voice) => voice.speak_stream(text, voicing, &mut noise, on_part),
         }
     }
 }
 
-/// `text` cut after each sentence end (`.`, `!`, `?`, `;`, `:` before a
-/// space or the end) and at line breaks, with each part at most
-/// `MAX_PART_CHARS` long.
-fn parts(text: &str) -> Vec<&str> {
-    let mut sentences = Vec::new();
-    for line in text.lines() {
-        let mut start = 0;
-        for (i, c) in line.char_indices() {
-            let end = i + c.len_utf8();
-            let next = line[end..].chars().next();
-            if matches!(c, '.' | '!' | '?' | ';' | ':') && next.is_none_or(char::is_whitespace) {
-                sentences.push(&line[start..end]);
-                start = end;
-            }
-        }
-        sentences.push(&line[start..]);
+/// `value` within `(low, high)`, or the error that names `name`.
+pub(super) fn in_range(name: &str, value: f32, (low, high): (f32, f32)) -> Result<(), String> {
+    // NaN fails both comparisons.
+    if value >= low && value <= high {
+        Ok(())
+    } else {
+        Err(format!("{name} {value} must be from {low} to {high}"))
     }
-    let mut out = Vec::new();
-    for mut sentence in sentences.into_iter().map(str::trim) {
-        while sentence.chars().count() > MAX_PART_CHARS {
-            let limit = sentence
-                .char_indices()
-                .nth(MAX_PART_CHARS)
-                .map_or(sentence.len(), |(i, _)| i);
-            let head = &sentence[..limit];
-            let cut = head
-                .rfind(',')
-                .map(|i| i + 1)
-                .or_else(|| head.rfind(' '))
-                .filter(|i| *i > 0)
-                .unwrap_or(limit);
-            out.push(sentence[..cut].trim());
-            sentence = sentence[cut..].trim_start();
-        }
-        if !sentence.is_empty() {
-            out.push(sentence);
-        }
-    }
-    out
-}
-
-/// The voice of `voicing`, else `af_heart`, else the first voice of the folder.
-fn kokoro_voice(model: &Kokoro, voicing: &Voicing) -> Result<String, String> {
-    if let Some(name) = &voicing.voice {
-        return Ok(name.clone());
-    }
-    let voices = model.voices();
-    if voices.iter().any(|v| v == DEFAULT_KOKORO_VOICE) {
-        return Ok(DEFAULT_KOKORO_VOICE.to_string());
-    }
-    voices
-        .into_iter()
-        .next()
-        .ok_or_else(|| "the voice folder has no voices/*.pt".to_string())
 }
 
 /// The phonemes of English `text` as Kokoro speaks them (misaki's result),
