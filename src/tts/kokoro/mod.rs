@@ -29,7 +29,7 @@ pub use voice::KokoroVoice;
 
 /// The style vectors of a voice: one row of `2 * style` per phoneme count.
 /// The files of a Kokoro-82M folder that Trit reads: the config, the
-/// checkpoint, and the 28 voices of the release.
+/// checkpoint, and the voices of the release.
 pub(crate) const FILES: &[&str] = &[
     "config.json",
     "kokoro-v1_0.pth",
