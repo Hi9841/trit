@@ -796,13 +796,25 @@ impl Known {
         if let Some(file) = self.file {
             return vec![file];
         }
-        let files = crate::models::FAMILIES
-            .iter()
-            .find(|row| row.model_type == self.kind)
+        let files = crate::models::Row::of(self.kind)
             .map(|row| row.files)
             .or_else(|| crate::tts::files_of(self.kind))
             .unwrap_or(crate::models::HF_FILES);
         files.to_vec()
+    }
+
+    /// The family as people name it (`Parakeet`, `Text to speech`).
+    pub fn family(&self) -> &'static str {
+        match crate::models::Row::of(self.kind) {
+            Some(row) => row.name,
+            None if self.kind == crate::cleanup::CATALOG_KIND => crate::cleanup::FAMILY_NAME,
+            None => crate::tts::FAMILY_NAME,
+        }
+    }
+
+    /// Whether the model turns speech into text (a row of `FAMILIES`).
+    pub fn is_speech_to_text(&self) -> bool {
+        crate::models::Row::of(self.kind).is_some()
     }
 
     /// The command that downloads only the files Trit reads. The files are

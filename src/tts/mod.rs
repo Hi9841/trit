@@ -29,8 +29,11 @@ pub const VOICE_REPO: &str = crate::catalog::DEFAULT_VOICES[0].repo;
 /// The voices `find_voice` looks for, in order: Kokoro, then MMS-TTS English.
 pub const VOICE_REPOS: [&str; 2] = [VOICE_REPO, crate::catalog::DEFAULT_VOICES[1].repo];
 
-/// The files of each text-to-speech kind of `CATALOG`: the two voices
-/// (`Voice::load` picks one by these files) and the phonemizer fallback.
+/// The family name of the text-to-speech kinds of `CATALOG`.
+pub(crate) const FAMILY_NAME: &str = "Text to speech";
+
+/// The files of each text-to-speech kind of `CATALOG`: the two voices and
+/// the phonemizer fallback.
 pub(crate) const KIND_FILES: [(&str, &[&str]); 3] = [
     (
         "kokoro",

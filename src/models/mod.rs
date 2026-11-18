@@ -1,7 +1,9 @@
 //! Speech models. `Model::load` reads the `model_type` of a folder's
 //! `config.json` and loads that family from `FAMILIES`; each family wires
 //! the shared building blocks (`parts/`) its config names. A new family is
-//! one row in `FAMILIES` and one `Family` impl.
+//! one row in `FAMILIES` (its name, files, spread, and head), one `Family`
+//! impl in `families/`, and its checkpoints in `CATALOG`; a GGUF file of it
+//! is one row in `gguf::ARCH` too.
 
 pub mod families;
 pub mod fermion;
@@ -17,6 +19,7 @@ use families::{
 };
 
 use crate::{BiasWeights, Device, Options, Precision, Segment, Spread};
+use parts::fastconformer::HeadKind;
 use std::path::Path;
 
 pub trait Family: Send + Sync {
@@ -62,92 +65,126 @@ pub trait Family: Send + Sync {
 type Load =
     fn(&files::Files, &crate::config::Json, Precision, Device) -> Result<Box<dyn Family>, String>;
 
-/// One `model_type` Trit runs: the worker spread its products need, and
-/// how to load it.
+/// One `model_type` Trit runs: its name on the site and in `trit skill
+/// --catalog`, the files it reads, the worker spread its products need,
+/// and how to load it.
 pub struct Row {
     pub model_type: &'static str,
+    /// The family as people name it (`Parakeet`, `wav2vec 2.0`).
+    pub name: &'static str,
     /// The files its loader reads from a Hugging Face folder.
     pub files: &'static [&'static str],
     spread: Spread,
     /// `Device::Auto` selects the GPU: a measurement shows that the family
     /// runs faster there (see `active_device`).
     gpu_gain: bool,
+    /// The head of a FastConformer family (Parakeet); `None` elsewhere.
+    pub head: Option<HeadKind>,
     load: Load,
 }
 
-const fn row<F: Family + 'static>(model_type: &'static str, spread: Spread) -> Row {
+const fn row<F: Family + 'static>(model_type: &'static str, name: &'static str) -> Row {
     Row {
         model_type,
+        name,
         files: HF_FILES,
-        spread,
+        spread: Spread::OneCache,
         gpu_gain: false,
+        head: None,
         load: |files, config, precision, device| {
             Ok(Box::new(F::load(files, config, precision, device)?))
         },
     }
 }
 
-/// `row` for a family whose encoder stays on the GPU for a whole take
-/// (the FastConformer of Parakeet).
-const fn gpu_row<F: Family + 'static>(model_type: &'static str, spread: Spread) -> Row {
-    Row {
-        gpu_gain: true,
-        ..row::<F>(model_type, spread)
+impl Row {
+    /// Tall products (Whisper): every core.
+    const fn all_cores(self) -> Self {
+        Self {
+            spread: Spread::AllCores,
+            ..self
+        }
+    }
+
+    /// The encoder stays on the GPU for a whole take (the FastConformer of
+    /// Parakeet).
+    const fn gpu_gain(self) -> Self {
+        Self {
+            gpu_gain: true,
+            ..self
+        }
+    }
+
+    const fn head(self, head: HeadKind) -> Self {
+        Self {
+            head: Some(head),
+            ..self
+        }
+    }
+
+    const fn files(self, files: &'static [&'static str]) -> Self {
+        Self { files, ..self }
+    }
+
+    /// The row of `model_type`.
+    pub fn of(model_type: &str) -> Option<&'static Row> {
+        FAMILIES.iter().find(|row| row.model_type == model_type)
     }
 }
 
 /// The files of a Hugging Face folder that most families read.
 pub const HF_FILES: &[&str] = &["config.json", "tokenizer.json", "model.safetensors"];
 
-/// Every family, by `model_type`. Tall products (Whisper) use every core.
-pub const FAMILIES: [Row; 21] = [
-    gpu_row::<parakeet::Parakeet>("parakeet_tdt", Spread::OneCache),
-    gpu_row::<parakeet::Parakeet>("parakeet_rnnt", Spread::OneCache),
-    gpu_row::<parakeet::Parakeet>("parakeet_ctc", Spread::OneCache),
-    row::<parakeet::Parakeet>("gigaam_rnnt", Spread::OneCache),
-    row::<parakeet::Parakeet>("gigaam_ctc", Spread::OneCache),
-    row::<parakeet::Parakeet>("medasr", Spread::OneCache),
-    Row {
-        files: &[
+/// Every family, by `model_type`. A new family is one row here and one
+/// `Family` impl in `families/` (with its module in `families/mod.rs`);
+/// its checkpoints go in `CATALOG`.
+pub const FAMILIES: &[Row] = &[
+    row::<parakeet::Parakeet>("parakeet_tdt", "Parakeet")
+        .gpu_gain()
+        .head(HeadKind::Transducer),
+    row::<parakeet::Parakeet>("parakeet_rnnt", "Parakeet")
+        .gpu_gain()
+        .head(HeadKind::Rnnt),
+    row::<parakeet::Parakeet>("parakeet_ctc", "Parakeet")
+        .gpu_gain()
+        .head(HeadKind::Ctc),
+    row::<parakeet::Parakeet>("gigaam_rnnt", "GigaAM").head(HeadKind::Rnnt),
+    row::<parakeet::Parakeet>("gigaam_ctc", "GigaAM").head(HeadKind::Ctc),
+    row::<parakeet::Parakeet>("medasr", "MedASR").head(HeadKind::Ctc),
+    row::<whisper::Whisper>("whisper", "Whisper")
+        .all_cores()
+        .files(&[
             "config.json",
             "generation_config.json",
             "tokenizer.json",
             "model.safetensors",
-        ],
-        ..row::<whisper::Whisper>("whisper", Spread::AllCores)
-    },
-    row::<moonshine::Moonshine>("moonshine", Spread::OneCache),
-    row::<moonshine::Moonshine>("moonshine_streaming", Spread::OneCache),
-    row::<canary::Canary>("canary", Spread::OneCache),
-    Row {
-        files: &[
-            "config.json",
-            "preprocessor_config.json",
-            "tokenizer_config.json",
-            "vocab.json",
-            "model.safetensors",
-        ],
-        ..row::<wav2vec2::Wav2Vec2>("wav2vec2", Spread::OneCache)
-    },
-    Row {
-        files: &[
-            "config.json",
-            "tokenizer_config.json",
-            "vocab.json",
-            "merges.txt",
-            "model.safetensors",
-        ],
-        ..row::<qwen3_asr::Qwen3Asr>("qwen3_asr", Spread::OneCache)
-    },
-    row::<canary_qwen::CanaryQwen>("canary_qwen", Spread::OneCache),
-    row::<fun_asr::FunAsr>("fun_asr_nano", Spread::OneCache),
-    row::<granite_speech::GraniteSpeech>("granite_speech", Spread::OneCache),
-    row::<voxtral::Voxtral>("voxtral", Spread::OneCache),
-    row::<voxtral_realtime::VoxtralRealtime>("voxtral_realtime", Spread::OneCache),
-    row::<moss::Moss>("moss", Spread::OneCache),
-    row::<granite_nar::GraniteNar>("granite_speech_nar", Spread::OneCache),
-    row::<granite_ctc::GraniteCtc>("granite_ctc", Spread::OneCache),
-    row::<sensevoice::SenseVoice>("sensevoice", Spread::OneCache),
+        ]),
+    row::<moonshine::Moonshine>("moonshine", "Moonshine"),
+    row::<moonshine::Moonshine>("moonshine_streaming", "Moonshine Streaming"),
+    row::<canary::Canary>("canary", "Canary"),
+    row::<wav2vec2::Wav2Vec2>("wav2vec2", "wav2vec 2.0").files(&[
+        "config.json",
+        "preprocessor_config.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "model.safetensors",
+    ]),
+    row::<qwen3_asr::Qwen3Asr>("qwen3_asr", "Qwen3-ASR").files(&[
+        "config.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "merges.txt",
+        "model.safetensors",
+    ]),
+    row::<canary_qwen::CanaryQwen>("canary_qwen", "Canary-Qwen"),
+    row::<fun_asr::FunAsr>("fun_asr_nano", "Fun-ASR"),
+    row::<granite_speech::GraniteSpeech>("granite_speech", "Granite Speech"),
+    row::<voxtral::Voxtral>("voxtral", "Voxtral"),
+    row::<voxtral_realtime::VoxtralRealtime>("voxtral_realtime", "Voxtral"),
+    row::<moss::Moss>("moss", "MOSS"),
+    row::<granite_nar::GraniteNar>("granite_speech_nar", "Granite Speech"),
+    row::<granite_ctc::GraniteCtc>("granite_ctc", "Granite Speech"),
+    row::<sensevoice::SenseVoice>("sensevoice", "SenseVoice"),
 ];
 
 /// The `model_type` values Trit runs, for messages and `trit doctor`.
