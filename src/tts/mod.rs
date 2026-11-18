@@ -244,7 +244,9 @@ impl Voice {
     /// `model.safetensors`, `vocab.json`, `tokenizer_config.json`). The
     /// weights stay f32.
     pub fn load(dir: &Path) -> Result<Self, String> {
-        crate::cpu::store::in_turn(|| Self::load_now(dir))
+        let voice = crate::cpu::store::in_turn(|| Self::load_now(dir))?;
+        crate::release_memory();
+        Ok(voice)
     }
 
     fn load_now(dir: &Path) -> Result<Self, String> {

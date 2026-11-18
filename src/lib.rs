@@ -217,8 +217,9 @@ impl Trit {
 /// Returns the memory that loading and transcribing freed to the system.
 /// The engines take their temporaries from mimalloc (when the host's global
 /// allocator is mimalloc, as in the CLI, the C library, and TDT), which keeps
-/// freed pages for reuse. Call it after a load and when the app goes idle,
-/// not between calls: the next call would allocate the pages again. It also
+/// freed pages for reuse. Every load (`Trit`, `Cleaner`, `Voice`) calls it
+/// at its end. Call it when the app goes idle, not between calls: the next
+/// call would allocate the pages again. It also
 /// drops the position tables that recordings longer than 30 s built. With the
 /// `gpu` feature it also frees the pooled GPU buffers and the staging buffers
 /// of dropped GPU models.

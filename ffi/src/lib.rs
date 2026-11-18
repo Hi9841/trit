@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use trit::{
     BiasWeights, Cleaner, Device, LoadOptions, Options, Precision, Task, Trit, Voice, Voicing,
@@ -233,28 +233,8 @@ pub unsafe extern "C" fn trit_load_ex(
 /// The engine of `explicit` (as `trit::find_model` takes it), loaded with
 /// `options`.
 fn load_engine(explicit: Option<&Path>, options: &LoadOptions) -> Result<*mut Trit, String> {
-    let find: Finder = (trit::find_model, trit::missing_model);
-    load_found(explicit, find, |dir| Trit::load_with(dir, options))
-}
-
-/// A finder of one model kind and the reason it found nothing
-/// (`trit::find_model` and `trit::missing_model`).
-type Finder = (
-    fn(Option<&Path>) -> Option<PathBuf>,
-    fn(Option<&Path>) -> String,
-);
-
-/// The folder that `find` finds for `explicit`, loaded by `load`, then the
-/// memory of the load given back; the model boxed for the caller.
-fn load_found<M>(
-    explicit: Option<&Path>,
-    (find, missing): Finder,
-    load: impl FnOnce(&Path) -> Result<M, String>,
-) -> Result<*mut M, String> {
-    let dir = find(explicit).ok_or_else(|| missing(explicit))?;
-    let model = load(&dir)?;
-    trit::release_memory();
-    Ok(Box::into_raw(Box::new(model)))
+    let dir = trit::find_model(explicit).ok_or_else(|| trit::missing_model(explicit))?;
+    Ok(Box::into_raw(Box::new(Trit::load_with(&dir, options)?)))
 }
 
 const LOAD_KEYS: &str = "precision, device, cache";
@@ -720,8 +700,9 @@ pub unsafe extern "C" fn trit_cleaner_load_ex(
     guard(std::ptr::null_mut(), || {
         let options = load_options(precision, device)?;
         let explicit = path_arg(model_dir, "model_dir")?;
-        let find: Finder = (trit::find_cleanup_model, trit::missing_cleanup_model);
-        load_found(explicit, find, |dir| Cleaner::load_with(dir, &options))
+        let dir = trit::find_cleanup_model(explicit)
+            .ok_or_else(|| trit::missing_cleanup_model(explicit))?;
+        Ok(Box::into_raw(Box::new(Cleaner::load_with(&dir, &options)?)))
     })
 }
 
@@ -792,11 +773,8 @@ pub unsafe extern "C" fn trit_clean(
 pub unsafe extern "C" fn trit_voice_load(model_dir: *const c_char) -> *mut Voice {
     guard(std::ptr::null_mut(), || {
         let explicit = path_arg(model_dir, "model_dir")?;
-        load_found(
-            explicit,
-            (trit::find_voice, trit::missing_voice),
-            Voice::load,
-        )
+        let dir = trit::find_voice(explicit).ok_or_else(|| trit::missing_voice(explicit))?;
+        Ok(Box::into_raw(Box::new(Voice::load(&dir)?)))
     })
 }
 

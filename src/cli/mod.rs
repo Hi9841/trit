@@ -122,7 +122,7 @@ const VOICE: Kind = Kind {
 };
 
 /// The folder of `kind` for `explicit` (a `--model` value), loaded by
-/// `load`, then the memory of the load given back.
+/// `load`.
 fn load_found<M>(
     kind: &Kind,
     explicit: Option<&str>,
@@ -138,7 +138,6 @@ fn load_found<M>(
             "Run `trit doctor`",
         )
     })?;
-    trit::release_memory();
     Ok((dir, model))
 }
 

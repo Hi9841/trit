@@ -363,7 +363,8 @@ fn reader(path: &Path) -> Option<Cache> {
 
 /// Loads with `load`, keeping the converted weights in the cache file
 /// `dir/.trit/<name>` when `name` is given. `report` gets the progress from
-/// 0 to 1. `release` returns freed memory between passes. A cache error
+/// 0 to 1. `release` returns freed memory between passes and after the
+/// load (the load's temporaries; see `release_memory`). A cache error
 /// gives the plain load: the cache only moves memory, it never fails a load.
 pub(crate) fn load<M>(
     dir: &Path,
@@ -376,6 +377,9 @@ pub(crate) fn load<M>(
     let shown = Arc::new(AtomicU64::new(0));
     let report = report.as_ref().map(|report| (report, &shown));
     let finished = |model: Result<M, String>| {
+        if model.is_ok() {
+            release();
+        }
         if let (Some((report, _)), Ok(_)) = (report, &model) {
             report(1.0);
         }
