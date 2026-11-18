@@ -8,7 +8,7 @@
 use crate::audio::kaldi_fbank::{FbankShape, KaldiFbank};
 use crate::config::Json;
 use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::layers::{add_into, attention, linear, sinusoids, Norm};
+use crate::layers::{add_into, attention, linear, relu, sinusoids, Norm};
 
 /// FunASR's layer norm epsilon.
 const NORM_EPS: f32 = 1e-12;
@@ -117,9 +117,7 @@ impl Block {
             *x = attended;
         }
         let mut hidden = self.fc1.forward(&self.norm_ffn.apply(x, s.d), t);
-        team::chunks_mut(&mut hidden, 4096, |_, values| {
-            values.iter_mut().for_each(|v| *v = v.max(0.0))
-        });
+        relu(&mut hidden);
         add_into(x, &self.fc2.forward(&hidden, t));
     }
 

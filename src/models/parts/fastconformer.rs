@@ -13,7 +13,7 @@ use crate::cpu::kernels::Ternary;
 use crate::cpu::store::Store;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
-use crate::layers::{conv_columns, folded_batch_norm, Norm, Rotary};
+use crate::layers::{conv_columns, folded_batch_norm, relu, scale_all, Norm, Rotary};
 use crate::Cancel;
 use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, Weak};
@@ -989,15 +989,15 @@ impl Block {
         let (ff_w0, ff_w1) = c.ff_residual;
         let (conv_w0, conv_w1) = c.conv_residual;
         let ff = Self::feed_forward(&self.ff1, &self.norm_ff1.apply(x, c.hidden), frames);
-        scale(x, ff_w0);
+        scale_all(x, ff_w0);
         let normed = self.norm_att.residual(x, &ff, ff_w1);
         let att = self.attention(&normed, frames, c);
         let normed = self.norm_conv.residual(x, &att, 1.0);
         let conv = self.convolution(&normed, frames, c);
-        scale(x, conv_w0);
+        scale_all(x, conv_w0);
         let normed = self.norm_ff2.residual(x, &conv, conv_w1);
         let ff = Self::feed_forward(&self.ff2, &normed, frames);
-        scale(x, ff_w0);
+        scale_all(x, ff_w0);
         *x = self.norm_out.residual(x, &ff, ff_w1);
     }
 
@@ -1231,13 +1231,6 @@ enum Positions {
     Rotary { rotary: Rotary },
 }
 
-/// Nothing for 1, so a Conformer's sums keep their order.
-fn scale(x: &mut [f32], w: f32) {
-    if w != 1.0 {
-        team::chunks_mut(x, 4096, |_, values| values.iter_mut().for_each(|v| *v *= w));
-    }
-}
-
 /// The conv module's norm after the depthwise conv.
 enum ConvNorm {
     /// Batch norm with its statistics (and the conv bias) folded in.
@@ -1284,9 +1277,7 @@ impl SpeakerKernel {
 
     fn apply(&self, x: &mut Buf, t: usize) {
         let mut hidden = self.up.forward(x, t);
-        team::chunks_mut(&mut hidden, 4096, |_, values| {
-            values.iter_mut().for_each(|v| *v = v.max(0.0))
-        });
+        relu(&mut hidden);
         let kernel = self.down.forward(&hidden, t);
         let d = self.background.len();
         team::chunks_mut(x, d, |i, row| {
@@ -1331,9 +1322,7 @@ impl Prompt {
             row[d + index] = 1.0;
         });
         let mut hidden = self.first.forward(&joined, t);
-        team::chunks_mut(&mut hidden, 4096, |_, values| {
-            values.iter_mut().for_each(|v| *v = v.max(0.0))
-        });
+        relu(&mut hidden);
         self.second.forward(&hidden, t)
     }
 }

@@ -8,8 +8,8 @@
 
 use crate::audio::kaldi_fbank::KaldiFbank;
 use crate::config::Json;
-use crate::cpu::{buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::layers::{add_into, attention, linear, Norm};
+use crate::cpu::{buf::Buf, gemm::Dense, tensors::Tensors};
+use crate::layers::{add_into, attention, linear, relu, Norm};
 use crate::models::files::Files;
 use crate::models::parts::{
     causal_lm::{CausalLm, TokenBudget},
@@ -131,12 +131,6 @@ impl Adaptor {
         rows.copy_from_slice(&x[..n * d]);
         (rows, n)
     }
-}
-
-fn relu(x: &mut [f32]) {
-    team::chunks_mut(x, 4096, |_, values| {
-        values.iter_mut().for_each(|v| *v = v.max(0.0))
-    });
 }
 
 pub struct FunAsr {

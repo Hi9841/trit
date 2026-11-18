@@ -214,6 +214,34 @@ pub fn folded_batch_norm(
     (scale, shift)
 }
 
+/// `x *= w`, spread over the team. Nothing for 1, so a model without a
+/// multiplier keeps its sums.
+pub fn scale_all(x: &mut [f32], w: f32) {
+    if w != 1.0 {
+        team::chunks_mut(x, 4096, |_, values| values.iter_mut().for_each(|v| *v *= w));
+    }
+}
+
+/// `x += w * y`, spread over the team.
+pub fn add_scaled_into(x: &mut [f32], y: &[f32], w: f32) {
+    if w == 1.0 {
+        add_into(x, y);
+        return;
+    }
+    team::chunks_mut(x, 4096, |i, row| {
+        for (o, v) in row.iter_mut().zip(&y[i * 4096..]) {
+            *o += w * v;
+        }
+    });
+}
+
+/// `max(x, 0)`, spread over the team.
+pub fn relu(x: &mut [f32]) {
+    team::chunks_mut(x, 4096, |_, values| {
+        values.iter_mut().for_each(|v| *v = v.max(0.0))
+    });
+}
+
 pub fn add_into(x: &mut [f32], y: &[f32]) {
     let _span = crate::prof::span(crate::prof::Stage::Add);
     team::chunks_mut(x, 4096, |chunk, xs| {

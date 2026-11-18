@@ -8,7 +8,9 @@
 
 use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
-use crate::layers::{add_into, argmax, attention, linear, stacked, RmsNorm, Rotary};
+use crate::layers::{
+    add_into, add_scaled_into, argmax, attention, linear, scale_all, stacked, RmsNorm, Rotary,
+};
 use crate::models::files::Files;
 use crate::{Device, Precision};
 
@@ -382,7 +384,7 @@ impl CausalLm {
         let x = self.hidden(x, first, (keys, values), true);
         let last = self.norm.apply(&x[(m - 1) * d..]);
         let mut logits = self.head.as_ref().unwrap_or(&self.embed).forward(&last, 1);
-        scale(&mut logits, 1.0 / c.logits_scaling);
+        scale_all(&mut logits, 1.0 / c.logits_scaling);
         logits
     }
 
@@ -415,7 +417,7 @@ impl CausalLm {
         let c = &self.config;
         let (d, hd, m) = (c.d, c.head_dim, x.len() / c.d);
         let (qd, kv) = (c.heads * hd, c.kv_heads * hd);
-        scale(&mut x, c.embedding_multiplier);
+        scale_all(&mut x, c.embedding_multiplier);
         // `attention` divides by sqrt(head_dim); Granite's multiplier replaces that.
         let q_scale = c
             .attention_multiplier
@@ -451,7 +453,7 @@ impl CausalLm {
                 (qd, c.heads, c.kv_heads),
                 causal,
             );
-            add_residual(&mut x, &layer.out.forward(&att, m), c.residual_multiplier);
+            add_scaled_into(&mut x, &layer.out.forward(&att, m), c.residual_multiplier);
             let mut normed = layer.norm_mlp.apply(&x);
             if let Some(scales) = &self.ffn_scales {
                 let scale = &scales[l];
@@ -469,7 +471,7 @@ impl CausalLm {
                     *h *= up;
                 }
             });
-            add_residual(
+            add_scaled_into(
                 &mut x,
                 &layer.down.forward(&hidden, m),
                 c.residual_multiplier,
@@ -477,23 +479,4 @@ impl CausalLm {
         }
         x
     }
-}
-
-/// Nothing for 1, so a model without multipliers keeps its sums.
-fn scale(x: &mut [f32], w: f32) {
-    if w != 1.0 {
-        team::chunks_mut(x, 4096, |_, values| values.iter_mut().for_each(|v| *v *= w));
-    }
-}
-
-fn add_residual(x: &mut [f32], y: &[f32], w: f32) {
-    if w == 1.0 {
-        add_into(x, y);
-        return;
-    }
-    team::chunks_mut(x, 4096, |i, row| {
-        for (o, v) in row.iter_mut().zip(&y[i * 4096..]) {
-            *o += w * v;
-        }
-    });
 }

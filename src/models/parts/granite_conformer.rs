@@ -12,7 +12,7 @@
 use crate::audio::dft::PowerSpectrum;
 use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, fgemm, gemm::Dense, team, tensors::Tensors};
-use crate::layers::{add_into, folded_batch_norm, linear, Norm};
+use crate::layers::{add_into, add_scaled_into, folded_batch_norm, linear, Norm};
 
 /// The log floor before the log10, as the reference's `clamp(min=1e-10)`.
 const LOG_FLOOR: f32 = 1e-10;
@@ -274,7 +274,7 @@ impl Block {
     /// The block on `t x d`; a subsampling block returns `t / 2` frames.
     fn forward(&self, mut x: Buf, t: usize, c: &Config, subsample: bool) -> (Buf, usize) {
         let ff = feed_forward(&self.ff1, &self.norm_ff1.apply(&x, c.d), t);
-        add_scaled(&mut x, &ff, 0.5);
+        add_scaled_into(&mut x, &ff, 0.5);
         let attended = self.attention(&self.norm_attn.apply(&x, c.d), t, c);
         add_into(&mut x, &attended);
         let stride = if subsample { 2 } else { 1 };
@@ -295,7 +295,7 @@ impl Block {
             (x, t)
         };
         let ff = feed_forward(&self.ff2, &self.norm_ff2.apply(&x, c.d), t);
-        add_scaled(&mut x, &ff, 0.5);
+        add_scaled_into(&mut x, &ff, 0.5);
         (self.norm_out.apply(&x, c.d), t)
     }
 
@@ -402,14 +402,6 @@ fn feed_forward((up, down): &(Dense, Dense), x: &[f32], t: usize) -> Buf {
     let mut hidden = up.forward(x, t);
     team::chunks_mut(&mut hidden, 4096, |_, values| activation::silu(values));
     down.forward(&hidden, t)
-}
-
-fn add_scaled(x: &mut [f32], y: &[f32], scale: f32) {
-    team::chunks_mut(x, 4096, |i, row| {
-        for (o, v) in row.iter_mut().zip(&y[i * 4096..]) {
-            *o += scale * v;
-        }
-    });
 }
 
 /// What `Encoder::encode_all` returns.
