@@ -370,7 +370,7 @@ const first = RESULTS[0];
 document.getElementById("meta").textContent = first
   ? `${first.date} · AMD Ryzen 9 7950X3D, 32 GB RAM, Windows 11, CPU only, English · ${new Set(RESULTS.map((r) => r.model)).size} speech models on ${new Set(RESULTS.map((r) => r.runtime)).size} runtimes, ${RESULTS.length} pairs, 456 clips each; S1-mini on ${CLEANUP.length}`
   : "No results yet.";
-document.getElementById("footer").textContent = "Made by desktop/bench/runtimes.py and runtimes_report.py. Raw results: desktop/bench/runtimes-results.jsonl.";
+document.getElementById("footer").textContent = "Made by bench/runtimes.py and bench/runtimes_report.py. Raw results: bench/runtimes-results.jsonl.";
 if (RESULTS.length) { models(); }
 </script>
 </body>

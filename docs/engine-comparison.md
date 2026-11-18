@@ -204,7 +204,7 @@ Trit is called through its Python binding with `language="en"`.
 | Ternary kernel | Redux: i8 activations, `vpdpbusd` on AVX-512 VNNI, `vpmaddubsw` on AVX2, scalar | `src/cpu/kernels.rs` |
 | Int8 kernel | W8A8 for layers 384 wide or more: VNNI 512, VNNI 256, AVX2, NEON, `sdot`, `smmla`, scalar | `src/cpu/int8.rs` |
 | Float kernels | f32 GEMM with FMA register tiles; f16 weights with F16C | `src/cpu/fgemm.rs`, `src/cpu/half.rs` |
-| Decoding | Beam 5 for Whisper and Moonshine (Transformers rules, all beams in one batch); greedy for Parakeet and Canary | `src/models/beam.rs` |
+| Decoding | Beam 5 for Whisper and Moonshine (Transformers rules, all beams in one batch); greedy for Parakeet and Canary | `src/models/parts/beam.rs` |
 | Threads | Own teams of spinning workers: one per physical core of one L3 domain (Parakeet, S1-mini), all physical cores (Whisper) | `src/cpu/team.rs` |
 | Dictionary | Trie of token paths with a logit bonus (Parakeet, Canary, Moonshine); a previous-text prompt (Whisper) | `src/models/parakeet/bias.rs` |
 | Dependencies | `std`, `parking_lot`, `serde_json`, `miniz_oxide`, `mimalloc`. No inference library | `Cargo.toml` |
