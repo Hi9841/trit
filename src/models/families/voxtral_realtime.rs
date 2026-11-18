@@ -8,7 +8,7 @@
 //! The structure follows transcribe.cpp's port of
 //! `VoxtralRealtimeForConditionalGeneration`.
 
-use crate::audio::dft::PowerSpectrum;
+use crate::audio::centered_mel::CenteredMel;
 use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, fgemm, gemm::Dense, team, tensors::Tensors};
 use crate::layers::{add_into, conv_columns, linear, RmsNorm, Rotary};
@@ -28,66 +28,29 @@ const BUFFER: usize = 10;
 const LOG_FLOOR: f32 = 1e-10;
 const QUERY_BLOCK: usize = 256;
 
-/// Log-mel features with a fixed peak: a centered STFT with the file's
-/// window and filterbank, `log10`, a floor 8 below `peak`, `(x + 4) / 4`,
+/// Log-mel features with a fixed peak: the power mels of a `CenteredMel`,
+/// `log10`, a floor 8 below `peak`, `(x + 4) / 4`,
 /// and no frame for the last center.
 struct Frontend {
-    n_fft: usize,
-    hop: usize,
-    mels: usize,
+    mel: CenteredMel,
     peak: f32,
-    spectrum: PowerSpectrum,
-    filters: Vec<f32>,
 }
 
 impl Frontend {
     fn load(json: &Json, t: &Tensors) -> Result<Self, String> {
-        let fe = |key: &str| json.num(&format!("feature_extractor.{key}"));
-        let (n_fft, win, mels) = (fe("n_fft")?, fe("win_length")?, fe("num_mel_bins")?);
-        if win > n_fft {
-            return Err("config.json: the window is longer than the transform".into());
-        }
-        let window = t.f32_len("frontend.window", win)?;
-        let mut padded = vec![0.0f32; n_fft];
-        padded[(n_fft - win) / 2..][..win].copy_from_slice(&window);
         Ok(Self {
-            n_fft,
-            hop: fe("hop_length")?,
-            mels,
+            mel: CenteredMel::load(json, t)?,
             peak: json.float("feature_extractor.log_mel_max").unwrap_or(1.5) as f32,
-            spectrum: PowerSpectrum::new(n_fft, &padded),
-            filters: t.f32_len("frontend.mel_filterbank", mels * (n_fft / 2 + 1))?,
         })
     }
 
     /// `frames x mels`, frames = samples / hop.
     fn compute(&self, samples: &[f32]) -> (Vec<f32>, usize) {
-        let frames = samples.len() / self.hop;
-        let len = samples.len() as isize;
-        if frames == 0 || len <= (self.n_fft / 2) as isize {
+        let frames = samples.len() / self.mel.hop;
+        if frames == 0 || samples.len() <= self.mel.n_fft / 2 {
             return (Vec::new(), 0);
         }
-        let reflect = |i: isize| -> f32 {
-            let i = if i < 0 { -i } else { i };
-            let i = if i >= len { 2 * (len - 1) - i } else { i };
-            samples[i.clamp(0, len - 1) as usize]
-        };
-        let half = (self.n_fft / 2) as isize;
-        let mut windows = Buf::scratch(frames * self.n_fft);
-        team::chunks_mut(&mut windows, self.n_fft, |f, row| {
-            let start = (f * self.hop) as isize - half;
-            for (n, value) in row.iter_mut().enumerate() {
-                *value = reflect(start + n as isize);
-            }
-        });
-        let power = self.spectrum.compute(&windows, frames);
-        let mel = fgemm::matmul(
-            &power,
-            frames,
-            self.spectrum.bins(),
-            &self.filters,
-            self.mels,
-        );
+        let mel = self.mel.power(samples, frames);
         let floor = self.peak - 8.0;
         let out = mel
             .iter()
@@ -322,7 +285,8 @@ impl Family for VoxtralRealtime {
             })
             .collect::<Result<Vec<_>, _>>()?;
         decoder.set_ffn_scales(scales);
-        let samples_per_token = json.num("projector_config.audio_length_per_tok")? * frontend.hop;
+        let samples_per_token =
+            json.num("projector_config.audio_length_per_tok")? * frontend.mel.hop;
         drop(t);
         Ok(Self {
             frontend,
@@ -357,7 +321,7 @@ impl Family for VoxtralRealtime {
             if frames < 2 {
                 return String::new();
             }
-            let (encoded, t) = self.encoder.encode(&mel, frames, self.frontend.mels);
+            let (encoded, t) = self.encoder.encode(&mel, frames, self.frontend.mel.mels);
             let rows = t / self.join;
             let mut h = self
                 .linear1

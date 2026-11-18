@@ -1,6 +1,7 @@
 //! Audio in: WAV files, the log-mel frontends of the model families, and
 //! long recordings cut into windows.
 
+pub mod centered_mel;
 pub mod dft;
 pub mod kaldi_fbank;
 pub mod mel;

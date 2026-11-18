@@ -9,9 +9,9 @@
 //! last. The structure follows transcribe.cpp's port of IBM's
 //! `GraniteSpeechCTCEncoder`; tensor names are under `encoder.`.
 
-use crate::audio::dft::PowerSpectrum;
+use crate::audio::centered_mel::CenteredMel;
 use crate::config::Json;
-use crate::cpu::{activation, buf::Buf, fgemm, gemm::Dense, team, tensors::Tensors};
+use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
 use crate::layers::{add_into, add_scaled_into, folded_batch_norm, linear, Norm};
 
 /// The log floor before the log10, as the reference's `clamp(min=1e-10)`.
@@ -96,59 +96,41 @@ impl Config {
     }
 }
 
-/// Log-mel features as the reference computes them: a centered STFT
-/// (reflect padding) with the file's window and filterbank, `log10`, a
+/// Log-mel features as the reference computes them: the power mels of a
+/// `CenteredMel`, `log10`, a
 /// floor `floor_db` below the take's peak, `(x + 4) / 4`, then (5.0) the
 /// delta of each frame (`(next - previous) / 2`), and `stack` frames side
 /// by side. 5.0 pads the audio to whole stacks; 4.x drops the frame of the
 /// last center and then an odd last frame.
 pub struct Frontend {
-    n_fft: usize,
-    hop: usize,
-    pub mels: usize,
+    mel: CenteredMel,
     pub stack: usize,
     floor_db: f32,
     pub deltas: bool,
     whole_stacks: bool,
-    spectrum: PowerSpectrum,
-    /// `mels x bins`.
-    filters: Vec<f32>,
 }
 
 impl Frontend {
     pub fn load(json: &Json, t: &Tensors) -> Result<Self, String> {
-        let fe = |key: &str| json.num(&format!("feature_extractor.{key}"));
-        let (n_fft, win, mels) = (fe("n_fft")?, fe("win_length")?, fe("num_mel_bins")?);
-        if win > n_fft {
-            return Err("config.json: the window is longer than the transform".into());
-        }
-        let window = t.f32_len("frontend.window", win)?;
-        // The window sits in the middle of the transform, as torch.stft.
-        let mut padded = vec![0.0f32; n_fft];
-        padded[(n_fft - win) / 2..][..win].copy_from_slice(&window);
         Ok(Self {
-            n_fft,
-            hop: fe("hop_length")?,
-            mels,
-            stack: fe("stack_factor")?,
+            mel: CenteredMel::load(json, t)?,
+            stack: json.num("feature_extractor.stack_factor")?,
             floor_db: json.float("feature_extractor.floor_db").unwrap_or(8.0) as f32,
             deltas: json.flag("feature_extractor.deltas") == Some(true),
             whole_stacks: json.str("feature_extractor.frames") == Some("whole_stacks"),
-            spectrum: PowerSpectrum::new(n_fft, &padded),
-            filters: t.f32_len("frontend.mel_filterbank", mels * (n_fft / 2 + 1))?,
         })
     }
 
     /// Values per stacked frame.
     pub fn width(&self) -> usize {
-        self.stack * self.mels * if self.deltas { 2 } else { 1 }
+        self.stack * self.mel.mels * if self.deltas { 2 } else { 1 }
     }
 
     /// `frames x width()`.
     pub fn compute(&self, audio: &[f32]) -> (Vec<f32>, usize) {
-        let (hop, stack, mels) = (self.hop, self.stack, self.mels);
+        let (hop, stack, mels) = (self.mel.hop, self.stack, self.mel.mels);
         let mel_frames = audio.len() / hop;
-        if mel_frames == 0 || audio.len() <= self.n_fft / 2 {
+        if mel_frames == 0 || audio.len() <= self.mel.n_fft / 2 {
             return (Vec::new(), 0);
         }
         let mut samples = audio.to_vec();
@@ -160,22 +142,7 @@ impl Frontend {
         } else {
             mel_frames
         };
-        let len = samples.len() as isize;
-        let reflect = |i: isize| -> f32 {
-            let i = if i < 0 { -i } else { i };
-            let i = if i >= len { 2 * (len - 1) - i } else { i };
-            samples[i.clamp(0, len - 1) as usize]
-        };
-        let half = (self.n_fft / 2) as isize;
-        let mut windows = Buf::scratch(frames * self.n_fft);
-        team::chunks_mut(&mut windows, self.n_fft, |f, row| {
-            let start = (f * hop) as isize - half;
-            for (n, value) in row.iter_mut().enumerate() {
-                *value = reflect(start + n as isize);
-            }
-        });
-        let power = self.spectrum.compute(&windows, frames);
-        let mel = fgemm::matmul(&power, frames, self.spectrum.bins(), &self.filters, mels);
+        let mel = self.mel.power(&samples, frames);
         let mut logs: Vec<f32> = mel.iter().map(|m| m.max(LOG_FLOOR).log10()).collect();
         let peak = logs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         for v in &mut logs {
