@@ -122,11 +122,7 @@ impl Canary {
             Some(projection) => projection.forward(&encoded, t),
             None => encoded,
         };
-        let language = options
-            .language
-            .as_deref()
-            .filter(|code| self.config.languages.iter().any(|known| known == code))
-            .unwrap_or("en");
+        let language = options.language.as_deref().unwrap_or("en");
         let lang = format!("<|{language}|>");
         // The second language token is the language to write.
         let target = match options.task {
@@ -355,13 +351,13 @@ impl Family for Canary {
         })
     }
 
-    /// Terms to favor while decoding; with terms set, decoding is greedy (the
-    /// bonuses follow one sequence). See `parakeet::bias`.
     /// The languages of the prompt. Another code decodes as English.
     fn languages(&self) -> Option<Vec<String>> {
         Some(self.config.languages.clone())
     }
 
+    /// Terms to favor while decoding; with terms set, decoding is greedy (the
+    /// bonuses follow one sequence). See `parakeet::bias`.
     fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
         let (bias, skipped) = bias::build(&self.tokenizer, terms, weights);
         *self.dictionary.write() = bias;

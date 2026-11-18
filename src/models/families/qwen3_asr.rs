@@ -243,15 +243,26 @@ impl Family for Qwen3Asr {
         Vec::new()
     }
 
+    /// The codes of `LANGUAGE_NAMES` whose name the model supports.
+    fn languages(&self) -> Option<Vec<String>> {
+        let supported = LANGUAGE_NAMES
+            .iter()
+            .filter(|(_, name)| self.languages.iter().any(|l| l == name));
+        Some(supported.map(|(code, _)| code.to_string()).collect())
+    }
+
+    fn checks_languages(&self) -> bool {
+        false
+    }
+
     /// `options.language` (one of 30) makes the model write that language;
     /// without one, it detects the language.
     fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
         let language = options.language.as_deref().and_then(|code| {
             LANGUAGE_NAMES
                 .iter()
-                .find(|(c, _)| c.eq_ignore_ascii_case(code.trim()))
+                .find(|(c, _)| *c == code)
                 .map(|(_, name)| *name)
-                .filter(|name| self.languages.iter().any(|l| l == name))
         });
         let context = self.context.read().clone();
         speech_windows(samples, WINDOW_SAMPLES, options, |window| {

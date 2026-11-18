@@ -200,7 +200,7 @@ impl Family for Whisper {
             self.tokens
                 .languages
                 .iter()
-                .find(|(c, _)| c.eq_ignore_ascii_case(code.trim()))
+                .find(|(c, _)| c == code)
                 .map(|(_, id)| *id)
         });
         speech_windows(samples, WINDOW_SAMPLES, options, |window| {

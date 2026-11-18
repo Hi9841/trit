@@ -103,14 +103,18 @@ impl Family for Voxtral {
         })
     }
 
+    fn languages(&self) -> Option<Vec<String>> {
+        Some(self.languages.clone())
+    }
+
+    fn checks_languages(&self) -> bool {
+        false
+    }
+
     /// A language the model lists goes into the request (`lang:fr`); none
     /// lets the model find it.
     fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
-        let language = options.language.as_deref().map(str::trim).filter(|code| {
-            self.languages
-                .iter()
-                .any(|known| known.eq_ignore_ascii_case(code))
-        });
+        let language = options.language.as_deref();
         let k = &self.tokens;
         let head = [k.bos, k.inst, k.begin_audio];
         let mut tail = vec![k.inst_end];

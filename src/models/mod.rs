@@ -43,9 +43,19 @@ pub trait Family: Send + Sync {
 
     /// The language codes the model takes, when it has a list of them
     /// (Whisper's language tokens, Canary's prompt languages). `None`: the
-    /// model takes no language, or any code.
+    /// model takes no language, or any code. `Model` resolves
+    /// `Options::language` against this list before a call: a family gets
+    /// a code of its list as the list spells it, or `None`.
     fn languages(&self) -> Option<Vec<String>> {
         None
+    }
+
+    /// Whether `Trit::check` holds a code to `languages()`. False keeps the
+    /// ISO 639-1 form check for a family whose list came after that check
+    /// (Voxtral, Qwen3-ASR, SenseVoice): a code outside the list runs as if
+    /// no language was given.
+    fn checks_languages(&self) -> bool {
+        true
     }
 }
 
@@ -158,13 +168,34 @@ impl Model {
     }
 
     pub fn transcribe(&self, samples: &[f32], options: &Options) -> String {
+        let options = self.resolved(options);
         let _team = crate::cpu::enter(self.row.spread);
-        self.family.transcribe(samples, options)
+        self.family.transcribe(samples, &options)
     }
 
     pub fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
+        let options = self.resolved(options);
         let _team = crate::cpu::enter(self.row.spread);
-        self.family.segments(samples, options)
+        self.family.segments(samples, &options)
+    }
+
+    /// `options` with its language as the family's list spells it (trimmed,
+    /// any case), or none when the code is not in the list. A family with
+    /// no list gets the code as it is.
+    fn resolved<'a>(&self, options: &'a Options) -> std::borrow::Cow<'a, Options> {
+        let Some(code) = options.language.as_deref() else {
+            return std::borrow::Cow::Borrowed(options);
+        };
+        let Some(known) = self.family.languages() else {
+            return std::borrow::Cow::Borrowed(options);
+        };
+        let language = known
+            .into_iter()
+            .find(|k| k.eq_ignore_ascii_case(code.trim()));
+        std::borrow::Cow::Owned(Options {
+            language,
+            ..options.clone()
+        })
     }
 
     pub fn set_dictionary(&self, terms: &[String], weights: BiasWeights) -> Vec<String> {
@@ -179,7 +210,11 @@ impl Model {
         let Some(code) = options.language.as_deref() else {
             return Ok(());
         };
-        match self.family.languages() {
+        let checked = self
+            .family
+            .languages()
+            .filter(|_| self.family.checks_languages());
+        match checked {
             Some(known) if known.iter().any(|k| k.eq_ignore_ascii_case(code)) => Ok(()),
             Some(known) => Err(format!(
                 "language `{code}` is not one that this {} model takes; it takes: {}",

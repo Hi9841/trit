@@ -62,12 +62,12 @@ impl Config {
         Ok(config)
     }
 
-    /// The prompt row of language `code`; none or an unknown code: `auto`.
+    /// The prompt row of language `code` (a code of the list); none: `auto`.
     fn language(&self, code: Option<&str>) -> usize {
         let find = |code: &str| {
             self.languages
                 .iter()
-                .find(|(known, _)| known.eq_ignore_ascii_case(code.trim()))
+                .find(|(known, _)| known == code)
                 .map(|(_, row)| *row)
         };
         code.and_then(find).or_else(|| find("auto")).unwrap_or(0)
@@ -125,6 +125,16 @@ impl Family for SenseVoice {
             return Err("the tokenizer has fewer pieces than the CTC head".into());
         }
         Ok(model)
+    }
+
+    /// The codes of the prompt, without `auto`.
+    fn languages(&self) -> Option<Vec<String>> {
+        let codes = self.config.languages.iter().map(|(code, _)| code);
+        Some(codes.filter(|code| *code != "auto").cloned().collect())
+    }
+
+    fn checks_languages(&self) -> bool {
+        false
     }
 
     fn segments(&self, samples: &[f32], options: &Options) -> Vec<Segment> {
