@@ -48,7 +48,8 @@ pub use models::parts::logit_bias::BiasWeights;
 pub use models::MODEL_TYPES;
 pub use options::{hundredths, joined, language_code, Cancel, Options, Segment, Task};
 pub use tts::{
-    phonemize, voice_accent, Voice, Voicing, PHONEMIZER_FALLBACKS, VOICE_REPO, VOICE_REPOS,
+    find_phonemizer_fallback, phonemize, voice_accent, Voice, Voicing, PHONEMIZER_FALLBACKS,
+    VOICE_REPO, VOICE_REPOS,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

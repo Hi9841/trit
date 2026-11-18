@@ -97,11 +97,8 @@ fn doctor(_: &Parsed) -> Outcome {
         Some(dir) => println!("voice: ok, {}", toon(&tilde(&dir))),
         None => println!("voice: not found (optional; for `trit speak`)"),
     }
-    for (accent, repo) in trit::PHONEMIZER_FALLBACKS {
-        let found = trit::candidates(repo)
-            .into_iter()
-            .find(|d| trit::is_model(d));
-        match found {
+    for (accent, _) in trit::PHONEMIZER_FALLBACKS {
+        match trit::find_phonemizer_fallback(accent) {
             Some(dir) => println!("phonemizer_fallback_{accent}: ok, {}", toon(&tilde(&dir))),
             None => println!(
                 "phonemizer_fallback_{accent}: not found (optional; Kokoro skips words that no dictionary holds)"
