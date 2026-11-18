@@ -4,15 +4,13 @@
 //! FunASR's names (`audio_encoder`, `audio_adaptor`) and the Hugging Face
 //! Qwen3 names under `llm.model`.
 
-use super::blocks::{kaldi_front, llm_block, KaldiFront, LlmShape};
+use super::blocks::{kaldi_front, llm, KaldiFront};
 use super::{qwen3_asr, sensevoice, Gguf, Name};
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
     let e = |key: &str| g.num(&format!("stt.funasr_nano.encoder.{key}"));
     let a = |key: &str| g.num(&format!("stt.funasr_nano.adaptor.{key}"));
-    let q = |key: &str| g.num(&format!("stt.funasr_nano.decoder.{key}"));
-    let float = |key: &str| g.get(&format!("stt.funasr_nano.decoder.{key}")).as_f64();
     let text = |key: &str| g.get(key).as_str().unwrap_or_default();
     if text("stt.funasr_nano.encoder.attention_type") != "sanm"
         || e("sanm_shift")? != 0
@@ -25,7 +23,6 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     if text("stt.frontend.type") != "kaldi_fbank_lfr" || text("stt.frontend.window") != "hamming" {
         return Err("its audio features differ from FunASR's WavFrontend".into());
     }
-    let vocab = q("vocab_size")?;
     Ok(json!({
         "model_type": "fun_asr_nano",
         // FunASR's default: text normalization on for the multilingual model only.
@@ -49,22 +46,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "num_blocks": a("n_blocks")?,
             "low_frame_rate": g.get("stt.funasr_nano.adaptor.use_low_frame_rate").as_bool().unwrap_or(false),
         },
-        "llm_config": llm_block(LlmShape {
-            model_type: "qwen3",
-            hidden: q("hidden_size")?,
-            intermediate: q("intermediate_size")?,
-            layers: q("n_layers")?,
-            heads: q("n_heads")?,
-            kv_heads: q("n_kv_heads")?,
-            head_dim: q("head_dim")?,
-            vocab,
-            rms_norm_eps: float("rms_norm_eps"),
-            rope_theta: float("rope_theta"),
-            tie: g
-                .get("stt.funasr_nano.decoder.tie_word_embeddings")
-                .as_bool()
-                .unwrap_or(true),
-        }),
+        "llm_config": llm(g, "stt.funasr_nano.decoder", "qwen3", true)?,
         "feature_extractor": kaldi_front(KaldiFront {
             sample_rate: g.num("stt.frontend.sample_rate")?,
             win: g.num("stt.frontend.win_length")?,

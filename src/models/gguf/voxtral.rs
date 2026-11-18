@@ -4,14 +4,12 @@
 //! Hugging Face names, the projector `multi_modal_projector`, the language
 //! model the Llama names under `language_model`.
 
-use super::blocks::{llm_block, LlmShape};
+use super::blocks::llm;
 use super::{qwen3_asr, whisper, Gguf, Name};
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
     let e = |key: &str| g.num(&format!("stt.voxtral.encoder.{key}"));
-    let q = |key: &str| g.num(&format!("stt.voxtral.decoder.{key}"));
-    let qf = |key: &str| g.get(&format!("stt.voxtral.decoder.{key}")).as_f64();
     let text = |key: &str| g.get(key).as_str().unwrap_or_default();
     if text("stt.voxtral.decoder.hidden_act") != "silu"
         || text("stt.voxtral.encoder.activation") != "gelu"
@@ -40,22 +38,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "downsample_factor": g.num("stt.voxtral.projector.downsample_factor")?,
             "input_dim": g.num("stt.voxtral.projector.input_dim")?,
         },
-        "llm_config": llm_block(LlmShape {
-            model_type: "mistral",
-            hidden: q("hidden_size")?,
-            intermediate: q("intermediate_size")?,
-            layers: q("n_layers")?,
-            heads: q("n_heads")?,
-            kv_heads: q("n_kv_heads")?,
-            head_dim: q("head_dim")?,
-            vocab: q("vocab_size")?,
-            rms_norm_eps: qf("rms_norm_eps"),
-            rope_theta: qf("rope_theta"),
-            tie: g
-                .get("stt.voxtral.decoder.tie_word_embeddings")
-                .as_bool()
-                .unwrap_or(false),
-        }),
+        "llm_config": llm(g, "stt.voxtral.decoder", "mistral", false)?,
     }))
 }
 

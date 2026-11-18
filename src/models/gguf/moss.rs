@@ -4,7 +4,7 @@
 //! the file. The encoder takes Whisper's names, the adaptor `adaptor.`, the
 //! language model the Qwen3 names under `language_model`.
 
-use super::blocks::{llm_block, LlmShape};
+use super::blocks::llm;
 use super::{qwen3_asr, whisper, Gguf, Name};
 use serde_json::{json, Value};
 
@@ -47,22 +47,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         "adaptor_config": {
             "input_dim": m("adaptor.input_dim")?,
         },
-        "llm_config": llm_block(LlmShape {
-            model_type: "qwen3",
-            hidden: m("decoder.hidden_size")?,
-            intermediate: m("decoder.intermediate_size")?,
-            layers: m("decoder.n_layers")?,
-            heads: m("decoder.n_heads")?,
-            kv_heads: m("decoder.n_kv_heads")?,
-            head_dim: m("decoder.head_dim")?,
-            vocab: m("decoder.vocab_size")?,
-            rms_norm_eps: mf("decoder.rms_norm_eps"),
-            rope_theta: mf("decoder.rope_theta"),
-            tie: g
-                .get("stt.moss.decoder.tie_word_embeddings")
-                .as_bool()
-                .unwrap_or(true),
-        }),
+        "llm_config": llm(g, "stt.moss.decoder", "qwen3", true)?,
     }))
 }
 

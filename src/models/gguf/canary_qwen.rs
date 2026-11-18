@@ -5,15 +5,12 @@
 //! Canary's names, the language model the Hugging Face Qwen3 names under
 //! `llm.model`.
 
-use super::blocks::{llm_block, LlmShape};
+use super::blocks::{fastconformer, llm};
 use super::{canary, qwen3_asr, Gguf, Name};
-use crate::models::package::{encoder_block, EncShape};
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
-    let e = |key: &str| g.num(&format!("stt.canary_qwen.encoder.{key}"));
     let q = |key: &str| g.num(&format!("stt.canary_qwen.decoder.{key}"));
-    let float = |key: &str| g.get(&format!("stt.canary_qwen.decoder.{key}")).as_f64();
     let text = |key: &str| g.get(key).as_str().unwrap_or_default();
     if text("stt.canary_qwen.decoder.hidden_act") != "silu"
         || g.get("stt.canary_qwen.decoder.tie_word_embeddings")
@@ -33,30 +30,13 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         "pad_token_id": 0,
         "audio_locator_id": g.num("stt.canary_qwen.perception.audio_locator_id")?,
         "projection_size": g.num("stt.canary_qwen.perception.output_dim")?,
-        "encoder_config": encoder_block(EncShape {
-            hidden: e("d_model")?,
-            intermediate: e("d_ff")?,
-            heads: e("n_heads")?,
-            layers: e("n_layers")?,
-            mels: g.num("stt.frontend.num_mels")?,
-            conv_kernel: e("conv_kernel")?,
-            subsample: e("subsampling_factor")?,
-            sub_channels: e("subsampling_channels")?,
-            scale_input: false,
-        }),
-        "llm_config": llm_block(LlmShape {
-            model_type: "qwen3",
-            hidden: q("hidden_size")?,
-            intermediate: q("intermediate_size")?,
-            layers: q("n_layers")?,
-            heads: q("n_heads")?,
-            kv_heads: q("n_kv_heads")?,
-            head_dim: q("head_dim")?,
-            vocab,
-            rms_norm_eps: float("rms_norm_eps"),
-            rope_theta: float("rope_theta"),
-            tie: true,
-        }),
+        "encoder_config": fastconformer(
+            g,
+            "stt.canary_qwen.encoder",
+            g.num("stt.frontend.num_mels")?,
+            false,
+        )?,
+        "llm_config": llm(g, "stt.canary_qwen.decoder", "qwen3", true)?,
     }))
 }
 

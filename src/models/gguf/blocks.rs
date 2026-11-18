@@ -1,6 +1,7 @@
 //! The `config.json` blocks that more than one GGUF architecture writes.
 
 use super::Gguf;
+use crate::models::package::{encoder_block, EncShape};
 use serde_json::{json, Value};
 
 /// A Llama-plan language model (`CausalLm::parse` reads these keys).
@@ -16,6 +17,52 @@ pub(crate) struct LlmShape<'a> {
     pub rms_norm_eps: Option<f64>,
     pub rope_theta: Option<f64>,
     pub tie: bool,
+}
+
+/// The language model block of a transcribe.cpp file, from the keys under
+/// `prefix` (`stt.voxtral.decoder`). `tie` is the tie of the head when the
+/// file has no `tie_word_embeddings`.
+pub(crate) fn llm(g: &Gguf, prefix: &str, model_type: &str, tie: bool) -> Result<Value, String> {
+    let num = |key: &str| g.num(&format!("{prefix}.{key}"));
+    let float = |key: &str| g.get(&format!("{prefix}.{key}")).as_f64();
+    Ok(llm_block(LlmShape {
+        model_type,
+        hidden: num("hidden_size")?,
+        intermediate: num("intermediate_size")?,
+        layers: num("n_layers")?,
+        heads: num("n_heads")?,
+        kv_heads: num("n_kv_heads")?,
+        head_dim: num("head_dim")?,
+        vocab: num("vocab_size")?,
+        rms_norm_eps: float("rms_norm_eps"),
+        rope_theta: float("rope_theta"),
+        tie: g
+            .get(&format!("{prefix}.tie_word_embeddings"))
+            .as_bool()
+            .unwrap_or(tie),
+    }))
+}
+
+/// The FastConformer encoder block of a transcribe.cpp file, from the keys
+/// under `prefix` (`stt.parakeet.encoder`).
+pub(crate) fn fastconformer(
+    g: &Gguf,
+    prefix: &str,
+    mels: u64,
+    scale_input: bool,
+) -> Result<Value, String> {
+    let num = |key: &str| g.num(&format!("{prefix}.{key}"));
+    Ok(encoder_block(EncShape {
+        hidden: num("d_model")?,
+        intermediate: num("d_ff")?,
+        heads: num("n_heads")?,
+        layers: num("n_layers")?,
+        mels,
+        conv_kernel: num("conv_kernel")?,
+        subsample: num("subsampling_factor")?,
+        sub_channels: num("subsampling_channels")?,
+        scale_input,
+    }))
 }
 
 pub(crate) fn llm_block(shape: LlmShape<'_>) -> Value {

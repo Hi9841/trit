@@ -3,7 +3,7 @@
 //! audio encoder (`audio_tower`), the projector, and the Ministral language
 //! model with its delay-conditioned `ada` layers (`language_model`).
 
-use super::blocks::{llm_block, LlmShape};
+use super::blocks::llm;
 use super::{qwen3_asr, Gguf, Name};
 use crate::models::parts::causal_lm::CausalLm;
 use serde_json::{json, Value};
@@ -22,22 +22,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     if text("stt.frontend.type") != "mel" || text("stt.frontend.normalize") != "global" {
         return Err("its audio features differ from Voxtral Realtime's (fixed peak)".into());
     }
-    let mut llm = llm_block(LlmShape {
-        model_type: "mistral",
-        hidden: v("decoder.hidden_size")?,
-        intermediate: v("decoder.intermediate_size")?,
-        layers: v("decoder.n_layers")?,
-        heads: v("decoder.n_heads")?,
-        kv_heads: v("decoder.n_kv_heads")?,
-        head_dim: v("decoder.head_dim")?,
-        vocab: v("decoder.vocab_size")?,
-        rms_norm_eps: vf("decoder.rms_norm_eps"),
-        rope_theta: vf("decoder.rope_theta"),
-        tie: g
-            .get("stt.voxtral_realtime.decoder.tie_word_embeddings")
-            .as_bool()
-            .unwrap_or(true),
-    });
+    let mut llm = llm(g, "stt.voxtral_realtime.decoder", "mistral", true)?;
     llm["ada_hidden"] = json!(v("time.ada_hidden")?);
     Ok(json!({
         "model_type": "voxtral_realtime",

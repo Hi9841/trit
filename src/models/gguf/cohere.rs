@@ -5,12 +5,11 @@
 //! head the token table plus a bias. The config is Canary's; the tensors
 //! take the Canary names.
 
+use super::blocks::fastconformer;
 use super::{canary, Gguf, Name};
-use crate::models::package::{encoder_block, EncShape};
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
-    let e = |key: &str| g.num(&format!("stt.cohere.encoder.{key}"));
     let q = |key: &str| g.num(&format!("stt.cohere.decoder.{key}"));
     let text = |key: &str| g.get(key).as_str().unwrap_or_default();
     if text("stt.cohere.decoder.activation") != "relu"
@@ -43,17 +42,12 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "eos_token_id": g.num("tokenizer.ggml.eos_token_id")?,
             "hidden_act": "relu",
         },
-        "encoder_config": encoder_block(EncShape {
-            hidden: e("d_model")?,
-            intermediate: e("d_ff")?,
-            heads: e("n_heads")?,
-            layers: e("n_layers")?,
-            mels: g.num("stt.frontend.num_mels")?,
-            conv_kernel: e("conv_kernel")?,
-            subsample: e("subsampling_factor")?,
-            sub_channels: e("subsampling_channels")?,
-            scale_input: false,
-        }),
+        "encoder_config": fastconformer(
+            g,
+            "stt.cohere.encoder",
+            g.num("stt.frontend.num_mels")?,
+            false,
+        )?,
         "languages": g.get("general.languages"),
         "prompt_format": "canary2",
     }))

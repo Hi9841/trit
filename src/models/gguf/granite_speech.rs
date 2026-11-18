@@ -5,14 +5,13 @@
 //! projector stays under `projector.`, and the language model takes the
 //! Hugging Face Granite names under `language_model`.
 
-use super::blocks::{llm_block, LlmShape};
+use super::blocks::llm;
 use super::{qwen3_asr, Gguf, Name};
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
     let e = |key: &str| g.num(&format!("stt.granite.encoder.{key}"));
     let p = |key: &str| g.num(&format!("stt.granite.projector.{key}"));
-    let q = |key: &str| g.num(&format!("stt.granite.decoder.{key}"));
     let qf = |key: &str| g.get(&format!("stt.granite.decoder.{key}")).as_f64();
     let text = |key: &str| g.get(key).as_str().unwrap_or_default();
     if text("stt.granite.decoder.hidden_act") != "silu"
@@ -28,22 +27,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         return Err("its audio features differ from Granite Speech's".into());
     }
     let d = e("hidden")?;
-    let mut llm = llm_block(LlmShape {
-        model_type: "granite",
-        hidden: q("hidden_size")?,
-        intermediate: q("intermediate_size")?,
-        layers: q("n_layers")?,
-        heads: q("n_heads")?,
-        kv_heads: q("n_kv_heads")?,
-        head_dim: q("head_dim")?,
-        vocab: q("vocab_size")?,
-        rms_norm_eps: qf("rms_norm_eps"),
-        rope_theta: qf("rope_theta"),
-        tie: g
-            .get("stt.granite.decoder.tie_word_embeddings")
-            .as_bool()
-            .unwrap_or(false),
-    });
+    let mut llm = llm(g, "stt.granite.decoder", "granite", false)?;
     llm["embedding_multiplier"] = json!(qf("embedding_multiplier"));
     llm["attention_multiplier"] = json!(qf("attention_multiplier"));
     llm["residual_multiplier"] = json!(qf("residual_multiplier"));

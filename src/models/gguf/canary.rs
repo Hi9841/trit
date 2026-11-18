@@ -5,8 +5,8 @@
 //! tensor names. The encoder is Parakeet's FastConformer, so its names
 //! come from the Parakeet table with `model.` before them.
 
+use super::blocks::fastconformer;
 use super::{parakeet, Gguf, Name};
-use crate::models::package::{encoder_block, EncShape};
 use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
@@ -42,20 +42,12 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "eos_token_id": c("special.endoftext_id")?,
             "hidden_act": "relu",
         },
-        "encoder_config": encoder_block(EncShape {
-            hidden: c("encoder.d_model")?,
-            intermediate: c("encoder.d_ff")?,
-            heads: c("encoder.n_heads")?,
-            layers: c("encoder.n_layers")?,
-            mels: g.num("stt.frontend.num_mels")?,
-            conv_kernel: c("encoder.conv_kernel")?,
-            subsample: c("encoder.subsampling_factor")?,
-            sub_channels: c("encoder.subsampling_channels")?,
-            scale_input: g
-                .get("stt.canary.encoder.xscaling")
-                .as_bool()
-                .unwrap_or(false),
-        }),
+        "encoder_config": fastconformer(
+            g,
+            "stt.canary.encoder",
+            g.num("stt.frontend.num_mels")?,
+            g.get("stt.canary.encoder.xscaling").as_bool().unwrap_or(false),
+        )?,
         "languages": g.get("general.languages"),
         "prompt_format": format,
     }))

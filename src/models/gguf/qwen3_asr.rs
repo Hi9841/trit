@@ -4,7 +4,7 @@
 //! language model's output head is its token table (tied), as in the
 //! checkpoint. Trit computes the mel filterbank and window itself.
 
-use super::blocks::{llm_block, LlmShape};
+use super::blocks::llm;
 use super::{Gguf, Name};
 use crate::models::families::qwen3_asr::LANGUAGE_NAMES;
 use crate::models::parts::causal_lm::CausalLm;
@@ -12,7 +12,6 @@ use serde_json::{json, Value};
 
 pub fn config(g: &Gguf) -> Result<Value, String> {
     let q = |key: &str| g.num(&format!("stt.qwen3_asr.{key}"));
-    let float = |key: &str| g.get(&format!("stt.qwen3_asr.{key}")).as_f64();
     let text = |key: &str| g.get(key).as_str().unwrap_or_default();
     if text("stt.qwen3_asr.decoder.hidden_act") != "silu"
         || g.get("stt.qwen3_asr.decoder.tie_word_embeddings").as_bool() == Some(false)
@@ -56,19 +55,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
                 "n_window_infer": q("encoder.n_window_infer")?,
                 "activation_function": text("stt.qwen3_asr.encoder.activation"),
             },
-            "text_config": llm_block(LlmShape {
-                model_type: "qwen3",
-                hidden: q("decoder.hidden_size")?,
-                intermediate: q("decoder.intermediate_size")?,
-                layers: q("decoder.n_layers")?,
-                heads: q("decoder.n_heads")?,
-                kv_heads: q("decoder.n_kv_heads")?,
-                head_dim: q("decoder.head_dim")?,
-                vocab: q("decoder.vocab_size")?,
-                rms_norm_eps: float("decoder.rms_norm_eps"),
-                rope_theta: float("decoder.rope_theta"),
-                tie: true,
-            }),
+            "text_config": llm(g, "stt.qwen3_asr.decoder", "qwen3", true)?,
         },
     }))
 }

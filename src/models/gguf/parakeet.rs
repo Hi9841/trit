@@ -2,9 +2,9 @@
 //! transcribe.cpp's `scripts/convert-parakeet.py`): the config of the
 //! Hugging Face Parakeet checkpoint, and its tensor names.
 
+use super::blocks::fastconformer;
 use super::{Gguf, Name};
 use crate::audio::mel;
-use crate::models::package::{encoder_block, EncShape};
 use serde_json::{json, Value};
 
 /// The config of the Hugging Face checkpoint of this model, after
@@ -77,20 +77,14 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         return Err(unsupported("its audio features differ from Parakeet's"));
     }
     let blank = g.num("tokenizer.ggml.blank_token_id")?;
-    let mut encoder_config = encoder_block(EncShape {
-        hidden: enc("d_model")?,
-        intermediate: enc("d_ff")?,
-        heads: enc("n_heads")?,
-        layers: enc("n_layers")?,
+    let mut encoder_config = fastconformer(
+        g,
+        "stt.parakeet.encoder",
         mels,
-        conv_kernel: enc("conv_kernel")?,
-        subsample: enc("subsampling_factor")?,
-        sub_channels: enc("subsampling_channels")?,
-        scale_input: g
-            .get("stt.parakeet.encoder.xscaling")
+        g.get("stt.parakeet.encoder.xscaling")
             .as_bool()
             .unwrap_or(false),
-    });
+    )?;
     encoder_config["attention_context"] =
         json!([side("att_context_left"), side("att_context_right")]);
     encoder_config["attention_style"] = json!(style);
