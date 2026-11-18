@@ -4,6 +4,7 @@
 //! and the tensor names (transcribe.cpp's, under `encoder.`). The file's
 //! mel filterbank and window feed the front end as published.
 
+use super::blocks::granite_encoder;
 use super::{Gguf, Name};
 use serde_json::{json, Value};
 
@@ -27,25 +28,19 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
     {
         return Err("its audio features differ from Granite Speech 5.0's".into());
     }
+    let mut encoder = granite_encoder(
+        g,
+        "stt.granite5_ctc.encoder",
+        e("hidden")?,
+        e("intermediate")?,
+    )?;
+    encoder["self_conditioning_layer"] = json!(e("self_cond_layer")?);
+    encoder["subsample_layers"] = g.get("stt.granite5_ctc.encoder.subsample_layers").clone();
     Ok(json!({
         "model_type": "granite_ctc",
         "vocab_size": e("output_dim")?,
         "blank_token_id": g.num("stt.granite5_ctc.blank_id")?,
-        "encoder_config": {
-            "hidden_size": e("hidden")?,
-            "num_attention_heads": e("n_heads")?,
-            "head_dim": e("head_dim")?,
-            "intermediate_size": e("intermediate")?,
-            "num_hidden_layers": e("n_layers")?,
-            "input_dim": e("input_dim")?,
-            "output_dim": e("output_dim")?,
-            "conv_kernel_size": e("conv_kernel_size")?,
-            "conv_expansion_factor": e("conv_expansion")?,
-            "context_size": e("context_size")?,
-            "max_pos_emb": e("max_pos_emb")?,
-            "self_conditioning_layer": e("self_cond_layer")?,
-            "subsample_layers": g.get("stt.granite5_ctc.encoder.subsample_layers"),
-        },
+        "encoder_config": encoder,
         "feature_extractor": super::blocks::granite_front(
             g,
             fe("stack_factor")?,

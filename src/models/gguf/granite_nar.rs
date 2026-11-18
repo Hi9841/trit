@@ -5,7 +5,7 @@
 //! the names of `parts::granite_conformer`, the projector `nar_projector.`,
 //! the language model the Granite names under `language_model`.
 
-use super::blocks::{llm_block, LlmShape};
+use super::blocks::{granite_encoder, llm_block, LlmShape};
 use super::{granite_speech, qwen3_asr, Gguf, Name};
 use serde_json::{json, Value};
 
@@ -57,6 +57,10 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         })
         .collect();
     let d = e("hidden")?;
+    let mut encoder = granite_encoder(g, "stt.granite_nar.encoder", d, d * e("feedforward_mult")?)?;
+    encoder["self_conditioning_layer"] = json!(e("self_cond_layer")?);
+    encoder["cat_hidden_layers"] = json!(captured);
+    encoder["cat_with_last"] = json!(false);
     Ok(json!({
         "model_type": "granite_speech_nar",
         "eos_token_id": q("eos_id")?,
@@ -64,22 +68,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         "bpe_pool_window": e("bpe_pool_window")?,
         "bpe_vocab": e("bpe_output_dim")?,
         "scale_projected_embeddings": g.get("stt.granite_nar.scale_projected_embeddings").as_bool().unwrap_or(false),
-        "encoder_config": {
-            "hidden_size": d,
-            "num_attention_heads": e("n_heads")?,
-            "head_dim": e("head_dim")?,
-            "intermediate_size": d * e("feedforward_mult")?,
-            "num_hidden_layers": layers,
-            "input_dim": e("input_dim")?,
-            "output_dim": e("output_dim")?,
-            "conv_kernel_size": e("conv_kernel_size")?,
-            "conv_expansion_factor": e("conv_expansion")?,
-            "context_size": e("context_size")?,
-            "max_pos_emb": e("max_pos_emb")?,
-            "self_conditioning_layer": e("self_cond_layer")?,
-            "cat_hidden_layers": captured,
-            "cat_with_last": false,
-        },
+        "encoder_config": encoder,
         "projector_config": {
             "hidden_size": p("hidden")?,
             "mlp_ratio": p("mlp_ratio")?,

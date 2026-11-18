@@ -5,7 +5,7 @@
 //! projector stays under `projector.`, and the language model takes the
 //! Hugging Face Granite names under `language_model`.
 
-use super::blocks::llm;
+use super::blocks::{granite_encoder, llm};
 use super::{qwen3_asr, Gguf, Name};
 use serde_json::{json, Value};
 
@@ -27,6 +27,8 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         return Err("its audio features differ from Granite Speech's".into());
     }
     let d = e("hidden")?;
+    let mut encoder = granite_encoder(g, "stt.granite.encoder", d, d * e("feedforward_mult")?)?;
+    encoder["cat_hidden_layers"] = g.get("stt.granite.encoder.cat_hidden_layers").clone();
     let mut llm = llm(g, "stt.granite.decoder", "granite", false)?;
     llm["embedding_multiplier"] = json!(qf("embedding_multiplier"));
     llm["attention_multiplier"] = json!(qf("attention_multiplier"));
@@ -56,20 +58,7 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
         "chat": chat,
         // The system turn of the plus release's chat template.
         "system": "Knowledge Cutoff Date: April 2024.\nToday's Date: December 19, 2024.\nYou are Granite, developed by IBM. You are a helpful AI assistant",
-        "encoder_config": {
-            "hidden_size": d,
-            "num_attention_heads": e("n_heads")?,
-            "head_dim": e("head_dim")?,
-            "intermediate_size": d * e("feedforward_mult")?,
-            "num_hidden_layers": e("n_layers")?,
-            "input_dim": e("input_dim")?,
-            "output_dim": e("output_dim")?,
-            "conv_kernel_size": e("conv_kernel_size")?,
-            "conv_expansion_factor": e("conv_expansion")?,
-            "context_size": e("context_size")?,
-            "max_pos_emb": e("max_pos_emb")?,
-            "cat_hidden_layers": g.get("stt.granite.encoder.cat_hidden_layers"),
-        },
+        "encoder_config": encoder,
         "projector_config": {
             "hidden_size": p("hidden")?,
             "intermediate_size": p("intermediate")?,

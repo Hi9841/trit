@@ -81,6 +81,31 @@ pub(crate) fn llm_block(shape: LlmShape<'_>) -> Value {
     })
 }
 
+/// The Granite Conformer encoder of a transcribe.cpp file, from the keys
+/// under `prefix` (`stt.granite.encoder`), with `hidden_size` and
+/// `intermediate_size`. The caller adds the keys of its own release.
+pub(crate) fn granite_encoder(
+    g: &Gguf,
+    prefix: &str,
+    hidden: u64,
+    intermediate: u64,
+) -> Result<Value, String> {
+    let num = |key: &str| g.num(&format!("{prefix}.{key}"));
+    Ok(json!({
+        "hidden_size": hidden,
+        "num_attention_heads": num("n_heads")?,
+        "head_dim": num("head_dim")?,
+        "intermediate_size": intermediate,
+        "num_hidden_layers": num("n_layers")?,
+        "input_dim": num("input_dim")?,
+        "output_dim": num("output_dim")?,
+        "conv_kernel_size": num("conv_kernel_size")?,
+        "conv_expansion_factor": num("conv_expansion")?,
+        "context_size": num("context_size")?,
+        "max_pos_emb": num("max_pos_emb")?,
+    }))
+}
+
 /// Granite Speech's mel front end.
 pub(crate) fn granite_front(
     g: &Gguf,
