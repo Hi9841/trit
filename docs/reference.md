@@ -487,7 +487,8 @@ The text of an F32 GGUF file is the same as from the model's own files; see
 | whisper-tiny-q8_0 | handy-computer/whisper-tiny-gguf | Whisper (GGUF, Q8_0) | 99 | 46 |
 | s1-mini | superwhisper/s1-mini | Qwen3 text model (cleanup) | English | 1503 |
 | kokoro-82m | hexgrad/Kokoro-82M | Kokoro voice (text to speech), 28 English voices | English (US, GB) | 327 |
-| graphemes_to_phonemes_en_us, _en_gb | PeterReid/graphemes_to_phonemes_en_us, _gb | The phonemizer's fallback for unknown words | English | 3 |
+| graphemes_to_phonemes_en_us | PeterReid/graphemes_to_phonemes_en_us | The phonemizer's fallback for unknown words (American) | English | 3 |
+| graphemes_to_phonemes_en_gb | PeterReid/graphemes_to_phonemes_en_gb | The phonemizer's fallback for unknown words (British) | English | 3 |
 | mms-tts-eng | facebook/mms-tts-eng | VITS voice (text to speech) | English | 145 |
 
 Download only the files Trit reads:

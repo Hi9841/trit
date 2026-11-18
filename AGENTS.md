@@ -74,7 +74,7 @@ Do the steps in order. Each step ends on a check.
 | Build with the GPU | `cargo build --release --workspace --features trit/gpu`; lint it with the same `--features trit/gpu` |
 | Format | `cargo fmt --all` |
 | Smoke test | `./target/release/trit doctor`, then `./target/release/trit transcribe <file.wav> --model <name>` |
-| Skill current? | `./target/release/trit skill --check skill/SKILL.md` |
+| Skill current? | `./target/release/trit skill --check skill/SKILL.md --check-docs docs/reference.md` (the model table of the reference against the catalog) |
 | Voices against their references | `python bench/tts.py kokoro <trit.exe> <kokoro dir> <parakeet-redux dir>` and `python bench/tts.py vits <trit.exe> <mms dir> <parakeet-redux dir>`, in the environment that `bench/tts.py` names |
 | Phonemes of a text | `./target/release/trit phonemes "<text>"` (`--british`, `--no-fallback`) |
 | Same text on every kernel path | `python bench/paths.py <trit.exe> <model> <clip.wav>...` (each `TRIT_ISA` value, and 1 thread) |
