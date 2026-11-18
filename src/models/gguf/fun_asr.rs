@@ -4,7 +4,7 @@
 //! FunASR's names (`audio_encoder`, `audio_adaptor`) and the Hugging Face
 //! Qwen3 names under `llm.model`.
 
-use super::blocks::{kaldi_front, llm, KaldiFront};
+use super::blocks::{kaldi_front, llm};
 use super::{qwen3_asr, sensevoice, Gguf, Name};
 use serde_json::{json, Value};
 
@@ -47,23 +47,10 @@ pub fn config(g: &Gguf) -> Result<Value, String> {
             "low_frame_rate": g.get("stt.funasr_nano.adaptor.use_low_frame_rate").as_bool().unwrap_or(false),
         },
         "llm_config": llm(g, "stt.funasr_nano.decoder", "qwen3", true)?,
-        "feature_extractor": kaldi_front(KaldiFront {
-            sample_rate: g.num("stt.frontend.sample_rate")?,
-            win: g.num("stt.frontend.win_length")?,
-            hop: g.num("stt.frontend.hop_length")?,
-            mels: g.num("stt.frontend.num_mels")?,
-            lfr_m: g.num("stt.frontend.lfr_m")?,
-            lfr_n: g.num("stt.frontend.lfr_n")?,
-            upscale: g
-                .get("stt.frontend.upscale_samples")
-                .as_bool()
-                .unwrap_or(true),
-            cmvn: Some(
-                g.get("stt.frontend.apply_cmvn")
-                    .as_bool()
-                    .unwrap_or(true),
-            ),
-        }),
+        "feature_extractor": kaldi_front(
+            g,
+            Some(g.get("stt.frontend.apply_cmvn").as_bool().unwrap_or(true)),
+        )?,
     }))
 }
 

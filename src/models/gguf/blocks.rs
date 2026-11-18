@@ -101,33 +101,24 @@ pub(crate) fn granite_front(
     }))
 }
 
-/// FunASR's Kaldi filterbank. `cmvn` is omitted when `None` (SenseVoice).
-pub(crate) struct KaldiFront {
-    pub sample_rate: u64,
-    pub win: u64,
-    pub hop: u64,
-    pub mels: u64,
-    pub lfr_m: u64,
-    pub lfr_n: u64,
-    pub upscale: bool,
-    pub cmvn: Option<bool>,
-}
-
-pub(crate) fn kaldi_front(front: KaldiFront) -> Value {
+/// FunASR's Kaldi filterbank, from the `stt.frontend` keys. `cmvn` is
+/// omitted when `None` (SenseVoice).
+pub(crate) fn kaldi_front(g: &Gguf, cmvn: Option<bool>) -> Result<Value, String> {
+    let num = |key: &str| g.num(&format!("stt.frontend.{key}"));
     let mut value = json!({
         "type": "kaldi_fbank",
-        "sample_rate": front.sample_rate,
-        "win_length": front.win,
-        "hop_length": front.hop,
-        "num_mel_bins": front.mels,
-        "lfr_m": front.lfr_m,
-        "lfr_n": front.lfr_n,
-        "upscale_samples": front.upscale,
+        "sample_rate": num("sample_rate")?,
+        "win_length": num("win_length")?,
+        "hop_length": num("hop_length")?,
+        "num_mel_bins": num("num_mels")?,
+        "lfr_m": num("lfr_m")?,
+        "lfr_n": num("lfr_n")?,
+        "upscale_samples": g.get("stt.frontend.upscale_samples").as_bool().unwrap_or(true),
     });
-    if let Some(cmvn) = front.cmvn {
+    if let Some(cmvn) = cmvn {
         value["cmvn"] = json!(cmvn);
     }
-    value
+    Ok(value)
 }
 
 /// Whether the file's front end is Whisper's mel (FFT of 400, hop of 160).
