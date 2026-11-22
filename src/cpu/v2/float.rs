@@ -159,8 +159,11 @@ pub fn matmul<E: Element>(x: &[f32], m: usize, k: usize, w: &[E], n: usize) -> B
 
 /// `matmul` into `out` (`m x n`), on the calling thread, for a task that
 /// is itself one of many parallel tasks.
-pub fn matmul_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &mut [f32]) {
+pub fn matmul_into<E: Element>(x: &[f32], m: usize, k: usize, w: &[E], n: usize, out: &mut [f32]) {
     assert!(x.len() >= m * k && w.len() >= n * k && out.len() >= m * n);
+    if m == 0 || n == 0 {
+        return;
+    }
     // SAFETY: the block covers `out` exactly; the level was detected from the CPU.
     unsafe {
         block(

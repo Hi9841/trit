@@ -315,6 +315,63 @@ pub fn matmul_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &mut
     };
 }
 
+/// `matmul_then` into `out` (`m x n`), on the calling thread, for a task that
+/// is itself one of many parallel tasks. Each value is the one `matmul_then`
+/// gives: a value's sum does not depend on the tile around it.
+#[allow(clippy::too_many_arguments)]
+pub fn matmul_into_then<W: Weight>(
+    x: &[f32],
+    m: usize,
+    k: usize,
+    w: &[W],
+    n: usize,
+    bias: Option<&[f32]>,
+    relu: bool,
+    out: &mut [f32],
+) {
+    let _product = crate::prof::product(W::PRODUCT, n, k, m);
+    assert!(
+        x.len() >= m * k
+            && w.len() >= n * k
+            && out.len() >= m * n
+            && bias.is_none_or(|b| b.len() >= n)
+    );
+    if m == 0 || n == 0 {
+        return;
+    }
+    if super::v2::float_enabled() {
+        super::v2::float::matmul_into(x, m, k, w, n, out);
+        if bias.is_some() || relu {
+            for row in out[..m * n].chunks_exact_mut(n) {
+                if let Some(bias) = bias {
+                    for (value, b) in row.iter_mut().zip(bias) {
+                        *value += b;
+                    }
+                }
+                if relu {
+                    row.iter_mut().for_each(|v| *v = v.max(0.0));
+                }
+            }
+        }
+        return;
+    }
+    // SAFETY: the block covers `out` exactly; the level was detected from the CPU.
+    unsafe {
+        block(
+            level(),
+            x,
+            k,
+            w,
+            n,
+            0..m,
+            0..n,
+            bias,
+            relu,
+            OutPtr(out.as_mut_ptr()),
+        )
+    };
+}
+
 /// `out[i][j] = sum_k x[i][k] * w[j][k]` where the weights come from
 /// `widen(cols, panel)`, which writes rows `cols` of `w` as f32 into a
 /// `cols.len() x k` panel. Each block widens its columns once, then runs

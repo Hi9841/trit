@@ -677,6 +677,10 @@ impl Subsampling {
     /// `features` is `frames x mels`; returns `(out_frames x hidden, out_frames)`.
     fn forward(&self, features: &[f32], frames: usize, mels: usize) -> (Buf, usize) {
         let ch = self.channels;
+        if self.pw1.can_forward_into() && self.pw2.can_forward_into() {
+            let (flat, h3) = self.fused_convs(features, frames, mels);
+            return (self.linear.forward(&flat, h3), h3);
+        }
         let (x, h2, w2) = self.first_two_convs(features, frames, mels);
         let x = self.pw1.forward_relu(&x, h2 * w2);
         let (x, h3, w3) = depthwise(&x, (h2, w2, ch), self.pad, &self.dw2);
@@ -694,6 +698,95 @@ impl Subsampling {
 }
 
 impl Subsampling {
+    /// Streams `conv0 -> dw1 -> pw1 -> dw2 -> pw2 -> transpose` in strips of
+    /// `h3` output rows with 3-row rolling rings per worker. Avoids two
+    /// `h2 * w2 * ch` buffers (98 MB for a 60 s window) and keeps `pw1`/`pw2`
+    /// working sets inside L2 cache on every CPU.
+    fn fused_convs(&self, features: &[f32], frames: usize, mels: usize) -> (Buf, usize) {
+        let (ch, pad) = (self.channels, self.pad);
+        let (h1, w1) = (out_len(frames, pad), out_len(mels, pad));
+        let (h2, w2) = (out_len(h1, pad), out_len(w1, pad));
+        let (h3, w3) = (out_len(h2, pad), out_len(w2, pad));
+        if h1 == 0 || h2 == 0 || h3 == 0 || w1 == 0 || w2 == 0 || w3 == 0 || ch == 0 {
+            return (Buf::scratch(0), 0);
+        }
+        let mut flat = Buf::scratch(h3 * ch * w3);
+        let threads = team::threads().max(1);
+        let target_strips = if team::is_heterogeneous() {
+            4 * threads
+        } else {
+            2 * threads
+        };
+        let strip_rows = h3.div_ceil(target_strips).clamp(1, MAX_FUSED_STRIP_ROWS);
+        team::chunks_mut(&mut flat, strip_rows * ch * w3, |strip, out_rows| {
+            let first_h3 = strip * strip_rows;
+            let count_h3 = out_rows.len() / (ch * w3);
+            let conv0_row_len = w1 * ch;
+            let dw1_row_len = w2 * ch;
+            let dw2_row_len = w3 * ch;
+            let need = 3 * conv0_row_len + 4 * dw1_row_len + 2 * dw2_row_len;
+            let mut scratch = CONV0.take();
+            if scratch.len() < need {
+                scratch.resize(need, 0.0);
+            }
+            let (conv0_ring, rest) = scratch.split_at_mut(3 * conv0_row_len);
+            let (dw1_row, rest) = rest.split_at_mut(dw1_row_len);
+            let (pw1_ring, rest) = rest.split_at_mut(3 * dw1_row_len);
+            let (dw2_row, rest) = rest.split_at_mut(dw2_row_len);
+            let pw2_row = &mut rest[..dw2_row_len];
+
+            let mut pw1_ready = (2 * first_h3).saturating_sub(pad);
+            let mut conv0_ready = (2 * pw1_ready).saturating_sub(pad);
+
+            for local_h3 in 0..count_h3 {
+                let oh3 = first_h3 + local_h3;
+                if let Some(last) = (2 * oh3 + 2).checked_sub(pad) {
+                    let last_h2 = last.min(h2 - 1);
+                    while pw1_ready <= last_h2 {
+                        let oh2 = pw1_ready;
+                        if let Some(last1) = (2 * oh2 + 2).checked_sub(pad) {
+                            let last_h1 = last1.min(h1 - 1);
+                            while conv0_ready <= last_h1 {
+                                let dst = &mut conv0_ring[(conv0_ready % 3) * conv0_row_len..]
+                                    [..conv0_row_len];
+                                conv0_row_simd(self, features, (frames, mels), conv0_ready, dst);
+                                conv0_ready += 1;
+                            }
+                        }
+                        depthwise_ring_row(
+                            conv0_ring,
+                            (h1, w1, ch, pad),
+                            &self.dw1.0,
+                            &self.dw1.1,
+                            oh2,
+                            dw1_row,
+                        );
+                        let pw1_dst = &mut pw1_ring[(oh2 % 3) * dw1_row_len..][..dw1_row_len];
+                        self.pw1.forward_relu_into(dw1_row, w2, pw1_dst);
+                        pw1_ready += 1;
+                    }
+                }
+                depthwise_ring_row(
+                    pw1_ring,
+                    (h2, w2, ch, pad),
+                    &self.dw2.0,
+                    &self.dw2.1,
+                    oh3,
+                    dw2_row,
+                );
+                self.pw2.forward_relu_into(dw2_row, w3, pw2_row);
+                let dst = &mut out_rows[local_h3 * ch * w3..][..ch * w3];
+                for w in 0..w3 {
+                    for c in 0..ch {
+                        dst[c * w3 + w] = pw2_row[w * ch + c];
+                    }
+                }
+            }
+            CONV0.set(scratch);
+        });
+        (flat, h3)
+    }
+
     /// conv0 (one input channel) and the first depthwise conv, in strips of
     /// output rows. The full conv0 output is 73 MB for a 22 s take; a strip
     /// only computes the conv0 rows it needs, so that buffer never exists.
@@ -798,6 +891,8 @@ thread_local! {
 
 /// Most output rows of the first depthwise conv in one parallel task.
 const MAX_STRIP_ROWS: usize = 8;
+/// Most output rows of the fused subsampling strip in one parallel task.
+const MAX_FUSED_STRIP_ROWS: usize = 16;
 
 /// `[channel][tap]` depthwise weights as `[tap][channel]`, so a tap is one contiguous row.
 fn tap_major((weight, bias): (Vec<f32>, Vec<f32>), ch: usize) -> (Vec<f32>, Vec<f32>) {
@@ -838,6 +933,50 @@ fn depthwise(
         depthwise_row(x, (h, w, ch, pad), weight, bias, oh, row);
     });
     (out, ho, wo)
+}
+
+multiversion! {
+    fn conv0_row_simd(
+        sub: &Subsampling,
+        features: &[f32],
+        frames_mels: (usize, usize),
+        h: usize,
+        row: &mut [f32],
+    ) {
+        sub.conv0_row(features, frames_mels.0, frames_mels.1, h, row);
+    }
+}
+
+multiversion! {
+    /// One output row `oh` of a 3x3 stride-2 depthwise conv from a 3-row ring
+    /// buffer `ring` indexed by `input_row % 3`.
+    fn depthwise_ring_row(
+        ring: &[f32],
+        shape: (usize, usize, usize, usize),
+        weight: &[f32],
+        bias: &[f32],
+        oh: usize,
+        row: &mut [f32],
+    ) {
+        let (h, w, ch, pad) = shape;
+        for (ow, cell) in row.chunks_exact_mut(ch).enumerate() {
+            cell.copy_from_slice(bias);
+            for i in 0..3 {
+                for j in 0..3 {
+                    let (ih, iw) = (2 * oh + i, 2 * ow + j);
+                    if ih < pad || iw < pad || ih - pad >= h || iw - pad >= w {
+                        continue;
+                    }
+                    let src_h = ih - pad;
+                    let input = &ring[((src_h % 3) * w + (iw - pad)) * ch..][..ch];
+                    let taps = &weight[(i * 3 + j) * ch..][..ch];
+                    for ((o, wt), v) in cell.iter_mut().zip(taps).zip(input) {
+                        *o += wt * v;
+                    }
+                }
+            }
+        }
+    }
 }
 
 multiversion! {

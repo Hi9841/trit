@@ -513,6 +513,32 @@ impl Dense {
         self.forward_then(x, rows, true)
     }
 
+    /// True when `forward_relu_into` can run on the calling thread without
+    /// launching parallel tasks (F32 or F16 CPU weights).
+    pub(crate) fn can_forward_into(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        if self.gpu.is_some() {
+            return false;
+        }
+        matches!(self.weight, Weights::F32(_) | Weights::F16(_))
+    }
+
+    /// `forward_relu` into `out` on the calling thread, for a task that is
+    /// itself one of many parallel tasks. Call only when `can_forward_into()`.
+    pub(crate) fn forward_relu_into(&self, x: &[f32], rows: usize, out: &mut [f32]) {
+        let n = self.out_features;
+        let bias = self.bias.as_deref();
+        match &self.weight {
+            Weights::F32(w) => {
+                fgemm::matmul_into_then(x, rows, self.in_features, w, n, bias, true, out);
+            }
+            Weights::F16(w) => {
+                fgemm::matmul_into_then(x, rows, self.in_features, w, n, bias, true, out);
+            }
+            _ => unreachable!("forward_relu_into called on non-float Dense"),
+        }
+    }
+
     fn forward_then(&self, x: &[f32], rows: usize, relu: bool) -> Buf {
         #[cfg(feature = "gpu")]
         if let Some(layer) = self.gpu.as_ref().filter(|_| rows >= crate::gpu::MIN_ROWS) {
