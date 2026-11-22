@@ -888,8 +888,13 @@ mod neon {
         let mut n_int = [vdupq_n_s32(0); 4];
         let mut n = [vdupq_n_f32(0.0); 4];
         let mut r = [vdupq_n_f32(0.0); 4];
+        let low = vdupq_n_f32(LOW);
+        let high = vdupq_n_f32(HIGH);
         for i in 0..4 {
-            x[i] = vminnmq_f32(vmaxnmq_f32(x[i], vdupq_n_f32(LOW)), vdupq_n_f32(HIGH));
+            // `x >= LOW` is false for both qNaN and sNaN (`vmaxnm` quiets sNaN to NaN,
+            // which `vminnm` would then clamp to `HIGH`). Matches x86 `maxps`/`minps`.
+            let lo = vbslq_f32(vcgeq_f32(x[i], low), x[i], low);
+            x[i] = vbslq_f32(vcleq_f32(lo, high), lo, high);
         }
         for i in 0..4 {
             n_int[i] = vcvtnq_s32_f32(vmulq_n_f32(x[i], LOG2E));
@@ -926,7 +931,10 @@ mod neon {
 
     #[inline(always)]
     unsafe fn exp(x: float32x4_t) -> float32x4_t {
-        let x = vminnmq_f32(vmaxnmq_f32(x, vdupq_n_f32(LOW)), vdupq_n_f32(HIGH));
+        let low = vdupq_n_f32(LOW);
+        let high = vdupq_n_f32(HIGH);
+        let lo = vbslq_f32(vcgeq_f32(x, low), x, low);
+        let x = vbslq_f32(vcleq_f32(lo, high), lo, high);
         let n_int = vcvtnq_s32_f32(vmulq_n_f32(x, LOG2E));
         let n = vcvtq_f32_s32(n_int);
         let r = vfmsq_n_f32(x, n, LN2_HI);

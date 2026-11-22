@@ -819,8 +819,18 @@ unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     assert!(src.len() == dst.len() && src.len().is_multiple_of(16));
     let p = src.as_ptr();
     let d = dst.as_mut_ptr();
-    let high = _mm512_set1_epi32(127);
-    let low = _mm512_set1_epi32(-127);
+    let f_high = _mm512_set1_ps(127.0);
+    let f_low = _mm512_set1_ps(-127.0);
+    // Clamp in float before conversion (+Inf -> 127, -Inf -> -127) and mask out
+    // unordered lanes (NaN -> 0) so every float matches `quantize_scalar` and NEON.
+    macro_rules! quant16 {
+        ($x:expr, $inv:expr) => {{
+            let v = _mm512_mul_ps($x, $inv);
+            let ord = _mm512_cmp_ps_mask::<_CMP_ORD_Q>(v, v);
+            let clamped = _mm512_min_ps(_mm512_max_ps(v, f_low), f_high);
+            _mm512_maskz_cvtps_epi32(ord, clamped)
+        }};
+    }
     if src.len() == 32 {
         // ggml Q8_0 block: keep both 16-lane vectors in registers so pass 2 never reloads.
         // Put the new value first in `max_ps(val, acc)` so x86 `vmaxps` keeps the finite
@@ -831,14 +841,8 @@ unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
         let vmax = _mm512_max_ps(_mm512_abs_ps(x1), vmax0);
         let scale = group_scale(_mm512_reduce_max_ps(vmax));
         let inv = _mm512_set1_ps(1.0 / scale);
-        let q0 = _mm512_max_epi32(
-            _mm512_min_epi32(_mm512_cvtps_epi32(_mm512_mul_ps(x0, inv)), high),
-            low,
-        );
-        let q1 = _mm512_max_epi32(
-            _mm512_min_epi32(_mm512_cvtps_epi32(_mm512_mul_ps(x1, inv)), high),
-            low,
-        );
+        let q0 = quant16!(x0, inv);
+        let q1 = quant16!(x1, inv);
         _mm_storeu_si128(d.cast(), _mm512_cvtepi32_epi8(q0));
         _mm_storeu_si128(d.add(16).cast(), _mm512_cvtepi32_epi8(q1));
         return (scale, _mm512_reduce_add_epi32(_mm512_add_epi32(q0, q1)));
@@ -859,33 +863,15 @@ unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     let mut vsum0 = _mm512_setzero_si512();
     let mut vsum1 = _mm512_setzero_si512();
     for i in 0..pairs {
-        let q0 = _mm512_max_epi32(
-            _mm512_min_epi32(
-                _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_loadu_ps(p.add(i * 32)), inv)),
-                high,
-            ),
-            low,
-        );
-        let q1 = _mm512_max_epi32(
-            _mm512_min_epi32(
-                _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_loadu_ps(p.add(i * 32 + 16)), inv)),
-                high,
-            ),
-            low,
-        );
+        let q0 = quant16!(_mm512_loadu_ps(p.add(i * 32)), inv);
+        let q1 = quant16!(_mm512_loadu_ps(p.add(i * 32 + 16)), inv);
         vsum0 = _mm512_add_epi32(vsum0, q0);
         vsum1 = _mm512_add_epi32(vsum1, q1);
         _mm_storeu_si128(d.add(i * 32).cast(), _mm512_cvtepi32_epi8(q0));
         _mm_storeu_si128(d.add(i * 32 + 16).cast(), _mm512_cvtepi32_epi8(q1));
     }
     if has_tail {
-        let q0 = _mm512_max_epi32(
-            _mm512_min_epi32(
-                _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_loadu_ps(p.add(pairs * 32)), inv)),
-                high,
-            ),
-            low,
-        );
+        let q0 = quant16!(_mm512_loadu_ps(p.add(pairs * 32)), inv);
         vsum0 = _mm512_add_epi32(vsum0, q0);
         _mm_storeu_si128(d.add(pairs * 32).cast(), _mm512_cvtepi32_epi8(q0));
     }
@@ -910,15 +896,17 @@ unsafe fn quantize_avx2(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     _mm256_storeu_ps(lanes.as_mut_ptr(), vmax);
     let scale = group_scale(lanes.iter().fold(0.0f32, |m, v| m.max(*v)));
     let inv = _mm256_set1_ps(1.0 / scale);
-    let limit = _mm256_set1_epi32(127);
-    let low = _mm256_set1_epi32(-127);
+    let f_high = _mm256_set1_ps(127.0);
+    let f_low = _mm256_set1_ps(-127.0);
     let order = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
     let mut vsum = _mm256_setzero_si256();
     for i in 0..src.len() / 32 {
         let mut q = [_mm256_setzero_si256(); 4];
         for (j, lane) in q.iter_mut().enumerate() {
             let v = _mm256_mul_ps(_mm256_loadu_ps(p.add(i * 32 + j * 8)), inv);
-            *lane = _mm256_max_epi32(_mm256_min_epi32(_mm256_cvtps_epi32(v), limit), low);
+            let ord = _mm256_cmp_ps::<_CMP_ORD_Q>(v, v);
+            let clamped = _mm256_min_ps(_mm256_max_ps(v, f_low), f_high);
+            *lane = _mm256_and_si256(_mm256_cvtps_epi32(clamped), _mm256_castps_si256(ord));
             vsum = _mm256_add_epi32(vsum, *lane);
         }
         let words = _mm256_packs_epi16(
@@ -944,9 +932,11 @@ unsafe fn quantize_neon(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     let p = src.as_ptr();
     let mut vmax = vdupq_n_f32(0.0);
     for i in 0..src.len() / 4 {
-        vmax = vmaxnmq_f32(vmax, vabsq_f32(vld1q_f32(p.add(i * 4))));
+        let abs = vabsq_f32(vld1q_f32(p.add(i * 4)));
+        // `abs > vmax` is false for both qNaN and sNaN (`vmaxnm` propagates sNaN).
+        vmax = vbslq_f32(vcgtq_f32(abs, vmax), abs, vmax);
     }
-    let scale = group_scale(vmaxnmvq_f32(vmax));
+    let scale = group_scale(vmaxvq_f32(vmax));
     let inv = vdupq_n_f32(1.0 / scale);
     let (limit, low) = (vdupq_n_s32(127), vdupq_n_s32(-127));
     let mut vsum = vdupq_n_s32(0);

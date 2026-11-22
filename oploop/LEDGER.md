@@ -3708,3 +3708,17 @@ each, `oploop/results/s1122/ab_v2_*.txt`):
   1.000 (p = 0.44, 56 errors), Whisper tiny `clean` 1.003 (p = 0.084, 231 errors), Moonshine
   tiny `clean` 0.995 (p = 0.67, 133 errors). Clippy (default and `trit/gpu`), fmt, `trit skill
   --check`, and `bench/paths.py` clean.
+- Follow-up verification (`gpt-6.2-sol` medium, including ARM64 QEMU probes and 5-target
+  Clippy) flagged three remaining edge cases, all fixed and verified with `FINAL.dll` vs
+  `FINAL_v3.dll` (Redux `clean,other` B/A 0.999 p = 0.086, 0/400 differ; Unified Q8_0 `clean`
+  B/A 1.001 p = 0.84, 0/200 differ):
+  - `src/cpu/kernels.rs`: float-clamped + ordered-masked conversion in `quantize_avx512` and
+    `quantize_avx2` (NaN encodes to 0, +Inf to 127, -Inf to -127, matching scalar and NEON);
+    `vbslq_f32(vcgtq_f32(abs, vmax), abs, vmax)` in `quantize_neon` so signaling NaNs never
+    erase finite peaks.
+  - `src/cpu/activation.rs`: `vbslq_f32` with `vcgeq_f32`/`vcleq_f32` in NEON `exp`/`exp4`
+    so both quiet and signaling NaNs clamp to `LOW` like x86 and scalar.
+  - `src/cpu/mod.rs`, `src/cpu/team.rs`: Windows multi-group `GetProcessGroupAffinity`
+    filtering + best-L3 `OneCache` sizing; Linux >64-CPU L3 domain selection + multi-word
+    `sched_setaffinity` pinning up to 1024 CPUs; Android `TRIT_THREADS` preserves speed-tier
+    heterogeneity detection.

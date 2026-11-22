@@ -126,10 +126,14 @@ struct CoreInfo {
     class: u64,
 }
 
-/// Physical cores and L3 cache domains `(mask, size_bytes)`.
+/// Physical cores and L3 cache domains `(mask, size_bytes)`. When CPUs span
+/// multiple Windows processor groups or Linux CPU ids >= 64, `wide_one_cache`
+/// carries the best single-L3 core count and its CPU list (for Linux multi-word
+/// pinning) so `Spread::OneCache` preserves L3 locality.
 struct Topology {
     cores: Vec<CoreInfo>,
     l3: Vec<(usize, u32)>,
+    wide_one_cache: Option<(usize, Vec<usize>)>,
 }
 
 /// Team size, pinning mask, equal L3 domains for steering, heterogeneity flag,
@@ -138,6 +142,8 @@ struct Topology {
 /// performance tiers on macOS (including Apple M5 Pro/Max Super + Performance).
 fn team_config(spread: Spread) -> team::Config {
     let layout = topology();
+    #[cfg(target_os = "android")]
+    let android_fast = fast_cores(std::path::Path::new("/sys/devices/system/cpu"));
     let core_cpus = layout
         .as_ref()
         .map(|t| physical_core_cpus(&t.cores))
@@ -148,6 +154,9 @@ fn team_config(spread: Spread) -> team::Config {
         .filter(|t| *t > 0)
     {
         let threads = threads.min(MAX_THREADS);
+        #[cfg(target_os = "android")]
+        let heterogeneous = threads > 1 && android_fast.is_some_and(|(_, _, h)| h);
+        #[cfg(not(target_os = "android"))]
         let heterogeneous = threads > 1
             && layout
                 .as_ref()
@@ -158,23 +167,23 @@ fn team_config(spread: Spread) -> team::Config {
             domains: Vec::new(),
             heterogeneous,
             core_cpus,
+            pin_cpus: Vec::new(),
         };
     }
     #[cfg(target_os = "android")]
-    if let Some((threads, mask, heterogeneous)) =
-        fast_cores(std::path::Path::new("/sys/devices/system/cpu"))
-    {
+    if let Some((threads, mask, heterogeneous)) = android_fast {
         return team::Config {
             threads,
             domain: mask,
             domains: Vec::new(),
             heterogeneous,
             core_cpus: Vec::new(),
+            pin_cpus: Vec::new(),
         };
     }
     let fallback = || {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-        (threads, 0usize)
+        (threads, 0usize, Vec::new())
     };
     // Not measured on a hybrid CPU yet, so `TRIT_FAST_CORES=1` turns it on:
     // with few fast cores, all the cores can be the faster team.
@@ -187,12 +196,21 @@ fn team_config(spread: Spread) -> team::Config {
                 domains: Vec::new(),
                 heterogeneous: false,
                 core_cpus,
+                pin_cpus: Vec::new(),
             };
         }
     }
-    let (threads, domain) = match (spread, layout.as_ref()) {
-        (Spread::OneCache, Some(t)) => pick_domain(&t.cores, &t.l3).unwrap_or_else(fallback),
-        (Spread::AllCores, Some(t)) if !t.cores.is_empty() => (t.cores.len(), 0),
+    let (threads, domain, pin_cpus) = match (spread, layout.as_ref()) {
+        (Spread::OneCache, Some(t)) => {
+            if let Some((n, cpus)) = &t.wide_one_cache {
+                (*n, 0, cpus.clone())
+            } else {
+                pick_domain(&t.cores, &t.l3)
+                    .map(|(n, d)| (n, d, Vec::new()))
+                    .unwrap_or_else(fallback)
+            }
+        }
+        (Spread::AllCores, Some(t)) if !t.cores.is_empty() => (t.cores.len(), 0, Vec::new()),
         _ => fallback(),
     };
     let threads = threads.clamp(1, MAX_THREADS);
@@ -214,6 +232,7 @@ fn team_config(spread: Spread) -> team::Config {
         domains,
         heterogeneous,
         core_cpus,
+        pin_cpus,
     }
 }
 
@@ -363,7 +382,6 @@ fn topology() -> Option<Topology> {
 
     let (core_buf, core_bytes) = query(RelationProcessorCore)?;
     let mut raw_cores = Vec::new();
-    let mut multi_group = false;
     let mut at = 0usize;
     while at < core_bytes {
         // SAFETY: the OS fills whole entries aligned to 8 bytes with `Processor` active.
@@ -378,9 +396,6 @@ fn topology() -> Option<Topology> {
             break;
         }
         let group = processor.GroupMask[0];
-        if processor.GroupCount != 1 || group.Group != 0 {
-            multi_group = true;
-        }
         raw_cores.push((
             group.Group,
             group.Mask,
@@ -392,30 +407,19 @@ fn topology() -> Option<Topology> {
         return None;
     }
 
-    if multi_group {
-        // Multi-group hosts (>64 logical CPUs): count every physical core and keep
-        // `mask = 0` so single-group 64-bit affinity masks are not applied.
-        let cores = raw_cores
-            .into_iter()
-            .map(|(_, _, class)| CoreInfo { mask: 0, class })
-            .collect();
-        return Some(Topology {
-            cores,
-            l3: Vec::new(),
-        });
+    // Query the processor groups this process is permitted to run on.
+    let allowed_groups = process_groups();
+    if let Some(groups) = &allowed_groups {
+        raw_cores.retain(|(group, _, _)| groups.contains(group));
+        if raw_cores.is_empty() {
+            return None;
+        }
     }
 
-    let allowed = allowed_mask();
-    let cores: Vec<CoreInfo> = raw_cores
-        .into_iter()
-        .filter(|(_, mask, _)| mask & allowed != 0)
-        .map(|(_, mask, class)| CoreInfo { mask, class })
-        .collect();
-    if cores.is_empty() {
-        return None;
-    }
+    let first_group = raw_cores[0].0;
+    let single_group = raw_cores.iter().all(|(g, _, _)| *g == first_group);
 
-    let mut l3 = Vec::new();
+    let mut raw_l3: Vec<(u16, usize, u32)> = Vec::new();
     if let Some((cache_buf, cache_bytes)) = query(RelationCache) {
         let mut at = 0usize;
         while at < cache_bytes {
@@ -431,19 +435,92 @@ fn topology() -> Option<Topology> {
                 break;
             }
             if cache.Level == 3 && cache.Type == CacheUnified {
-                // SAFETY: `GroupMask` is always valid for single-group cache entries.
+                // SAFETY: `GroupMask` is valid for single-group cache entries.
                 let group = unsafe { cache.Anonymous.GroupMask };
-                if group.Group == 0 {
-                    let masked = group.Mask & allowed;
-                    if masked != 0 && !l3.iter().any(|(m, _)| *m == masked) {
-                        l3.push((masked, cache.CacheSize));
-                    }
+                if allowed_groups
+                    .as_ref()
+                    .is_none_or(|groups| groups.contains(&group.Group))
+                {
+                    raw_l3.push((group.Group, group.Mask, cache.CacheSize));
                 }
             }
             at += size;
         }
     }
-    Some(Topology { cores, l3 })
+
+    if !single_group {
+        // Multi-group process (>64 logical CPUs): count only cores in allowed
+        // groups, disable single-group 64-bit pinning, and keep the best L3
+        // domain's core count so `Spread::OneCache` still avoids cross-CCD scaling.
+        let wide_one_cache = raw_l3
+            .iter()
+            .filter_map(|&(g, mask, size)| {
+                let n = raw_cores
+                    .iter()
+                    .filter(|(cg, cm, _)| *cg == g && (*cm & mask) != 0)
+                    .count();
+                (n > 0).then_some((n, size))
+            })
+            .max_by_key(|&(n, size)| (n, size))
+            .map(|(n, _)| (n, Vec::new()));
+        let cores = raw_cores
+            .into_iter()
+            .map(|(_, _, class)| CoreInfo { mask: 0, class })
+            .collect();
+        return Some(Topology {
+            cores,
+            l3: Vec::new(),
+            wide_one_cache,
+        });
+    }
+
+    let allowed = allowed_mask();
+    let cores: Vec<CoreInfo> = raw_cores
+        .into_iter()
+        .filter(|(_, mask, _)| mask & allowed != 0)
+        .map(|(_, mask, class)| CoreInfo { mask, class })
+        .collect();
+    if cores.is_empty() {
+        return None;
+    }
+
+    let mut l3 = Vec::new();
+    for (group, mask, size) in raw_l3 {
+        if group == first_group {
+            let masked = mask & allowed;
+            if masked != 0 && !l3.iter().any(|(m, _)| *m == masked) {
+                l3.push((masked, size));
+            }
+        }
+    }
+    Some(Topology {
+        cores,
+        l3,
+        wide_one_cache: None,
+    })
+}
+
+/// Windows: processor groups this process may run on (`GetProcessGroupAffinity`).
+#[cfg(windows)]
+fn process_groups() -> Option<Vec<u16>> {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessGroupAffinity};
+    let mut count = 0u16;
+    // SAFETY: first call reports required group count when buffer is null.
+    let _ =
+        unsafe { GetProcessGroupAffinity(GetCurrentProcess(), &mut count, std::ptr::null_mut()) };
+    if count == 0 {
+        return None;
+    }
+    let mut groups = vec![0u16; usize::from(count)];
+    // SAFETY: `groups` holds `count` elements as requested.
+    if unsafe { GetProcessGroupAffinity(GetCurrentProcess(), &mut count, groups.as_mut_ptr()) }
+        .ok()
+        .is_err()
+    {
+        return None;
+    }
+    groups.truncate(usize::from(count));
+    (!groups.is_empty()).then_some(groups)
 }
 
 #[cfg(target_os = "linux")]
@@ -487,7 +564,7 @@ fn sysfs_topology(root: &std::path::Path, allowed: Option<&[usize]>) -> Option<T
     let fits_mask = cpu_ids.iter().all(|&cpu| cpu < usize::BITS as usize);
     let mut seen_cores: Vec<Vec<usize>> = Vec::new();
     let mut cores = Vec::new();
-    let mut l3: Vec<(usize, u32)> = Vec::new();
+    let mut l3_lists: Vec<(Vec<usize>, u32)> = Vec::new();
     let capacity_source = cpu_ids
         .iter()
         .any(|&cpu| root.join(format!("cpu{cpu}/cpu_capacity")).exists());
@@ -517,29 +594,61 @@ fn sysfs_topology(root: &std::path::Path, allowed: Option<&[usize]>) -> Option<T
             seen_cores.push(siblings);
             cores.push(CoreInfo { mask, class });
         }
-        if fits_mask {
-            for index in 0..8 {
-                let cache = dir.join(format!("cache/index{index}"));
-                if read(cache.join("level")).as_deref().map(str::trim) != Some("3") {
-                    continue;
-                }
-                let Some(mut shared) =
-                    read(cache.join("shared_cpu_list")).and_then(|t| parse_cpu_list(&t))
-                else {
-                    continue;
-                };
-                shared.retain(|&c| is_allowed(c) && c < usize::BITS as usize);
-                let mask = shared.into_iter().fold(0usize, |m, c| m | (1usize << c));
-                let Some(size) = read(cache.join("size")).and_then(|t| cache_bytes(&t)) else {
-                    continue;
-                };
-                if mask != 0 && !l3.iter().any(|(m, _)| *m == mask) {
-                    l3.push((mask, size));
-                }
+        for index in 0..8 {
+            let cache = dir.join(format!("cache/index{index}"));
+            if read(cache.join("level")).as_deref().map(str::trim) != Some("3") {
+                continue;
+            }
+            let Some(mut shared) =
+                read(cache.join("shared_cpu_list")).and_then(|t| parse_cpu_list(&t))
+            else {
+                continue;
+            };
+            shared.retain(|&c| is_allowed(c));
+            shared.sort_unstable();
+            shared.dedup();
+            let Some(size) = read(cache.join("size")).and_then(|t| cache_bytes(&t)) else {
+                continue;
+            };
+            if !shared.is_empty() && !l3_lists.iter().any(|(list, _)| *list == shared) {
+                l3_lists.push((shared, size));
             }
         }
     }
-    (!cores.is_empty()).then_some(Topology { cores, l3 })
+    if cores.is_empty() {
+        return None;
+    }
+    if fits_mask {
+        let l3 = l3_lists
+            .into_iter()
+            .map(|(list, size)| {
+                let mask = list.into_iter().fold(0usize, |m, c| m | (1usize << c));
+                (mask, size)
+            })
+            .collect();
+        return Some(Topology {
+            cores,
+            l3,
+            wide_one_cache: None,
+        });
+    }
+    let multi_l3 = l3_lists.len() > 1;
+    let wide_one_cache = l3_lists
+        .into_iter()
+        .filter_map(|(list, size)| {
+            let n = seen_cores
+                .iter()
+                .filter(|sibs| sibs.iter().any(|c| list.binary_search(c).is_ok()))
+                .count();
+            (n > 0).then_some((n, size, list))
+        })
+        .max_by_key(|(n, size, _)| (*n, *size))
+        .map(|(n, _, list)| (n, if multi_l3 { list } else { Vec::new() }));
+    Some(Topology {
+        cores,
+        l3: Vec::new(),
+        wide_one_cache,
+    })
 }
 
 /// Parses a Linux sysfs CPU list such as `"0-3,8-11"` into CPU indices.
@@ -671,6 +780,7 @@ fn topology() -> Option<Topology> {
     Some(Topology {
         cores,
         l3: Vec::new(),
+        wide_one_cache: None,
     })
 }
 
