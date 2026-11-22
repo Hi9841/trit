@@ -185,6 +185,7 @@ impl Cleaner {
         crate::cpu::store::load(dir, cache, None, crate::release_memory, || {
             Self::load_now(dir, options)
         })
+        .map(|loaded| loaded.model)
     }
 
     fn load_now(dir: &Path, options: &crate::LoadOptions) -> Result<Self, String> {

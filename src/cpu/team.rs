@@ -42,11 +42,6 @@ const MOVE_AT_BUSY_GAP: f64 = 0.25;
 /// this much busier than the one it is on. Far from `MOVE_AT_BUSY_GAP`, so
 /// the two rules cannot take turns.
 const RETURN_AT_BUSY_GAP: f64 = 0.05;
-/// A team thread takes much less than this to start a task, even under load.
-/// A longer wait means that the workers do not exist: a forked child keeps
-/// only the thread that called `fork`.
-const ALL_THREADS_WAIT: Duration = Duration::from_secs(1);
-
 struct Job {
     run: *const (dyn Fn(usize) + Sync),
 }
@@ -70,6 +65,9 @@ struct Shared {
     done: AtomicUsize,
     panicked: AtomicBool,
     parked: AtomicUsize,
+    /// Bumped by `request_collect`; each worker calls `mi_collect(true)` on
+    /// its own thread when idle instead of blocking `submit` on a spin barrier.
+    collect_gen: AtomicU64,
     /// The generation when the last call ended (`Entered` stores it). A
     /// worker with no job after it parks at once: the 3 ms of spin after the
     /// last step of a call were 21 ms of CPU for each Parakeet call.
@@ -154,6 +152,7 @@ impl Team {
             done: AtomicUsize::new(0),
             panicked: AtomicBool::new(false),
             parked: AtomicUsize::new(0),
+            collect_gen: AtomicU64::new(0),
             // No generation has this value, so no worker rests before a call ends.
             rest: AtomicUsize::new(usize::MAX),
             active: AtomicUsize::new(threads),
@@ -398,21 +397,36 @@ fn work(s: &Shared, index: usize, domain: usize) {
     INSIDE.set(true);
     // A fixed start, so a worker that starts late still sees the first job.
     let mut seen = 0;
+    let mut seen_collect = 0u64;
     loop {
+        let wanted = s.collect_gen.load(Ordering::Acquire);
+        if wanted != seen_collect {
+            seen_collect = wanted;
+            // SAFETY: mi_collect only walks mimalloc's own free lists on this thread.
+            unsafe { libmimalloc_sys::mi_collect(true) };
+        }
         if index + 1 >= s.active.load(Ordering::Acquire) {
             let mut lock = s.lock.lock();
-            while index + 1 >= s.active.load(Ordering::Acquire) {
+            while index + 1 >= s.active.load(Ordering::Acquire)
+                && s.collect_gen.load(Ordering::SeqCst) == seen_collect
+            {
                 s.wake.wait(&mut lock);
             }
-            // `seen` stays old, so this worker joins the job that runs now:
-            // `on_every_thread` needs each thread in its job.
+            if index + 1 >= s.active.load(Ordering::Acquire) {
+                continue;
+            }
         }
         let mut idle_since = Instant::now();
         let mut spins = 0u32;
+        let mut has_job = false;
         loop {
             let generation = s.generation.load(Ordering::Acquire);
             if generation != seen {
                 seen = generation;
+                has_job = true;
+                break;
+            }
+            if s.collect_gen.load(Ordering::Acquire) != seen_collect {
                 break;
             }
             spins = spins.wrapping_add(1);
@@ -421,7 +435,9 @@ fn work(s: &Shared, index: usize, domain: usize) {
             {
                 let mut lock = s.lock.lock();
                 s.parked.fetch_add(1, Ordering::SeqCst);
-                while s.generation.load(Ordering::SeqCst) == seen {
+                while s.generation.load(Ordering::SeqCst) == seen
+                    && s.collect_gen.load(Ordering::SeqCst) == seen_collect
+                {
                     s.wake.wait(&mut lock);
                 }
                 s.parked.fetch_sub(1, Ordering::SeqCst);
@@ -435,9 +451,11 @@ fn work(s: &Shared, index: usize, domain: usize) {
                 std::hint::spin_loop();
             }
         }
-        // A late worker finds a later job or no task left: both are safe.
-        // Its panics are in `panicked` for the caller.
-        let _ = run_tasks(s);
+        if has_job {
+            // A late worker finds a later job or no task left: both are safe.
+            // Its panics are in `panicked` for the caller.
+            let _ = run_tasks(s);
+        }
     }
 }
 
@@ -1015,51 +1033,21 @@ pub(super) fn thread_mask() -> usize {
     process_mask()
 }
 
-/// Runs `run` once on every thread of every started team, the workers
-/// included: work that must happen on each thread, such as returning the
-/// memory a thread's allocator keeps. Each task waits until every thread of
-/// its team holds one, so no thread takes two. When the threads do not all
-/// come within `ALL_THREADS_WAIT`, `run` runs on the caller only, so it must
-/// be safe to repeat there.
-pub fn on_every_thread(run: impl Fn() + Sync) {
-    // Inside a task the team runs inline on this one thread, and the tasks
-    // below would wait for each other forever.
-    if INSIDE.get() {
-        run();
-        return;
-    }
+/// Asks the calling thread and every started team's workers to return freed
+/// mimalloc pages to the OS without acquiring `submit` or blocking on a spin
+/// barrier. Running workers collect when they next become idle; parked workers
+/// wake briefly, collect, and return to sleep.
+pub fn request_collect() {
+    // SAFETY: mi_collect only walks mimalloc's own free lists on this thread.
+    unsafe { libmimalloc_sys::mi_collect(true) };
     for team in TEAM.iter().filter_map(OnceLock::get) {
-        let threads = team.workers + 1;
-        // Every thread takes a task, also those that sit out.
-        let active = team.shared.active.load(Ordering::Acquire);
-        team.set_active(threads);
-        let started = AtomicUsize::new(0);
-        let gave_up = AtomicBool::new(false);
-        team.for_each(threads, &|_| {
-            started.fetch_add(1, Ordering::AcqRel);
-            let since = Instant::now();
-            while started.load(Ordering::Acquire) < threads {
-                if gave_up.load(Ordering::Relaxed) || since.elapsed() > ALL_THREADS_WAIT {
-                    gave_up.store(true, Ordering::Relaxed);
-                    return;
-                }
-                std::hint::spin_loop();
-            }
-            run();
-        });
-        // A caller that changed the count meanwhile keeps its own.
-        let _ = team.shared.active.compare_exchange(
-            threads,
-            active,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
-        if gave_up.load(Ordering::Relaxed) {
-            run();
-        }
-    }
-    if TEAM.iter().all(|team| team.get().is_none()) {
-        run();
+        let s = &*team.shared;
+        s.collect_gen.fetch_add(1, Ordering::SeqCst);
+        // Always notify under `s.lock` so both active parked workers and
+        // inactive sleeping workers wake, run `mi_collect(true)`, and return
+        // to sleep. `request_collect` is only called on idle or after load.
+        let _lock = s.lock.lock();
+        s.wake.notify_all();
     }
 }
 
@@ -1154,4 +1142,34 @@ pub fn map<T: Send>(tasks: usize, run: impl Fn(usize) -> T + Sync) -> Vec<T> {
         .into_iter()
         .map(|slot| slot.expect("every task ran"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_collect_does_not_block_parallel_jobs() {
+        let sum = Arc::new(AtomicUsize::new(0));
+        let start = Instant::now();
+        let collector = std::thread::spawn(|| {
+            for _ in 0..8 {
+                request_collect();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        for _ in 0..64 {
+            let sum = Arc::clone(&sum);
+            for_each(32, move |i| {
+                sum.fetch_add(i, Ordering::Relaxed);
+            });
+        }
+        collector.join().expect("collector thread finished");
+        assert_eq!(sum.load(Ordering::Relaxed), 64 * (31 * 32 / 2));
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "request_collect must not stall parallel jobs: {:?}",
+            start.elapsed()
+        );
+    }
 }

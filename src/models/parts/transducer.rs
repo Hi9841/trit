@@ -32,14 +32,31 @@ impl DecoderLayer {
             precision,
             Precision::F32 | Precision::Int8 | Precision::Q8_0
         ) {
+            let widened_tag = format!("dec_wide:{}:{out}x{inp}:{name}", precision.name());
+            if t.has(&format!("{name}.weight")) {
+                let bias = if t.has(&format!("{name}.bias")) {
+                    Some(t.f32_len(&format!("{name}.bias"), out)?)
+                } else {
+                    None
+                };
+                if let Some(layer) = Dense::load_f32_cached(&widened_tag, bias, out, inp) {
+                    return Ok(Self::Dense(layer));
+                }
+            }
             // Widened once: the joint runs one row per decoder step, and
             // widening its weights in each step cost 4 times the product.
             return Dense::load_cpu(t, &[(name, out)], inp)
-                .map(|layer| Self::Dense(layer.widened()));
+                .map(|layer| Self::Dense(layer.widened_named(Some(&widened_tag))));
+        }
+        let bias = t.f32_len(&format!("{name}.bias"), out)?;
+        let tag = format!("dec_f16:{out}x{inp}:{name}");
+        if t.has(&format!("{name}.weight")) {
+            if let Some(layer) = HalfDense::load_cached(&tag, Some(bias.clone()), out, inp) {
+                return Ok(Self::Half(layer));
+            }
         }
         let weight = t.f16_bits(&format!("{name}.weight"), out * inp)?;
-        let bias = t.f32_len(&format!("{name}.bias"), out)?;
-        HalfDense::new(weight, Some(bias), out, inp).map(Self::Half)
+        HalfDense::new_named(Some(&tag), weight, Some(bias), out, inp).map(Self::Half)
     }
 
     fn matvec(&self, x: &[f32]) -> Buf {
@@ -119,30 +136,63 @@ impl Transducer {
                     format!("decoder.lstm.weight_ih_l{l}"),
                     format!("decoder.lstm.weight_hh_l{l}"),
                 );
-                let gates = match t.precision_of(&ih) {
-                    Precision::Q8_0 => {
-                        let (w_ih, w_hh) = (t.q8_0(&ih, 4 * dh * dh)?, t.q8_0(&hh, 4 * dh * dh)?);
-                        let joined = Blocks::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
-                        DecoderLayer::Dense(Dense::q8_0(joined, None, 4 * dh, 2 * dh)?)
+                let precision = t.precision_of(&ih);
+                let lstm_tag = format!("lstm:{}:l{l}:{dh}", precision.name());
+                let cached = if t.has(&ih) && t.has(&hh) {
+                    match precision {
+                        Precision::Q8_0 | Precision::F32 | Precision::Int8 => {
+                            Dense::load_cached(&lstm_tag, None, 4 * dh, 2 * dh, precision)
+                                .map(DecoderLayer::Dense)
+                        }
+                        Precision::Auto | Precision::F16 => {
+                            HalfDense::load_cached(&lstm_tag, None, 4 * dh, 2 * dh)
+                                .map(DecoderLayer::Half)
+                        }
                     }
-                    precision @ (Precision::F32 | Precision::Int8) => {
-                        let (w_ih, w_hh) =
-                            (t.f32_len(&ih, 4 * dh * dh)?, t.f32_len(&hh, 4 * dh * dh)?);
-                        let joined = HalfDense::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
-                        DecoderLayer::Dense(Dense::with_precision(
-                            joined,
-                            None,
-                            4 * dh,
-                            2 * dh,
-                            precision,
-                        )?)
-                    }
-                    Precision::Auto | Precision::F16 => {
-                        let (w_ih, w_hh) =
-                            (t.f16_bits(&ih, 4 * dh * dh)?, t.f16_bits(&hh, 4 * dh * dh)?);
-                        let joined = HalfDense::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
-                        DecoderLayer::Half(HalfDense::new(joined, None, 4 * dh, 2 * dh)?)
-                    }
+                } else {
+                    None
+                };
+                let gates = match cached {
+                    Some(layer) => layer,
+                    None => match precision {
+                        Precision::Q8_0 => {
+                            let (w_ih, w_hh) =
+                                (t.q8_0(&ih, 4 * dh * dh)?, t.q8_0(&hh, 4 * dh * dh)?);
+                            let joined = Blocks::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
+                            DecoderLayer::Dense(Dense::q8_0_named(
+                                Some(&lstm_tag),
+                                joined,
+                                None,
+                                4 * dh,
+                                2 * dh,
+                            )?)
+                        }
+                        precision @ (Precision::F32 | Precision::Int8) => {
+                            let (w_ih, w_hh) =
+                                (t.f32_len(&ih, 4 * dh * dh)?, t.f32_len(&hh, 4 * dh * dh)?);
+                            let joined = HalfDense::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
+                            DecoderLayer::Dense(Dense::with_precision_named(
+                                Some(&lstm_tag),
+                                joined,
+                                None,
+                                4 * dh,
+                                2 * dh,
+                                precision,
+                            )?)
+                        }
+                        Precision::Auto | Precision::F16 => {
+                            let (w_ih, w_hh) =
+                                (t.f16_bits(&ih, 4 * dh * dh)?, t.f16_bits(&hh, 4 * dh * dh)?);
+                            let joined = HalfDense::side_by_side(&w_ih, &w_hh, 4 * dh, dh, dh);
+                            DecoderLayer::Half(HalfDense::new_named(
+                                Some(&lstm_tag),
+                                joined,
+                                None,
+                                4 * dh,
+                                2 * dh,
+                            )?)
+                        }
+                    },
                 };
                 Ok(Lstm {
                     gates,
@@ -153,12 +203,30 @@ impl Transducer {
         Ok(Self {
             encoder_projector: dense_host(t, "encoder_projector", dh, c.hidden)?,
             embedding: match t.precision_of("decoder.embedding.weight") {
-                Precision::Auto => Dense::new(
-                    t.f32_len("decoder.embedding.weight", c.vocab * dh)?,
-                    None,
-                    c.vocab,
-                    dh,
-                )?,
+                Precision::Auto => {
+                    let emb_tag = format!("emb_f32:{}x{dh}:decoder.embedding.weight", c.vocab);
+                    if t.has("decoder.embedding.weight") {
+                        if let Some(layer) = Dense::load_f32_cached(&emb_tag, None, c.vocab, dh) {
+                            layer
+                        } else {
+                            Dense::new_named(
+                                Some(&emb_tag),
+                                t.f32_len("decoder.embedding.weight", c.vocab * dh)?,
+                                None,
+                                c.vocab,
+                                dh,
+                            )?
+                        }
+                    } else {
+                        Dense::new_named(
+                            Some(&emb_tag),
+                            t.f32_len("decoder.embedding.weight", c.vocab * dh)?,
+                            None,
+                            c.vocab,
+                            dh,
+                        )?
+                    }
+                }
                 _ => Dense::table(t, "decoder.embedding.weight", c.vocab, dh)?,
             },
             lstm,

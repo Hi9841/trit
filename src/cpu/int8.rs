@@ -251,10 +251,50 @@ impl Int8 {
         }
     }
 
+    /// Maps a previously cached int8 layer directly from the active read cache
+    /// without reading or quantizing the source weights.
+    pub fn load_cached(
+        tag: &str,
+        n: usize,
+        k: usize,
+        group: usize,
+        half_scales: bool,
+    ) -> Option<Self> {
+        if super::v2::enabled() {
+            return None;
+        }
+        let choice = super::isa::isa_choice();
+        let (isa, path) = (choice.ternary, choice.int8);
+        let groups = k / group;
+        let weights = Store::<i8>::mapped(&format!("{tag}:w"), n * k)?;
+        let scales = Store::<f32>::mapped(&format!("{tag}:s"), n * groups)?;
+        Some(Self {
+            isa,
+            path,
+            n,
+            k,
+            group,
+            half_scales,
+            weights,
+            scales,
+            v2: None,
+        })
+    }
+
     /// ggml Q8_0 weights as stored: row-major `n x k` codes and one scale
     /// per block of `Q8_0_BLOCK` (the f16 scale widened to f32). The codes
     /// are packed for this CPU's kernel, not changed.
     pub fn from_q8_0(n: usize, k: usize, codes: &[i8], block_scales: &[f32]) -> Self {
+        Self::from_q8_0_named(None, n, k, codes, block_scales)
+    }
+
+    pub fn from_q8_0_named(
+        tag: Option<&str>,
+        n: usize,
+        k: usize,
+        codes: &[i8],
+        block_scales: &[f32],
+    ) -> Self {
         let choice = super::isa::isa_choice();
         let (isa, path) = (choice.ternary, choice.int8);
         if super::v2::enabled() {
@@ -276,6 +316,13 @@ impl Int8 {
                 weights[path.at(k, row, kk)] = code;
             }
         }
+        let (weights, scales) = match tag {
+            Some(tag) => (
+                Store::named(&format!("{tag}:w"), weights),
+                Store::named(&format!("{tag}:s"), scales),
+            ),
+            None => (Store::weights(weights), Store::weights(scales)),
+        };
         Self {
             isa,
             path,
@@ -283,14 +330,23 @@ impl Int8 {
             k,
             group: Q8_0_BLOCK,
             half_scales: true,
-            weights: Store::weights(weights),
-            scales: Store::weights(scales),
+            weights,
+            scales,
             v2: None,
         }
     }
 
     /// Quantizes row-major `n x k` weights; `row(r, out)` writes row `r` as f32.
     pub fn quantize(n: usize, k: usize, row: impl Fn(usize, &mut [f32]) + Sync) -> Self {
+        Self::quantize_named(None, n, k, row)
+    }
+
+    pub fn quantize_named(
+        tag: Option<&str>,
+        n: usize,
+        k: usize,
+        row: impl Fn(usize, &mut [f32]) + Sync,
+    ) -> Self {
         let choice = super::isa::isa_choice();
         let (isa, path) = (choice.ternary, choice.int8);
         if super::v2::enabled() {
@@ -356,6 +412,13 @@ impl Int8 {
                 }
             }
         });
+        let (weights, scales) = match tag {
+            Some(tag) => (
+                Store::named(&format!("{tag}:w"), weights),
+                Store::named(&format!("{tag}:s"), scales),
+            ),
+            None => (Store::weights(weights), Store::weights(scales)),
+        };
         Self {
             isa,
             path,
@@ -363,8 +426,8 @@ impl Int8 {
             k,
             group: GROUP,
             half_scales: false,
-            weights: Store::weights(weights),
-            scales: Store::weights(scales),
+            weights,
+            scales,
             v2: None,
         }
     }

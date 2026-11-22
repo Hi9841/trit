@@ -8,6 +8,24 @@ use super::int8::{Int8, Q8_0_BLOCK};
 use super::store::Store;
 use super::team;
 
+fn dense_tag(
+    parts: &[(&str, usize)],
+    out_features: usize,
+    in_features: usize,
+    precision: Precision,
+) -> String {
+    let mut tag = format!("dense:{}:{out_features}x{in_features}:", precision.name());
+    for (index, (name, rows)) in parts.iter().enumerate() {
+        if index > 0 {
+            tag.push('+');
+        }
+        tag.push_str(name);
+        tag.push(':');
+        tag.push_str(&rows.to_string());
+    }
+    tag
+}
+
 /// Output rows per task of the bias and ReLU pass.
 const EPILOGUE_ROWS: usize = 64;
 
@@ -115,7 +133,18 @@ impl Blocks {
 }
 
 impl Q8 {
-    fn quantize(weight: &[f32], n: usize, k: usize) -> Self {
+    fn load_cached(tag: &str, n: usize, k: usize) -> Option<Self> {
+        let groups = k.div_ceil(Q8_GROUP);
+        let values = Store::<i8>::mapped(&format!("{tag}:v"), n * k)?;
+        let scales = Store::<f32>::mapped(&format!("{tag}:s"), n * groups)?;
+        Some(Self {
+            values,
+            scales,
+            groups,
+        })
+    }
+
+    fn quantize_named(tag: Option<&str>, weight: &[f32], n: usize, k: usize) -> Self {
         let groups = k.div_ceil(Q8_GROUP);
         let mut values = vec![0i8; n * k];
         let mut scales = vec![0.0f32; n * groups];
@@ -144,9 +173,16 @@ impl Q8 {
                 }
             }
         });
+        let (values, scales) = match tag {
+            Some(tag) => (
+                Store::named(&format!("{tag}:v"), values),
+                Store::named(&format!("{tag}:s"), scales),
+            ),
+            None => (Store::weights(values), Store::weights(scales)),
+        };
         Self {
-            values: Store::weights(values),
-            scales: Store::weights(scales),
+            values,
+            scales,
             groups,
         }
     }
@@ -201,36 +237,55 @@ impl Dense {
         out_features: usize,
         in_features: usize,
     ) -> Result<Self, String> {
+        Self::new_named(None, weight, bias, out_features, in_features)
+    }
+
+    pub(crate) fn new_named(
+        tag: Option<&str>,
+        weight: Vec<f32>,
+        bias: Option<Vec<f32>>,
+        out_features: usize,
+        in_features: usize,
+    ) -> Result<Self, String> {
         let len = weight.len();
-        Self::checked(
-            Weights::F32(Store::weights(weight)),
-            len,
-            bias,
-            out_features,
-            in_features,
-        )
+        let store = match tag {
+            Some(tag) => Store::named(tag, weight),
+            None => Store::weights(weight),
+        };
+        Self::checked(Weights::F32(store), len, bias, out_features, in_features)
+    }
+
+    pub(crate) fn load_f32_cached(
+        tag: &str,
+        bias: Option<Vec<f32>>,
+        out_features: usize,
+        in_features: usize,
+    ) -> Option<Self> {
+        let len = out_features * in_features;
+        let weight = Store::<f32>::mapped(tag, len)?;
+        Self::checked(Weights::F32(weight), len, bias, out_features, in_features).ok()
     }
 
     /// A layer with f16 weights (as bits); half the memory of `new`.
-    pub fn half(
+    pub(crate) fn half_named(
+        tag: Option<&str>,
         weight: Vec<u16>,
         bias: Option<Vec<f32>>,
         out_features: usize,
         in_features: usize,
     ) -> Result<Self, String> {
         let len = weight.len();
-        Self::checked(
-            Weights::F16(Store::weights(weight)),
-            len,
-            bias,
-            out_features,
-            in_features,
-        )
+        let store = match tag {
+            Some(tag) => Store::named(tag, weight),
+            None => Store::weights(weight),
+        };
+        Self::checked(Weights::F16(store), len, bias, out_features, in_features)
     }
 
     /// A layer with ggml Q8_0 weights, as stored: int8 activations in groups
     /// of 32 where the int8 kernels take the shape, f32 math elsewhere.
-    pub fn q8_0(
+    pub(crate) fn q8_0_named(
+        tag: Option<&str>,
         blocks: Blocks,
         bias: Option<Vec<f32>>,
         out_features: usize,
@@ -238,20 +293,69 @@ impl Dense {
     ) -> Result<Self, String> {
         let len = blocks.codes.len();
         let weight = if Int8::fits_group(out_features, in_features, Q8_0_BLOCK) {
-            Weights::Int8(Int8::from_q8_0(
+            Weights::Int8(Int8::from_q8_0_named(
+                tag,
                 out_features,
                 in_features,
                 &blocks.codes,
                 &blocks.scales,
             ))
         } else {
+            let (values, scales) = match tag {
+                Some(tag) => (
+                    Store::named(&format!("{tag}:v"), blocks.codes),
+                    Store::named(&format!("{tag}:s"), blocks.scales),
+                ),
+                None => (Store::weights(blocks.codes), Store::weights(blocks.scales)),
+            };
             Weights::Q8(Q8 {
-                values: Store::weights(blocks.codes),
-                scales: Store::weights(blocks.scales),
+                values,
+                scales,
                 groups: in_features / Q8_GROUP,
             })
         };
         Self::checked(weight, len, bias, out_features, in_features)
+    }
+
+    pub(crate) fn load_cached(
+        tag: &str,
+        bias: Option<Vec<f32>>,
+        out_features: usize,
+        in_features: usize,
+        precision: Precision,
+    ) -> Option<Self> {
+        let len = out_features * in_features;
+        let weight = if precision == Precision::Q8_0 && in_features.is_multiple_of(Q8_0_BLOCK) {
+            if Int8::fits_group(out_features, in_features, Q8_0_BLOCK) {
+                Weights::Int8(Int8::load_cached(
+                    tag,
+                    out_features,
+                    in_features,
+                    Q8_0_BLOCK,
+                    true,
+                )?)
+            } else {
+                Weights::Q8(Q8::load_cached(tag, out_features, in_features)?)
+            }
+        } else {
+            let int8 = Self::int8(out_features, in_features, precision);
+            if !int8 && matches!(precision, Precision::Auto | Precision::F16) {
+                Weights::F16(Store::<u16>::mapped(tag, len)?)
+            } else if int8 {
+                Weights::Int8(Int8::load_cached(
+                    tag,
+                    out_features,
+                    in_features,
+                    super::kernels::GROUP,
+                    false,
+                )?)
+            } else if precision == Precision::Int8 {
+                Weights::Q8(Q8::load_cached(tag, out_features, in_features)?)
+            } else {
+                Weights::F32(Store::<f32>::mapped(tag, len)?)
+            }
+        };
+        Self::checked(weight, len, bias, out_features, in_features).ok()
     }
 
     /// A layer from the model file: `parts` are tensor names (without
@@ -296,6 +400,21 @@ impl Dense {
         let bias = any_bias.then_some(bias);
         let precision = t.precision_of(&format!("{}.weight", parts[0].0));
         let len = out_features * in_features;
+        let tag = dense_tag(parts, out_features, in_features, precision);
+        if parts
+            .iter()
+            .all(|(name, _)| t.has(&format!("{name}.weight")))
+        {
+            if let Some(layer) =
+                Self::load_cached(&tag, bias.clone(), out_features, in_features, precision)
+            {
+                return if gpu {
+                    layer.on_gpu(t.device())
+                } else {
+                    Ok(layer)
+                };
+            }
+        }
         if precision == Precision::Q8_0 && in_features.is_multiple_of(Q8_0_BLOCK) {
             let mut blocks = Blocks {
                 codes: Vec::with_capacity(len),
@@ -306,7 +425,7 @@ impl Dense {
                 blocks.codes.extend(part.codes);
                 blocks.scales.extend(part.scales);
             }
-            let layer = Self::q8_0(blocks, bias, out_features, in_features)?;
+            let layer = Self::q8_0_named(Some(&tag), blocks, bias, out_features, in_features)?;
             return if gpu {
                 layer.on_gpu(t.device())
             } else {
@@ -321,7 +440,7 @@ impl Dense {
             for (name, rows) in parts {
                 half.extend(t.f16_bits(&format!("{name}.weight"), rows * in_features)?);
             }
-            let layer = Self::half(half, bias, out_features, in_features)?;
+            let layer = Self::half_named(Some(&tag), half, bias, out_features, in_features)?;
             return if gpu {
                 layer.on_gpu(t.device())
             } else {
@@ -332,7 +451,14 @@ impl Dense {
         for (name, rows) in parts {
             weight.extend(t.f32_len(&format!("{name}.weight"), rows * in_features)?);
         }
-        let layer = Self::with_precision(weight, bias, out_features, in_features, precision)?;
+        let layer = Self::with_precision_named(
+            Some(&tag),
+            weight,
+            bias,
+            out_features,
+            in_features,
+            precision,
+        )?;
         if gpu {
             layer.on_gpu(t.device())
         } else {
@@ -352,7 +478,8 @@ impl Dense {
 
     /// f32 weights (`out x in`) stored as `precision` says, by the rules of
     /// `load`: for a layer that is not one tensor of the file.
-    pub fn with_precision(
+    pub(crate) fn with_precision_named(
+        tag: Option<&str>,
         weight: Vec<f32>,
         bias: Option<Vec<f32>>,
         out_features: usize,
@@ -361,7 +488,13 @@ impl Dense {
     ) -> Result<Self, String> {
         let len = weight.len();
         if precision == Precision::Q8_0 && in_features.is_multiple_of(Q8_0_BLOCK) {
-            return Self::q8_0(Blocks::quantize(&weight), bias, out_features, in_features);
+            return Self::q8_0_named(
+                tag,
+                Blocks::quantize(&weight),
+                bias,
+                out_features,
+                in_features,
+            );
         }
         let int8 = Self::int8(out_features, in_features, precision);
         if !int8 && matches!(precision, Precision::Auto | Precision::F16) {
@@ -369,17 +502,25 @@ impl Dense {
                 .iter()
                 .map(|v| super::tensors::f32_to_f16(*v))
                 .collect();
-            return Self::half(half, bias, out_features, in_features);
+            return Self::half_named(tag, half, bias, out_features, in_features);
         }
         let weight = if int8 {
-            Weights::Int8(Int8::quantize(out_features, in_features, |row, out| {
-                out.copy_from_slice(&weight[row * in_features..(row + 1) * in_features]);
-            }))
+            Weights::Int8(Int8::quantize_named(
+                tag,
+                out_features,
+                in_features,
+                |row, out| {
+                    out.copy_from_slice(&weight[row * in_features..(row + 1) * in_features]);
+                },
+            ))
         } else if precision == Precision::Int8 {
             // A shape the int8 kernels cannot take: int8 storage, f32 math.
-            Weights::Q8(Q8::quantize(&weight, out_features, in_features))
+            Weights::Q8(Q8::quantize_named(tag, &weight, out_features, in_features))
         } else {
-            Weights::F32(Store::weights(weight))
+            Weights::F32(match tag {
+                Some(tag) => Store::named(tag, weight),
+                None => Store::weights(weight),
+            })
         };
         Self::checked(weight, len, bias, out_features, in_features)
     }
@@ -395,22 +536,50 @@ impl Dense {
         cols: usize,
     ) -> Result<Self, String> {
         let len = rows * cols;
-        let weight = match t.precision_of(name) {
+        let precision = t.precision_of(name);
+        let tag = format!("table:{}:{rows}x{cols}:{name}", precision.name());
+        if t.has(name) {
+            let cached = match precision {
+                Precision::Q8_0 if cols.is_multiple_of(Q8_0_BLOCK) => {
+                    Q8::load_cached(&tag, rows, cols).map(Weights::Q8)
+                }
+                Precision::F32 => Store::<f32>::mapped(&tag, len).map(Weights::F32),
+                Precision::Int8 => Q8::load_cached(&tag, rows, cols).map(Weights::Q8),
+                Precision::Auto if cols >= INT8_TABLE_WIDTH => {
+                    Q8::load_cached(&tag, rows, cols).map(Weights::Q8)
+                }
+                Precision::Auto | Precision::F16 | Precision::Q8_0 => {
+                    Store::<u16>::mapped(&tag, len).map(Weights::F16)
+                }
+            };
+            if let Some(weight) = cached {
+                return Self::checked(weight, len, None, rows, cols);
+            }
+        }
+        let weight = match precision {
             Precision::Q8_0 if cols.is_multiple_of(Q8_0_BLOCK) => {
                 let blocks = t.q8_0(name, len)?;
                 Weights::Q8(Q8 {
-                    values: Store::weights(blocks.codes),
-                    scales: Store::weights(blocks.scales),
+                    values: Store::named(&format!("{tag}:v"), blocks.codes),
+                    scales: Store::named(&format!("{tag}:s"), blocks.scales),
                     groups: cols / Q8_GROUP,
                 })
             }
-            Precision::F32 => Weights::F32(Store::weights(t.f32_len(name, len)?)),
-            Precision::Int8 => Weights::Q8(Q8::quantize(&t.f32_len(name, len)?, rows, cols)),
-            Precision::Auto if cols >= INT8_TABLE_WIDTH => {
-                Weights::Q8(Q8::quantize(&t.f32_len(name, len)?, rows, cols))
-            }
+            Precision::F32 => Weights::F32(Store::named(&tag, t.f32_len(name, len)?)),
+            Precision::Int8 => Weights::Q8(Q8::quantize_named(
+                Some(&tag),
+                &t.f32_len(name, len)?,
+                rows,
+                cols,
+            )),
+            Precision::Auto if cols >= INT8_TABLE_WIDTH => Weights::Q8(Q8::quantize_named(
+                Some(&tag),
+                &t.f32_len(name, len)?,
+                rows,
+                cols,
+            )),
             Precision::Auto | Precision::F16 | Precision::Q8_0 => {
-                Weights::F16(Store::weights(t.f16_bits(name, len)?))
+                Weights::F16(Store::named(&tag, t.f16_bits(name, len)?))
             }
         };
         Self::checked(weight, len, None, rows, cols)
@@ -496,10 +665,13 @@ impl Dense {
     /// same values. For a small layer that runs one row at a time (the
     /// transducer's joint), where widening its weights costs more than the
     /// product. Other weights stay as they are.
-    pub(crate) fn widened(mut self) -> Self {
+    pub(crate) fn widened_named(mut self, tag: Option<&str>) -> Self {
         if let Weights::Q8(weight) = &self.weight {
             let values = weight.to_f32(self.out_features, self.in_features);
-            self.weight = Weights::F32(Store::weights(values));
+            self.weight = Weights::F32(match tag {
+                Some(tag) => Store::named(tag, values),
+                None => Store::weights(values),
+            });
         }
         self
     }

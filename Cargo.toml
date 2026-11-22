@@ -1,6 +1,6 @@
 [package]
 name = "trit"
-version = "0.16.0"
+version = "0.16.1"
 edition = "2021"
 description = "Speech to text and text to speech on the CPU: Parakeet, Whisper, Canary, Moonshine, Kokoro, and MMS-TTS, with no Python and no inference library"
 license = "AGPL-3.0-only"
@@ -43,6 +43,7 @@ windows = { version = "0.62", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }

@@ -135,9 +135,12 @@ impl Parakeet {
     /// Tokens of one window and the encoder frame of each. A cancelled
     /// call has none.
     fn decode_window(&self, samples: &[f32], options: &Options) -> (Vec<usize>, Vec<usize>) {
+        if options.cancelled() {
+            return (Vec::new(), Vec::new());
+        }
         let cancel = options.cancel.as_ref();
         let (features, frames) = self.frontend.compute(samples);
-        if frames < model::MIN_FRAMES {
+        if frames < model::MIN_FRAMES || options.cancelled() {
             return (Vec::new(), Vec::new());
         }
         // Redux's speech head: no speech, no text.
