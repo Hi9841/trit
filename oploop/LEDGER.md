@@ -3723,3 +3723,125 @@ each, `oploop/results/s1122/ab_v2_*.txt`):
     selection + 16-word `sched_getaffinity`/`sched_setaffinity` pinning up to 1024 CPUs
     (both `set_affinity` and `set_affinity_cpus`); Android `TRIT_THREADS` checks speed-tier
     heterogeneity across all CPUs when unpinned.
+  - Follow-up fixes (`81c779b`, `0686d8e`): preserve host multi-group affinity on Windows
+    by pinning worker threads only, reject mixed-group masks with `TRIT_FAST_CORES=1`,
+    and save/restore the full 16-word Linux/Android CPU mask on `team::enter`. Verified
+    PASS by `gpt-6.2-sol` (medium) across all five targets.
+
+### Pass 2: Subsampling buffer/bandwidth fusion, Whisper prompt fusion, and zero-copy beam logits (`0686d8e..b08b70e`)
+
+Baseline for this pass: `oploop/results/s1122/B0_0686d8e.dll` (`0686d8e`). Note: a background
+foreground game was active on this host during parts of Pass 2, so every candidate was verified
+in both forward (`A vs B`) and reversed (`B vs A`) A/B orders plus interleaved `kernel_bench`
+probes.
+
+#### SI-061a `Buf::scratch` / `Buf::zeroed` `alloc_zeroed` (`vec![0.0; stepped(len)]`)
+
+- Hypothesis: replacing `Vec::with_capacity(stepped(len))` + `resize(len, 0.0)` with
+  `vec![0.0; stepped(len)]` avoids single-threaded zeroing of fresh OS segments.
+- Result (`B0_0686d8e.dll` vs `B_si061a.dll`, 3 rounds each):
+  - Redux `long-clean,long-other`: fwd B/A `0.980` (`p = 6.6e-5`), rev `1.016` (`p = 0.011`).
+  - Whisper tiny `clean`: fwd B/A `1.012` (`p = 2.6e-6`), rev `0.941` (`p = 2.2e-31`;
+    `SI-061a` +5.9 % slower, wall `8.51 -> 9.02 s`, CPU `134.1 -> 142.9 s`).
+  - Moonshine tiny `clean`: B/A `1.001` (`p = 0.42`).
+  - Root cause: untouched Windows demand-zero pages faulted concurrently across 16 Whisper
+    threads contend on the kernel working-set lock, matching `src/cpu/buf.rs:2-3`.
+- Decision: REVERT.
+
+#### SI-061b Fused streaming FastConformer 2D subsampling (`src/models/parts/fastconformer.rs`, `src/cpu/fgemm.rs`, `src/cpu/gemm.rs`, `src/cpu/v2/float.rs`)
+
+- Profile: `prof_K8_redux_long.txt` / `prof_K8_unified_long.txt` showed 102 allocations of
+  38 to 49 MB (`3,880 MB`), `268 to 312 ms` in `BufFill`, and `402 to 412 ms` in `pw1`
+  (`f32 256 x 256`, 49 to 53 % of floor) from two simultaneous `h2 * w2 * ch` (49.2 MB)
+  buffers plus `dw2`/`pw2` (12.3 MB each).
+- Hypothesis: stream `conv0 -> dw1 -> pw1 -> dw2 -> pw2 -> transpose` in strips of `h3`
+  output rows (`MAX_FUSED_STRIP_ROWS = 16`, `4 * threads` target strips on heterogeneous
+  teams and `2 * threads` on homogeneous teams) using 3-row rolling rings (~360 KB per
+  worker, L2-resident on every CPU) when `pw1` and `pw2` are CPU `F32`/`F16` (`Dense::can_forward_into`,
+  `fgemm::matmul_into_then`). Eliminates both 49.2 MB buffers and both 12.3 MB intermediates.
+- Result (`B0_0686d8e.dll` vs `B_si061b.dll`, 3 rounds each, 0 differing texts everywhere):
+  - Redux `long-clean,long-other` (80 clips, 187 / 479 errors):
+    fwd per-clip B/A `0.972` (`p = 2.2e-7`), wall `0.961`, CPU `0.962`, mem `1652/793 -> 1592/692 MB`;
+    rev per-clip B/A `1.054` (`SI-061b / B0 = 0.949`, `p = 5.8e-8`), wall `1.055`, mem `1574/694 vs 1657/796 MB` (-101 MB peak WS).
+  - Parakeet Unified Q8_0 `long-clean` (40 clips, 120 errors):
+    fwd per-clip B/A `0.981` (`p = 0.0044`), wall `0.969`, CPU `0.971`, mem `2046/1323 -> 2035/1214 MB` (-109 MB peak WS).
+  - Redux `clean` (200 clips, 81 errors): neutral (`1.007`, `p = 0.31`, wall `0.994`), mem `1500/647 -> 1485/580 MB` (-67 MB peak WS).
+- Decision: KEEP (commit `0b60a5e`).
+
+#### SI-062a Cap `fgemm::block_counts` column tasks to `2 * threads` (`4 * threads` heterogeneous)
+
+- Hypothesis: reducing 786 (`51865 / 66`) and 497 (`32768 / 66`) tasks to `2 * threads`
+  with `COL_BLOCK`-chunked panel widening cuts atomic claim traffic on `s.claim`.
+- Result (`kernel_bench f162` interleaved against unmodified `v2::float` with `COLS = 63`):
+  - `51865x384 m=5` (`all`): `v2/fgemm` least `0.910`, median `0.890` (coarse tasks 10 to 12 % slower).
+  - `32768x288 m=5` (`one`): `v2/fgemm` least `1.049`, median `0.725` (27 % slower median).
+  - `51865x512 m=5` (`all`): `v2/fgemm` least `0.874`, median `0.891`.
+  - Root cause: coarse tasks amplify stragglers under OS load and dual-CCD cache asymmetry.
+- Decision: REVERT.
+
+#### SI-062b Wider AVX-512 `f16` tiles (`5x4`, `4x4`, `1x8`) + 4-way SIMD reduction (`reduce4`) + `COL_BLOCK = 72`
+
+- Hypothesis: wider `C = 4` tiles for `r = 4, 5` and `1x8` for `r = 1` with bit-exact 4-way
+  transpose reduction reduce `x` reloads and reduction instructions on non-power-of-two `k`.
+- Result (`kernel_bench f162`, 0 differing bits):
+  - `5x4` (`5 + 4 = 9` streams): `v2/fgemm` `0.780 to 0.852` (15 to 22 % slower on `51865x384`,
+    `32768x288`, `51865x512`, `2304x288`, `1152x288`) — exceeds 8-way L1D streams.
+  - `1x8` (`m = 1`): `1.015 to 1.025` on `51865x384/512`, `0.976` on `32768x288` (bandwidth bound).
+- Decision: REVERT.
+
+#### SI-063 Whisper fused SOT + prompt decoder batch (`src/models/families/whisper/{model,mod}.rs`)
+
+- Profile: `prof_K8_whisper_clean.txt` showed 402 calls of `f16 51865 x 384 rows 1` (`151.7 ms`,
+  4 % of floor) plus separate `m = 1` and `m = 3` prompt cross-attention (`311.9 ms` thread time)
+  and `int8` decoder calls (`52.3 ms`) because `step(sot)` and `feed(prompt)` ran separately.
+- Hypothesis: when no dictionary prompt is active and the language is already fixed (or English-only),
+  run `[sot, (lang, task), no_timestamps]` in one causal decoder batch (`feed_first_and_last`)
+  and project both `sot` (for `no_speech`) and the final prompt row in one `m = 2` call to
+  `embed.forward`, reading the 38+ MB token table once instead of twice.
+- Result (`B1_si061b.dll` vs `B_si063.dll`, 3 rounds each, 0 differing texts everywhere):
+  - Whisper tiny `clean` (200 clips, 231 errors):
+    fwd per-clip B/A `0.981` (`p = 6.9e-11`), wall `0.984`;
+    rev per-clip B/A `1.019` (`SI-063 / B1 = 0.981`, `p = 1.6e-14`), wall `1.021`.
+  - Whisper tiny `other` (200 clips, 487 errors):
+    fwd per-clip B/A `0.986` (`p = 3.5e-7`).
+- Decision: KEEP (commit `a2e7009`).
+
+#### SI-064 Zero-copy contiguous `beam::search` logits (`src/models/parts/beam.rs`, `whisper/model.rs`, `moonshine.rs`, `canary.rs`)
+
+- Hypothesis: `Whisper::step_beams` and `Moonshine::step_beams` allocate a `beams x vocab` buffer
+  (`1.04 MB` / `655 KB`), then copy each row into 5 separate `Buf::scratch(vocab)` buffers on one
+  thread (`5.5 GB` memcpy in Whisper `clean`, `3.7 GB` in Moonshine `clean`). Returning the single
+  contiguous `Buf` directly to `beam::search`, scoring disjoint rows via `SendPtr`, and dropping
+  the buffer before calling `step` eliminates all copies and reuses one L3-warm buffer in place.
+- Result (`B2_si063.dll` vs `B_si064.dll`, 3 rounds each, 0 differing texts everywhere):
+  - Whisper tiny `clean` (200 clips, 231 errors):
+    fwd per-clip B/A `0.964` (`p = 3.2e-24`), wall `0.959`, CPU `0.944`;
+    rev per-clip B/A `1.034` (`SI-064 / B2 = 0.967`, `p = 1.1e-20`), wall `1.041`, CPU `1.042`.
+  - Moonshine tiny `clean` (200 clips, 133 errors):
+    fwd per-clip B/A `0.985` (`p = 2.1e-5`), wall `0.988`;
+    rev per-clip B/A `1.017` (`SI-064 / B2 = 0.983`, `p = 0.00014`), wall `1.023`, CPU `1.042`.
+- Decision: KEEP (commit `b08b70e`).
+
+#### SI-065 4-way SIMD horizontal reduction (`reduce4`) inside `fgemm::avx512::tile` (`5x3` / `4x3`)
+
+- Hypothesis: replacing 12 scalar `_mm512_reduce_add_ps` reductions on rows `0..4` with 3 `reduce4`
+  calls shrinks epilogue overhead for short `k` (`288`, `384`).
+- Result (`kernel_bench f162` / `f322`, 0 differing bits): `v2/fgemm` `0.78 to 0.83` (about 20 %
+  slower on `51865x384`, `32768x288`, `2304x288`, `1152x288`, `685x128`) due to stack/register
+  spills in the non-inlined `#[target_feature]` reduction helper.
+- Decision: REVERT.
+
+#### Pass 2 cumulative A/B (`B0_0686d8e.dll` vs `FINAL_v4.dll` at `b08b70e`, 3 kept commits, 4 reverted)
+
+| Journey | Per-clip B/A (fwd / rev) | Round wall B/A | Peak WS (A -> B) | Errors (A / B) | Texts differing |
+|---|---:|---:|---:|---:|---:|
+| Parakeet Redux `long-clean,long-other` (80) | 0.972 / 0.949 | 0.961 / 0.948 | 793 -> 692 MB | 187, 479 / 187, 479 | 0 / 80 |
+| Parakeet Redux `clean,other` (400, 1 rd) | 0.963 | 0.939 | 664 -> 586 MB | 81, 172 / 81, 172 | 0 / 400 |
+| Parakeet Unified Q8_0 `long-clean` (40) | 0.981 | 0.969 | 1323 -> 1214 MB | 120 / 120 | 0 / 40 |
+| Whisper tiny `clean` (200) | 0.912 / 0.954 | 0.879 / 0.947 | 254 -> 246 MB | 231 / 231 | 0 / 200 |
+| Moonshine tiny `clean` (200) | 0.981 / 0.966 | 0.972 / 0.957 | 245 -> 247 MB | 133 / 133 | 0 / 200 |
+
+Gates verified at `b08b70e`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --release -- -D warnings`
+(default and `--features trit/gpu`), `trit doctor`, `trit skill --check skill/SKILL.md --check-docs docs/reference.md --check-catalog site/catalog.json`,
+`bench/paths.py` (Redux, Unified Q8_0, Moonshine tiny, Whisper tiny), `TRIT_KERNELS=v2` parity across all four models,
+Whisper auto-language and `--dictionary` parity, and Parakeet Redux `f16`/`int8`/`f32` precision parity.
