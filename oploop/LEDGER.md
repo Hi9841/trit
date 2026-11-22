@@ -3756,9 +3756,8 @@ probes.
   buffers plus `dw2`/`pw2` (12.3 MB each).
 - Hypothesis: stream `conv0 -> dw1 -> pw1 -> dw2 -> pw2 -> transpose` in strips of `h3`
   output rows (`MAX_FUSED_STRIP_ROWS = 16`, `4 * threads` target strips on heterogeneous
-  teams and `2 * threads` on homogeneous teams) using 3-row rolling rings (~352 KiB per
-  worker at 128 mels and 256 channels, fitting in private L2 on desktop, laptop, and big
-  mobile cores and in shared L3 on smaller efficiency cores such as Cortex-A55) when `pw1`
+  teams and `2 * threads` on homogeneous teams) using 3-row rolling rings (`352 KiB` per
+  worker at `pad = 1` and `361 KiB` at `pad = 2` for 128 mels and 256 channels) when `pw1`
   and `pw2` are CPU `F32`/`F16` (`Dense::can_forward_into`, `fgemm::matmul_into_then`).
   Eliminates both 49.2 MB buffers and both 12.3 MB intermediates. Runtime measurements
   below were taken on the Ryzen 9 7950X3D host.
@@ -3834,17 +3833,44 @@ probes.
   spills in the non-inlined `#[target_feature]` reduction helper.
 - Decision: REVERT.
 
-#### Pass 2 cumulative A/B (`B0_0686d8e.dll` vs `FINAL_v4.dll` at `b08b70e`, 3 kept commits, 4 reverted)
+#### Pass 2 review fixes (`aa66299`)
+
+- Independent review (`gpt-6.2-sol` medium) verified all code paths and flagged zero-channel
+  frame-count parity in `Subsampling::fused_convs`, `out_len(0, 1)` underflow, and cache-size
+  wording. Fixed by returning `(Buf::scratch(0), h3)` when `h3 > 0` and width or channels are
+  zero, rejecting `sub_channels == 0` for `Conv2d` in `Config::parse`, guarding `out_len` with
+  `saturating_add` and `padded < 2 => 0`, and stating exact per-worker ring sizes (`352 KiB`
+  at `pad = 1`, `361 KiB` at `pad = 2` for 128 mels and 256 channels).
+
+#### Pass 2 cumulative A/B (`B0_0686d8e.dll` vs `FINAL_v4.dll` at `b08b70e`, Ryzen 9 7950X3D)
+
+Only journeys run directly on `FINAL_v4.dll` (note: Parakeet long-clip numbers for `0b60a5e`
+appear under SI-061b above, and all journeys were re-run on `FINAL_v5.dll` below):
 
 | Journey | Per-clip B/A (fwd / rev) | Round wall B/A | Peak WS (A -> B) | Errors (A / B) | Texts differing |
 |---|---:|---:|---:|---:|---:|
-| Parakeet Redux `long-clean,long-other` (80) | 0.972 / 0.949 | 0.961 / 0.948 | 793 -> 692 MB | 187, 479 / 187, 479 | 0 / 80 |
 | Parakeet Redux `clean,other` (400, 1 rd) | 0.963 | 0.939 | 664 -> 586 MB | 81, 172 / 81, 172 | 0 / 400 |
-| Parakeet Unified Q8_0 `long-clean` (40) | 0.981 | 0.969 | 1323 -> 1214 MB | 120 / 120 | 0 / 40 |
-| Whisper tiny `clean` (200) | 0.912 / 0.954 | 0.879 / 0.947 | 254 -> 246 MB | 231 / 231 | 0 / 200 |
-| Moonshine tiny `clean` (200) | 0.981 / 0.966 | 0.972 / 0.957 | 245 -> 247 MB | 133 / 133 | 0 / 200 |
+| Whisper tiny `clean` (200, 3 rds) | 0.912 / 0.954 | 0.879 / 0.947 | 254 -> 246 MB | 231 / 231 | 0 / 200 |
+| Whisper tiny `other` (200, 3 rds, fwd only) | 1.014 | 1.041 | 231 -> 233 MB | 487 / 487 | 0 / 200 |
+| Moonshine tiny `clean` (200, 3 rds) | 0.981 / 0.966 | 0.972 / 0.957 | 245 -> 247 MB | 133 / 133 | 0 / 200 |
+| Moonshine tiny `other` (200, 1 rd, fwd only) | 0.991 | 1.000 | 236 -> 236 MB | 374 / 374 | 0 / 200 |
 
-Gates verified at `b08b70e`: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --release -- -D warnings`
-(default and `--features trit/gpu`), `trit doctor`, `trit skill --check skill/SKILL.md --check-docs docs/reference.md --check-catalog site/catalog.json`,
+#### Pass 2 cumulative A/B (`B0_0686d8e.dll` vs `FINAL_v5.dll` at `aa66299`+, Ryzen 9 7950X3D)
+
+All rows below were measured directly on `B0_0686d8e.dll` vs `FINAL_v5.dll` (3 rounds each;
+note an active foreground game remained running on this host during these runs, causing
+round-to-round variance especially on 16-thread Whisper):
+
+| Journey | Per-clip B/A fwd (p) | Per-clip B/A rev -> B/A (p) | Round wall B/A (fwd / rev) | Peak WS (A -> B) | Errors (A / B) | Texts differing |
+|---|---:|---:|---:|---:|---:|---:|
+| Parakeet Redux `long-clean,long-other` (80) | 0.990 (0.19) | 1.019 -> 0.981 (6.5e-11) | 1.008 / 0.982 | 803 -> 696 MB | 187, 479 / 187, 479 | 0 / 80 |
+| Parakeet Unified Q8_0 `long-clean` (40) | 0.978 (5.8e-6) | n/a | 0.951 | 1328 -> 1231 MB | 120 / 120 | 0 / 40 |
+| Whisper tiny `clean` (200) | 1.023 (4.1e-8) | 1.020 -> 0.980 (7.6e-7) | 1.031 / 0.986 | 248 -> 253 MB | 231 / 231 | 0 / 200 |
+| Whisper tiny `other` (200) | 0.953 (1.9e-31) | 1.045 -> 0.957 (3.4e-29) | 0.953 / 0.962 | 236 -> 233 MB | 487 / 487 | 0 / 200 |
+| Moonshine tiny `clean` (200) | 0.999 (0.14) | 1.020 -> 0.980 (3.4e-11) | 1.026 / 0.979 | 239 -> 247 MB | 133 / 133 | 0 / 200 |
+
+Gates verified: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --release -- -D warnings`
+(default and `--features trit/gpu`), cross-target Clippy on ARM64 Linux, ARM64/x64 Android, and
+ARM64/x64 macOS, `trit doctor`, `trit skill --check skill/SKILL.md --check-docs docs/reference.md --check-catalog site/catalog.json`,
 `bench/paths.py` (Redux, Unified Q8_0, Moonshine tiny, Whisper tiny), `TRIT_KERNELS=v2` parity across all four models,
 Whisper auto-language and `--dictionary` parity, and Parakeet Redux `f16`/`int8`/`f32` precision parity.

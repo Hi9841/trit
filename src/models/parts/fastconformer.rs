@@ -700,11 +700,10 @@ impl Subsampling {
 
 impl Subsampling {
     /// Streams `conv0 -> dw1 -> pw1 -> dw2 -> pw2 -> transpose` in strips of
-    /// `h3` output rows with 3-row rolling rings per worker (~352 KiB at 128
-    /// mels and 256 channels: fits in private L2 on desktop, laptop, and big
-    /// mobile cores and in shared L3 on smaller efficiency cores such as
-    /// Cortex-A55). Avoids two `h2 * w2 * ch` buffers (98 MB for a 60 s window)
-    /// and two `h3 * w3 * ch` intermediates.
+    /// `h3` output rows with 3-row rolling rings per worker (352 KiB at
+    /// `pad = 1` and 361 KiB at `pad = 2` for 128 mels and 256 channels),
+    /// avoiding two `h2 * w2 * ch` buffers (98 MB for a 60 s window) and two
+    /// `h3 * w3 * ch` intermediates.
     fn fused_convs(&self, features: &[f32], frames: usize, mels: usize) -> (Buf, usize) {
         let (ch, pad) = (self.channels, self.pad);
         let (h1, w1) = (out_len(frames, pad), out_len(mels, pad));
