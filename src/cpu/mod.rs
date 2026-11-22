@@ -317,7 +317,11 @@ fn allowed_mask() -> usize {
 #[cfg(windows)]
 fn fastest_cores(cores: &[CoreInfo]) -> Option<(usize, usize)> {
     const MIN_FAST_CORES: usize = 4;
-    if cores.iter().any(|c| c.mask == 0) {
+    if cores.is_empty() {
+        return None;
+    }
+    let group = cores[0].group;
+    if cores.iter().any(|c| c.group != group || c.mask == 0) {
         return None;
     }
     let highest = cores.iter().map(|c| c.class).max()?;

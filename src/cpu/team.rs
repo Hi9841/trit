@@ -463,19 +463,29 @@ pub fn enter(slot: usize) -> Entered {
     #[cfg(target_os = "android")]
     team.fit_to(thread_mask());
     let domain = team.domain.load(Ordering::Relaxed);
-    let (affinity, affinity_cpus, affinity_group) = if let Some((group, mask)) = team.pin_group {
-        (0, Vec::new(), set_group_affinity(group, mask))
+    // On multi-group Windows (`pin_group = Some`), workers are pinned to the
+    // selected L3 domain via `SetThreadGroupAffinity`, while the host's calling
+    // thread keeps its default Windows 11 multi-group affinity (calling
+    // `SetThreadGroupAffinity` on it would irreversibly restrict it to one group).
+    // On Linux and Android, always save/restore the full 16-word CPU list so a
+    // caller whose prior affinity included CPUs >= 64 is restored completely.
+    let (affinity, affinity_cpus) = if team.pin_group.is_some() {
+        (0, Vec::new())
     } else if !team.pin_cpus.is_empty() {
-        (0, set_affinity_cpus(&team.pin_cpus), None)
+        (0, set_affinity_cpus(&team.pin_cpus))
+    } else if cfg!(any(target_os = "linux", target_os = "android")) && domain != 0 {
+        let cpus: Vec<usize> = (0..usize::BITS as usize)
+            .filter(|&bit| (domain >> bit) & 1 == 1)
+            .collect();
+        (0, set_affinity_cpus(&cpus))
     } else {
-        (set_affinity(domain), Vec::new(), None)
+        (set_affinity(domain), Vec::new())
     };
     Entered {
         previous,
         throttle: keep_full_speed(),
         affinity,
         affinity_cpus,
-        affinity_group,
         priority: set_priority(ABOVE_NORMAL),
         ideal: set_ideal(ideal_cpu(domain, &team.core_cpus, 0, team.workers + 1)),
     }
@@ -483,14 +493,12 @@ pub fn enter(slot: usize) -> Entered {
 
 /// The caller's previous team, power throttling (`None`: nothing to
 /// restore), affinity mask (0: nothing to restore), multi-word affinity list,
-/// Windows group affinity, priority, and ideal processor (`None`: nothing to
-/// restore).
+/// priority, and ideal processor (`None`: nothing to restore).
 pub struct Entered {
     previous: usize,
     throttle: Option<Throttle>,
     affinity: usize,
     affinity_cpus: Vec<usize>,
-    affinity_group: Option<(u16, usize)>,
     priority: Option<i32>,
     ideal: Option<u32>,
 }
@@ -507,9 +515,7 @@ impl Drop for Entered {
         if let Some(priority) = self.priority {
             set_priority(priority);
         }
-        if let Some((group, mask)) = self.affinity_group {
-            set_group_affinity(group, mask);
-        } else if !self.affinity_cpus.is_empty() {
+        if !self.affinity_cpus.is_empty() {
             set_affinity_cpus(&self.affinity_cpus);
         } else {
             set_affinity(self.affinity);
@@ -917,40 +923,33 @@ fn set_affinity(mask: usize) -> usize {
     unsafe { SetThreadAffinityMask(GetCurrentThread(), mask) }
 }
 
-/// Windows: pins the calling thread to processor group `group` and mask `mask`,
-/// returning its previous `(group, mask)` if the call succeeds.
+/// Windows: pins a worker thread to processor group `group` and mask `mask`.
 #[cfg(windows)]
-fn set_group_affinity(group: u16, mask: usize) -> Option<(u16, usize)> {
+fn set_group_affinity(group: u16, mask: usize) {
     use windows::Win32::System::SystemInformation::GROUP_AFFINITY;
     use windows::Win32::System::Threading::{GetCurrentThread, SetThreadGroupAffinity};
     if mask == 0 {
-        return None;
+        return;
     }
     let next = GROUP_AFFINITY {
         Mask: mask,
         Group: group,
         Reserved: [0; 3],
     };
-    let mut prev = GROUP_AFFINITY::default();
-    // SAFETY: the pseudo handle names the calling thread and both pointers name locals.
-    unsafe { SetThreadGroupAffinity(GetCurrentThread(), &next, Some(&mut prev)) }
-        .ok()
-        .ok()?;
-    (prev.Mask != 0).then_some((prev.Group, prev.Mask))
+    // SAFETY: the pseudo handle names the calling worker thread and `next` is local.
+    let _ = unsafe { SetThreadGroupAffinity(GetCurrentThread(), &next, None) };
 }
 
 #[cfg(not(windows))]
-fn set_group_affinity(_group: u16, _mask: usize) -> Option<(u16, usize)> {
-    None
-}
+fn set_group_affinity(_group: u16, _mask: usize) {}
 
-/// Linux and Android: the same, with a 16-word `sched_getaffinity` /
+/// Linux and Android: pins a worker thread to `mask` with a 16-word
 /// `sched_setaffinity` buffer (up to 1024 CPUs) so hosts with >64 CPUs never
-/// reject a 1-word buffer with `EINVAL`.
+/// reject a 1-word buffer with `EINVAL`. Callers use `set_affinity_cpus` so
+/// their full prior CPU set (including CPUs >= 64) is saved and restored.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn set_affinity(mask: usize) -> usize {
     extern "C" {
-        fn sched_getaffinity(pid: i32, size: usize, mask: *mut usize) -> i32;
         fn sched_setaffinity(pid: i32, size: usize, mask: *const usize) -> i32;
     }
     const WORDS: usize = 16;
@@ -958,22 +957,11 @@ fn set_affinity(mask: usize) -> usize {
         return 0;
     }
     let bytes = WORDS * std::mem::size_of::<usize>();
-    let mut previous = [0usize; WORDS];
     let mut next = [0usize; WORDS];
     next[0] = mask;
-    // SAFETY: pid 0 is the calling thread; both buffers hold `bytes` bytes.
-    unsafe {
-        if sched_getaffinity(0, bytes, previous.as_mut_ptr()) != 0
-            || sched_setaffinity(0, bytes, next.as_ptr()) != 0
-        {
-            return 0;
-        }
-    }
-    if previous[1..].iter().all(|&word| word == 0) {
-        previous[0]
-    } else {
-        0
-    }
+    // SAFETY: pid 0 is the calling thread and `next` holds `bytes` bytes.
+    let _ = unsafe { sched_setaffinity(0, bytes, next.as_ptr()) };
+    0
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
