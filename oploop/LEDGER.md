@@ -3341,3 +3341,36 @@ x86-64 Windows and aarch64-linux-android.
   - `bench/paths.py` on Redux (short and long): same text on default, `scalar`, `avx2`,
     `avxvnni`, and `TRIT_THREADS=1`. Release build, Clippy, fmt, and `trit skill --check`
     clean. Native ARM64 timing remains open.
+
+### SI-051 Fused `exp_sum` and branchless block filter in beam search
+
+- Profile of `A0` (`ea900fd`) showed `beam search: score job` taking 616.2 ms (7.5 %) on
+  Whisper tiny `clean` and 384.9 ms (7.7 %) on Moonshine tiny `clean`. `beam::log_sum_exp`
+  copied all 51,865 / 32,768 logits into a thread-local buffer, ran scalar max, ran `exp`,
+  then summed serially; `beam::top` branched per element.
+- Change: added `activation::exp_sum` (4-vector AVX-512 `exp4` and matching 16-lane binary
+  tree reduction across AVX-512, AVX2, NEON, and scalar), switched `beam::log_sum_exp` and
+  Whisper's `log_softmax` to `activation::max` + `activation::exp_sum`, and replaced the
+  per-element branch in `beam::top` with a `multiversion!` 32-element block filter.
+- `kernel_bench beam`: Whisper (5 x 51,865) 96.30 -> 19.10 us (5.04x); Moonshine
+  (5 x 32,768) 80.30 -> 13.10 us (6.13x).
+- Interleaved A/B (`K1_si050.dll` vs `B_si051.dll`, quiet 7950X3D, 3 rounds each,
+  `oploop/results/s1122/ab_si051_*.txt`):
+  - Whisper tiny `clean` (200 clips): forward 36.3 -> 34.7 ms, per-clip B/A 0.963,
+    paired p = 3.7e-23, CPU time 128.4 -> 122.1 s (B/A 0.951), round wall 7.90 -> 7.60 s;
+    reversed (B first) 34.5 vs 37.1 ms, per-clip A/B 1.077 (B/A 0.928), paired p = 7.5e-33,
+    CPU time 117.7 vs 130.8 s (B/A 0.900), round wall 7.41 vs 8.08 s. Errors 231 equal;
+    0 of 200 texts differ.
+  - Whisper tiny `other` (200 clips, 1 round): 35.2 -> 33.6 ms, per-clip B/A 0.947,
+    paired p = 1.1e-19, CPU time 122.5 -> 114.0 s. Errors 487 equal; 0 of 200 texts differ.
+  - Moonshine tiny `clean` (200 clips): forward 18.4 -> 17.0 ms, per-clip B/A 0.944,
+    paired p = 7.7e-31, CPU time 37.3 -> 36.2 s (B/A 0.970), round wall 4.74 -> 4.48 s;
+    reversed (B first) 17.3 vs 17.9 ms, per-clip A/B 1.065 (B/A 0.939), paired p = 8.7e-31,
+    CPU time 36.2 vs 38.3 s (B/A 0.945), round wall 4.50 vs 4.77 s. Errors 133 equal;
+    0 of 200 texts differ.
+  - Moonshine tiny `other` (200 clips, 1 round): 17.9 -> 16.8 ms, per-clip B/A 0.940,
+    paired p = 1.4e-25, CPU time 36.9 -> 33.2 s. Errors 374 equal; 0 of 200 texts differ.
+  - `bench/paths.py`: Moonshine tiny identical across default, `scalar`, `avx2`, `avxvnni`,
+    `TRIT_THREADS=1`. Whisper tiny identical across default, `avx2`, `avxvnni`,
+    `TRIT_THREADS=1` (pre-existing `scalar` difference on `1089-134686-0009.wav` unchanged).
+  - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.

@@ -97,6 +97,77 @@ pub fn max(values: &[f32]) -> f32 {
     }
 }
 
+/// `sum_i exp(values[i] - shift)`, without writing the exponentials to memory.
+/// Accumulates in 16 fixed lanes and reduces with the binary tree of
+/// `_mm512_reduce_add_ps`, so AVX-512, AVX2, and NEON give the same bits.
+pub fn exp_sum(values: &[f32], shift: f32) -> f32 {
+    match level() {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: the level was detected from the CPU.
+        Level::Avx512 => unsafe { avx512::exp_sum(values, shift) },
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: the level was detected from the CPU.
+        Level::Avx2 => unsafe { avx2::exp_sum(values, shift) },
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: NEON is part of every arm64 CPU.
+        Level::Neon => unsafe { neon::exp_sum(values, shift) },
+        Level::Scalar => scalar_exp_sum(values, shift),
+    }
+}
+
+/// Binary tree sum of 16 lanes, matching `_mm512_reduce_add_ps`.
+fn reduce16(lanes: [f32; 16]) -> f32 {
+    let mut half = [0.0f32; 8];
+    for i in 0..8 {
+        half[i] = lanes[i] + lanes[i + 8];
+    }
+    let quarter = [
+        half[0] + half[4],
+        half[1] + half[5],
+        half[2] + half[6],
+        half[3] + half[7],
+    ];
+    let pair = [quarter[0] + quarter[2], quarter[1] + quarter[3]];
+    pair[0] + pair[1]
+}
+
+fn scalar_exp_sum(values: &[f32], shift: f32) -> f32 {
+    let mut lanes = [0.0f32; 16];
+    let (chunks, tail) = values.as_chunks::<16>();
+    if super::v2::float_enabled() {
+        let mut buf = [0.0f32; 16];
+        for chunk in chunks {
+            for (o, &v) in buf.iter_mut().zip(chunk) {
+                *o = v - shift;
+            }
+            super::v2::activation::apply(&mut buf, Op::Exp);
+            for (lane, &e) in lanes.iter_mut().zip(&buf) {
+                *lane += e;
+            }
+        }
+        if !tail.is_empty() {
+            let part = &mut buf[..tail.len()];
+            for (o, &v) in part.iter_mut().zip(tail) {
+                *o = v - shift;
+            }
+            super::v2::activation::apply(part, Op::Exp);
+            for (lane, &e) in lanes.iter_mut().zip(part.iter()) {
+                *lane += e;
+            }
+        }
+    } else {
+        for chunk in chunks {
+            for (lane, &v) in lanes.iter_mut().zip(chunk) {
+                *lane += exp_scalar(v - shift);
+            }
+        }
+        for (lane, &v) in lanes.iter_mut().zip(tail) {
+            *lane += exp_scalar(v - shift);
+        }
+    }
+    reduce16(lanes)
+}
+
 /// The rows that `exp_sums` takes side by side. The sum of a row is a chain:
 /// each add waits for the one before it. A CPU runs about 8 chains at once.
 pub const SIDE: usize = 8;
@@ -235,6 +306,85 @@ mod avx512 {
             _mm512_max_ps(best[2], best[3]),
         );
         _mm512_reduce_max_ps(best)
+    }
+
+    /// `super::exp_sum` in 16 lanes, four vectors at a time so the Horner
+    /// polynomial chains overlap across both multiply-add pipes.
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn exp_sum(values: &[f32], shift: f32) -> f32 {
+        let shift = _mm512_set1_ps(shift);
+        let mut sum = _mm512_setzero_ps();
+        let (chunks, tail) = values.as_chunks::<16>();
+        let (fours, rest) = chunks.as_chunks::<4>();
+        for four in fours {
+            let x = [
+                _mm512_sub_ps(_mm512_loadu_ps(four[0].as_ptr()), shift),
+                _mm512_sub_ps(_mm512_loadu_ps(four[1].as_ptr()), shift),
+                _mm512_sub_ps(_mm512_loadu_ps(four[2].as_ptr()), shift),
+                _mm512_sub_ps(_mm512_loadu_ps(four[3].as_ptr()), shift),
+            ];
+            let e = exp4(x);
+            for v in e {
+                sum = _mm512_add_ps(sum, v);
+            }
+        }
+        for chunk in rest {
+            let v = _mm512_sub_ps(_mm512_loadu_ps(chunk.as_ptr()), shift);
+            sum = _mm512_add_ps(sum, exp(v));
+        }
+        if !tail.is_empty() {
+            let mask: __mmask16 = ((1u32 << tail.len()) - 1) as u16;
+            let v = _mm512_sub_ps(_mm512_maskz_loadu_ps(mask, tail.as_ptr()), shift);
+            sum = _mm512_mask_add_ps(sum, mask, sum, exp(v));
+        }
+        _mm512_reduce_add_ps(sum)
+    }
+
+    /// `exp` on four AVX-512 vectors, step by step.
+    #[target_feature(enable = "avx512f")]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn exp4(mut x: [__m512; 4]) -> [__m512; 4] {
+        let low = _mm512_set1_ps(LOW);
+        let high = _mm512_set1_ps(HIGH);
+        let log2e = _mm512_set1_ps(LOG2E);
+        let ln2_hi = _mm512_set1_ps(LN2_HI);
+        let ln2_lo = _mm512_set1_ps(LN2_LO);
+        let one = _mm512_set1_ps(1.0);
+        let bias = _mm512_set1_epi32(127);
+        let mut n_int = [_mm512_setzero_si512(); 4];
+        let mut n = [_mm512_setzero_ps(); 4];
+        let mut r = [_mm512_setzero_ps(); 4];
+        for i in 0..4 {
+            x[i] = _mm512_min_ps(_mm512_max_ps(x[i], low), high);
+        }
+        for i in 0..4 {
+            n_int[i] = _mm512_cvtps_epi32(_mm512_mul_ps(x[i], log2e));
+        }
+        for i in 0..4 {
+            n[i] = _mm512_cvtepi32_ps(n_int[i]);
+        }
+        for i in 0..4 {
+            r[i] = _mm512_fnmadd_ps(n[i], ln2_hi, x[i]);
+        }
+        for i in 0..4 {
+            r[i] = _mm512_fnmadd_ps(n[i], ln2_lo, r[i]);
+        }
+        let mut p = [_mm512_setzero_ps(); 4];
+        for c in POLY {
+            let c = _mm512_set1_ps(c);
+            for i in 0..4 {
+                p[i] = _mm512_fmadd_ps(p[i], r[i], c);
+            }
+        }
+        let mut y = [_mm512_setzero_ps(); 4];
+        for i in 0..4 {
+            y[i] = _mm512_fmadd_ps(p[i], _mm512_mul_ps(r[i], r[i]), _mm512_add_ps(r[i], one));
+        }
+        for i in 0..4 {
+            let two_n = _mm512_slli_epi32::<23>(_mm512_add_epi32(n_int[i], bias));
+            y[i] = _mm512_mul_ps(y[i], _mm512_castsi512_ps(two_n));
+        }
+        y
     }
 
     /// `super::exp_sums` for the rows of `group`, at most `SIDE`. The sums
@@ -399,6 +549,39 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn exp_sum(values: &[f32], shift: f32) -> f32 {
+        let shift_v = _mm256_set1_ps(shift);
+        let mut lo = _mm256_setzero_ps();
+        let mut hi = _mm256_setzero_ps();
+        let (chunks, tail) = values.as_chunks::<16>();
+        for chunk in chunks {
+            let a = _mm256_sub_ps(_mm256_loadu_ps(chunk.as_ptr()), shift_v);
+            let b = _mm256_sub_ps(_mm256_loadu_ps(chunk.as_ptr().add(8)), shift_v);
+            lo = _mm256_add_ps(lo, exp(a));
+            hi = _mm256_add_ps(hi, exp(b));
+        }
+        let mut lanes = [0.0f32; 16];
+        _mm256_storeu_ps(lanes.as_mut_ptr(), lo);
+        _mm256_storeu_ps(lanes.as_mut_ptr().add(8), hi);
+        if !tail.is_empty() {
+            let mut padded = [0.0f32; 16];
+            padded[..tail.len()].copy_from_slice(tail);
+            let a = exp(_mm256_sub_ps(_mm256_loadu_ps(padded.as_ptr()), shift_v));
+            let b = exp(_mm256_sub_ps(
+                _mm256_loadu_ps(padded.as_ptr().add(8)),
+                shift_v,
+            ));
+            let mut e = [0.0f32; 16];
+            _mm256_storeu_ps(e.as_mut_ptr(), a);
+            _mm256_storeu_ps(e.as_mut_ptr().add(8), b);
+            for i in 0..tail.len() {
+                lanes[i] += e[i];
+            }
+        }
+        super::reduce16(lanes)
+    }
+
+    #[target_feature(enable = "avx2,fma")]
     unsafe fn compute(v: __m256, op: Op) -> __m256 {
         let one = _mm256_set1_ps(1.0);
         let neg = |v| _mm256_sub_ps(_mm256_setzero_ps(), v);
@@ -483,6 +666,49 @@ mod neon {
             vst1q_f32(padded.as_mut_ptr(), v);
             tail.copy_from_slice(&padded[..tail.len()]);
         }
+    }
+
+    pub unsafe fn exp_sum(values: &[f32], shift: f32) -> f32 {
+        let shift_v = vdupq_n_f32(shift);
+        let mut sum = [vdupq_n_f32(0.0); 4];
+        let (chunks, tail) = values.as_chunks::<16>();
+        for chunk in chunks {
+            let p = chunk.as_ptr();
+            let v = [
+                vsubq_f32(vld1q_f32(p), shift_v),
+                vsubq_f32(vld1q_f32(p.add(4)), shift_v),
+                vsubq_f32(vld1q_f32(p.add(8)), shift_v),
+                vsubq_f32(vld1q_f32(p.add(12)), shift_v),
+            ];
+            let e = exp4(v);
+            for (s, e) in sum.iter_mut().zip(e) {
+                *s = vaddq_f32(*s, e);
+            }
+        }
+        let mut lanes = [0.0f32; 16];
+        for (i, s) in sum.iter().enumerate() {
+            vst1q_f32(lanes.as_mut_ptr().add(4 * i), *s);
+        }
+        if !tail.is_empty() {
+            let mut padded = [0.0f32; 16];
+            padded[..tail.len()].copy_from_slice(tail);
+            let p = padded.as_ptr();
+            let v = [
+                vsubq_f32(vld1q_f32(p), shift_v),
+                vsubq_f32(vld1q_f32(p.add(4)), shift_v),
+                vsubq_f32(vld1q_f32(p.add(8)), shift_v),
+                vsubq_f32(vld1q_f32(p.add(12)), shift_v),
+            ];
+            let e = exp4(v);
+            let mut out = [0.0f32; 16];
+            for (i, e) in e.iter().enumerate() {
+                vst1q_f32(out.as_mut_ptr().add(4 * i), *e);
+            }
+            for i in 0..tail.len() {
+                lanes[i] += out[i];
+            }
+        }
+        super::reduce16(lanes)
     }
 
     #[inline(always)]

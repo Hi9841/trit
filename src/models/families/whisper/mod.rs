@@ -428,7 +428,6 @@ fn looping(ids: &[usize]) -> Option<usize> {
 
 /// `log softmax(logits)[id]`; masked logits (minus infinity) count as zero.
 fn log_softmax(logits: &[f32], id: usize) -> f32 {
-    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let sum: f32 = logits.iter().map(|x| (x - max).exp()).sum();
-    logits[id] - max - sum.ln()
+    let (max, log_sum) = crate::models::parts::beam::log_sum_exp(logits);
+    logits[id] - max - log_sum
 }

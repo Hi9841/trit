@@ -243,32 +243,49 @@ pub fn search<S: Clone + Send>(
 }
 
 /// The maximum of `logits` and `log sum exp(logits - max)`, so that
-/// `log softmax(x) = (x - max) - log_sum`. The exponentials go to a buffer
-/// that each thread reuses: no vector the size of the vocabulary per call.
+/// `log softmax(x) = (x - max) - log_sum`. Sums exponentials directly from
+/// `logits` in 16 SIMD lanes without writing a vocabulary-sized buffer.
 pub(crate) fn log_sum_exp(logits: &[f32]) -> (f32, f32) {
-    thread_local! {
-        static EXPS: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
-    }
-    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    EXPS.with(|exps| {
-        let mut exps = exps.borrow_mut();
-        exps.clear();
-        exps.extend(logits.iter().map(|x| x - max));
-        activation::exp(&mut exps);
-        (max, exps.iter().sum::<f32>().ln())
-    })
+    let max = activation::max(logits);
+    (max, activation::exp_sum(logits, max).ln())
 }
 
-/// The `count` largest values with their indices, largest first, in `best`,
-/// which has room for `count + 1`.
-pub(crate) fn top(values: &[f32], count: usize, best: &mut Vec<(usize, f32)>) {
-    best.clear();
-    for (i, &v) in values.iter().enumerate() {
+multiversion! {
+    /// The `count` largest values with their indices, largest first, in `best`,
+    /// which has room for `count + 1`. Minus infinity (a blocked token) is not
+    /// a value.
+    pub(crate) fn top(values: &[f32], count: usize, best: &mut Vec<(usize, f32)>) {
+        /// Nearly every block of a vocabulary has no value above the current
+        /// floor; one branchless vector scan over 32 values skips it.
+        const BLOCK: usize = 32;
+        best.clear();
+        let (blocks, tail) = values.as_chunks::<BLOCK>();
+        for (block, part) in blocks.iter().enumerate() {
+            let floor = match best.len() == count {
+                true => best[count - 1].1,
+                false => f32::NEG_INFINITY,
+            };
+            if part
+                .iter()
+                .fold(false, |hit, &v| hit | (v > floor) | v.is_nan())
+            {
+                offer(block * BLOCK, part, count, best);
+            }
+        }
+        offer(blocks.len() * BLOCK, tail, count, best);
+    }
+}
+
+/// Puts the values of `part`, whose indices start at `from`, into `best`:
+/// the `count` largest so far, largest first.
+#[inline(always)]
+fn offer(from: usize, part: &[f32], count: usize, best: &mut Vec<(usize, f32)>) {
+    for (i, &v) in part.iter().enumerate() {
         if v == f32::NEG_INFINITY || (best.len() == count && v <= best[count - 1].1) {
             continue;
         }
         let at = best.partition_point(|(_, b)| *b >= v);
-        best.insert(at, (i, v));
+        best.insert(at, (from + i, v));
         best.truncate(count);
     }
 }
