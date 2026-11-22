@@ -271,7 +271,20 @@ mod avx512 {
     #[target_feature(enable = "avx512f")]
     pub unsafe fn apply(values: &mut [f32], op: Op) {
         let (chunks, tail) = values.as_chunks_mut::<16>();
-        for chunk in chunks {
+        let (fours, rest) = chunks.as_chunks_mut::<4>();
+        for four in fours {
+            let v = [
+                _mm512_loadu_ps(four[0].as_ptr()),
+                _mm512_loadu_ps(four[1].as_ptr()),
+                _mm512_loadu_ps(four[2].as_ptr()),
+                _mm512_loadu_ps(four[3].as_ptr()),
+            ];
+            let out = compute4(v, op);
+            for (chunk, v) in four.iter_mut().zip(out) {
+                _mm512_storeu_ps(chunk.as_mut_ptr(), v);
+            }
+        }
+        for chunk in rest {
             let v = _mm512_loadu_ps(chunk.as_ptr());
             _mm512_storeu_ps(chunk.as_mut_ptr(), compute(v, op));
         }
@@ -470,6 +483,82 @@ mod avx512 {
             columns[12 + b] = high(rest);
         }
         columns
+    }
+
+    /// `compute` on four AVX-512 vectors, step by step, so the Horner
+    /// polynomial and divide latencies overlap across all four vectors.
+    #[target_feature(enable = "avx512f")]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn compute4(v: [__m512; 4], op: Op) -> [__m512; 4] {
+        let zero = _mm512_setzero_ps();
+        let one = _mm512_set1_ps(1.0);
+        let mut out = [one; 4];
+        match op {
+            Op::Exp => return exp4(v),
+            Op::Silu => {
+                let mut neg_v = [zero; 4];
+                for i in 0..4 {
+                    neg_v[i] = _mm512_sub_ps(zero, v[i]);
+                }
+                let e = exp4(neg_v);
+                for i in 0..4 {
+                    out[i] = _mm512_div_ps(v[i], _mm512_add_ps(one, e[i]));
+                }
+            }
+            Op::Sigmoid => {
+                let mut neg_v = [zero; 4];
+                for i in 0..4 {
+                    neg_v[i] = _mm512_sub_ps(zero, v[i]);
+                }
+                let e = exp4(neg_v);
+                for i in 0..4 {
+                    out[i] = _mm512_div_ps(one, _mm512_add_ps(one, e[i]));
+                }
+            }
+            Op::Tanh => {
+                let two = _mm512_set1_ps(2.0);
+                let mut neg_v = [zero; 4];
+                for i in 0..4 {
+                    neg_v[i] = _mm512_sub_ps(zero, _mm512_mul_ps(two, v[i]));
+                }
+                let e = exp4(neg_v);
+                for i in 0..4 {
+                    out[i] = _mm512_sub_ps(_mm512_div_ps(two, _mm512_add_ps(one, e[i])), one);
+                }
+            }
+            Op::Gelu => {
+                let half = _mm512_set1_ps(0.5);
+                let two = _mm512_set1_ps(2.0);
+                let inv_sqrt2 = _mm512_set1_ps(FRAC_1_SQRT_2);
+                let mut z = [zero; 4];
+                let mut t = [zero; 4];
+                for i in 0..4 {
+                    z[i] = _mm512_mul_ps(_mm512_abs_ps(v[i]), inv_sqrt2);
+                }
+                for i in 0..4 {
+                    t[i] = _mm512_div_ps(one, _mm512_fmadd_ps(z[i], half, one));
+                }
+                let mut p = [zero; 4];
+                for c in ERFC {
+                    let c = _mm512_set1_ps(c);
+                    for i in 0..4 {
+                        p[i] = _mm512_fmadd_ps(p[i], t[i], c);
+                    }
+                }
+                let mut arg = [zero; 4];
+                for i in 0..4 {
+                    arg[i] = _mm512_fnmadd_ps(z[i], z[i], p[i]);
+                }
+                let e = exp4(arg);
+                for i in 0..4 {
+                    let tail = _mm512_mul_ps(t[i], e[i]);
+                    let positive = _mm512_cmp_ps_mask::<_CMP_GE_OQ>(v[i], zero);
+                    let erfc = _mm512_mask_blend_ps(positive, tail, _mm512_sub_ps(two, tail));
+                    out[i] = _mm512_mul_ps(_mm512_mul_ps(half, v[i]), erfc);
+                }
+            }
+        }
+        out
     }
 
     #[target_feature(enable = "avx512f")]

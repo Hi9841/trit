@@ -3486,3 +3486,27 @@ x86-64 Windows and aarch64-linux-android.
   - `bench/paths.py`: Moonshine tiny and Parakeet Redux identical across default, `scalar`,
     `avx2`, `avxvnni`, and `TRIT_THREADS=1`.
   - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.
+
+### SI-055 Four-vector AVX-512 `compute4` for `activation::apply`
+
+- `activation::avx512::apply` processed one 16-lane vector at a time (`compute`), leaving
+  the Horner polynomial and `vdivps` latency chains exposed across `Exp`, `Silu`, `Sigmoid`,
+  `Tanh`, and `Gelu` (whereas the NEON path already ran four vectors step by step).
+- Change: added `avx512::compute4` in `src/cpu/activation.rs` to run four AVX-512 vectors
+  step by step with `exp4` (100 % bit-exact per lane).
+- Interleaved A/B (`K5_si054.dll` vs `B_si055.dll`, quiet 7950X3D, 3 rounds each,
+  `oploop/results/s1122/ab_si055_*.txt`):
+  - Moonshine tiny `clean` (200 clips): forward 16.4 -> 16.0 ms, per-clip B/A 0.986,
+    paired p = 3.1e-23, round wall 4.29 -> 4.22 s; reversed (B first) 15.7 vs 15.8 ms,
+    per-clip A/B 1.017 (B/A 0.983), paired p = 2.0e-25, round wall 4.24 vs 4.29 s.
+    Errors 133 equal; 0 of 200 texts differ.
+  - Parakeet Redux `clean,other` (400 clips): 28.9 -> 28.8 ms, per-clip B/A 0.994,
+    paired p = 3.4e-27. Errors 81 / 172 equal; 0 of 400 texts differ.
+  - Parakeet Redux `long-clean` (40 clips): 437.2 -> 431.7 ms, per-clip B/A 0.992,
+    paired p = 2.7e-08, CPU time 0.992, round wall 18.44 -> 18.31 s. Errors 187 equal;
+    0 of 40 texts differ.
+  - Parakeet Unified English Q8_0 `clean` (200 clips): 43.9 -> 43.9 ms, per-clip B/A 0.996,
+    paired p = 1.8e-11, CPU time 0.985. Errors 56 equal; 0 of 200 texts differ.
+  - Whisper tiny `clean` (200 clips): neutral (fwd B/A 0.999 p = 0.43; rev A/B 1.001
+    p = 0.76). Errors 231 equal; 0 of 200 texts differ.
+  - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.
