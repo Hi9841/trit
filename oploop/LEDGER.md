@@ -3510,3 +3510,42 @@ x86-64 Windows and aarch64-linux-android.
   - Whisper tiny `clean` (200 clips): neutral (fwd B/A 0.999 p = 0.43; rev A/B 1.001
     p = 0.76). Errors 231 equal; 0 of 200 texts differ.
   - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.
+
+### SI-056 Spill-free pre-biased `Ternary::vnni_tile` and Q8_0/AVX-512 `Quantized` fast paths
+
+- `Ternary::vnni_tile` kept 8 unpacked weight ZMM vectors live alongside 12 `acc` + 12
+  `dots` + `low` + `x` (34 > 32 ZMMs), zeroed `dots` then subtracted `q.sums[index]` with
+  bounds checks per group; `Quantized::grouped` shrank/re-zeroed `scales`/`sums`, reloaded
+  Q8_0's 32 floats from memory on pass 2, used scalar bit-twiddling for `half_scales`, and
+  ran a single accumulator chain in `quantize_avx512`.
+- Change in `src/cpu/kernels.rs`:
+  - `Ternary::vnni_tile`: unpack one `s` step at a time (30 <= 32 ZMMs, zero spills),
+    pre-initialize `dots` to `-q.sums`, and hoist weight/scale/activation pointers.
+  - `Quantized::grouped` and `quantize_avx512`: reuse `scales`/`sums` without zero-fill
+    when long enough, keep 32-element Q8_0 blocks in two ZMM registers across max and
+    quantize passes, round `half_scales` via F16C when available, and use dual max/sum
+    accumulators with `_mm512_cvtepi32_epi8` on 128-element groups.
+- `kernel_bench` (vs M0 and v2, 0 bits differ on every shape):
+  - `ternary 1024x4096 m=128/750`: 2.252/2.258 -> 2.276/2.280 T/s (beats v2 2.267).
+  - `ternary 4096x1024 m=64/128/256/750`: 2.089/2.322/2.336/2.029 -> 2.326/2.339/2.350/2.340 T/s.
+  - `q8_0 1024x4096 m=128/750`: 1.889/1.877 -> 1.900/1.908 T/s (beats v2 1.890/1.895).
+- Interleaved A/B (`K6_si055.dll` vs `B_si056.dll`, quiet 7950X3D, 3 rounds each,
+  `oploop/results/s1122/ab_si056_*.txt`):
+  - Parakeet Unified English Q8_0 `clean` (200 clips): forward 43.4 -> 43.3 ms, per-clip
+    B/A 0.993, paired p = 1.4e-17, round wall 10.85 -> 10.77 s; reversed (B first)
+    43.3 vs 43.7 ms, per-clip A/B 1.007 (B/A 0.993), paired p = 1.1e-21, CPU time B/A 0.986,
+    round wall 10.76 vs 10.83 s. Errors 56 equal; 0 of 200 texts differ.
+  - Parakeet Unified English Q8_0 `long-clean` (40 clips): 568.3 -> 564.8 ms, per-clip
+    B/A 0.992, paired p = 1.8e-12, CPU time 0.991, round wall 23.83 -> 23.61 s. Errors
+    120 equal; 0 of 40 texts differ.
+  - Parakeet Redux `clean,other` (400 clips): forward 29.0 -> 28.6 ms, per-clip B/A 0.994,
+    paired p = 7.7e-20; reversed 28.7 vs 28.8 ms, per-clip A/B 1.002 (B/A 0.998),
+    paired p = 0.00021. Errors 81 / 172 equal; 0 of 400 texts differ.
+  - Parakeet Redux `long-clean` (40 clips): forward per-clip B/A 0.997, paired p = 1.2e-07;
+    reversed per-clip A/B 1.004 (B/A 0.996), paired p = 1.8e-12. Errors 187 equal;
+    0 of 40 texts differ.
+  - Whisper tiny `clean` (200 clips): wall neutral (B/A 1.002 p = 0.091), CPU time 0.976.
+    Errors 231 equal; 0 of 200 texts differ.
+  - `bench/paths.py`: Redux and Unified Q8_0 identical across default, `scalar`, `avx2`,
+    `avxvnni`, and `TRIT_THREADS=1`.
+  - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.

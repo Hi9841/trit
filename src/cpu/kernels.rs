@@ -361,55 +361,69 @@ impl Ternary {
         let (k, k4s, groups) = (self.k, self.k / 4, self.k / GROUP);
         let k16s = k4s / 4;
         let blocks = [2 * task, 2 * task + 1];
+        debug_assert!(frame0 + F <= q.m);
+        debug_assert!(q.values.len() >= (frame0 + F) * k);
+        debug_assert!(q.scales.len() >= (frame0 + F) * groups);
+        debug_assert!(q.sums.len() >= (frame0 + F) * groups);
+        let c0_base = self.codes.as_ptr().add(blocks[0] * k16s * 64);
+        let c1_base = self.codes.as_ptr().add(blocks[1] * k16s * 64);
+        let s0_base = self.scales.as_ptr().add(blocks[0] * groups * 16);
+        let s1_base = self.scales.as_ptr().add(blocks[1] * groups * 16);
+        let x_base = q.values.as_ptr().add(frame0 * k);
+        let x_scales = q.scales.as_ptr().add(frame0 * groups);
+        let x_sums = q.sums.as_ptr().add(frame0 * groups);
         let low = _mm512_set1_epi8(3);
         let mut acc = [[_mm512_setzero_ps(); F]; 2];
         for g in 0..groups {
+            // Start each dot product at -sum(x) so (code . x) gives (code - 1) . x
+            // directly without a post-loop subtraction.
             let mut dots = [[_mm512_setzero_si512(); F]; 2];
+            for f in 0..F {
+                let neg_sum = _mm512_set1_epi32((*x_sums.add(f * groups + g)).wrapping_neg());
+                dots[0][f] = neg_sum;
+                dots[1][f] = neg_sum;
+            }
             for quad in 0..GROUP / 16 {
                 let k16 = g * (GROUP / 16) + quad;
-                let z0 = _mm512_loadu_si512(
-                    self.codes
-                        .as_ptr()
-                        .add((blocks[0] * k16s + k16) * 64)
-                        .cast(),
-                );
-                let z1 = _mm512_loadu_si512(
-                    self.codes
-                        .as_ptr()
-                        .add((blocks[1] * k16s + k16) * 64)
-                        .cast(),
-                );
+                let z0 = _mm512_loadu_si512(c0_base.add(k16 * 64).cast());
+                let z1 = _mm512_loadu_si512(c1_base.add(k16 * 64).cast());
+                // Unpack one k4 step at a time (2 weight regs live instead of 8) so
+                // 12 acc + 12 dots + 2 packed + 2 unpacked + low + x = 30 <= 32 ZMMs.
                 // A 16-bit shift is safe: the mask keeps the low two bits of each byte.
-                let w0 = [
-                    _mm512_and_si512(z0, low),
-                    _mm512_and_si512(_mm512_srli_epi16::<2>(z0), low),
-                    _mm512_and_si512(_mm512_srli_epi16::<4>(z0), low),
-                    _mm512_and_si512(_mm512_srli_epi16::<6>(z0), low),
-                ];
-                let w1 = [
-                    _mm512_and_si512(z1, low),
-                    _mm512_and_si512(_mm512_srli_epi16::<2>(z1), low),
-                    _mm512_and_si512(_mm512_srli_epi16::<4>(z1), low),
-                    _mm512_and_si512(_mm512_srli_epi16::<6>(z1), low),
-                ];
                 for s in 0..4 {
-                    let k4 = 4 * k16 + s;
+                    let (w0, w1) = match s {
+                        0 => (_mm512_and_si512(z0, low), _mm512_and_si512(z1, low)),
+                        1 => (
+                            _mm512_and_si512(_mm512_srli_epi16::<2>(z0), low),
+                            _mm512_and_si512(_mm512_srli_epi16::<2>(z1), low),
+                        ),
+                        2 => (
+                            _mm512_and_si512(_mm512_srli_epi16::<4>(z0), low),
+                            _mm512_and_si512(_mm512_srli_epi16::<4>(z1), low),
+                        ),
+                        _ => (
+                            _mm512_and_si512(_mm512_srli_epi16::<6>(z0), low),
+                            _mm512_and_si512(_mm512_srli_epi16::<6>(z1), low),
+                        ),
+                    };
+                    let off = (4 * k16 + s) * 4;
                     for f in 0..F {
-                        let src = q.values.as_ptr().add((frame0 + f) * k + k4 * 4);
-                        let x = _mm512_set1_epi32(std::ptr::read_unaligned(src.cast::<i32>()));
-                        dots[0][f] = _mm512_dpbusd_epi32(dots[0][f], w0[s], x);
-                        dots[1][f] = _mm512_dpbusd_epi32(dots[1][f], w1[s], x);
+                        let x = _mm512_set1_epi32(std::ptr::read_unaligned(
+                            x_base.add(f * k + off).cast::<i32>(),
+                        ));
+                        dots[0][f] = _mm512_dpbusd_epi32(dots[0][f], w0, x);
+                        dots[1][f] = _mm512_dpbusd_epi32(dots[1][f], w1, x);
                     }
                 }
             }
-            for (b, block) in blocks.iter().enumerate() {
-                let wscale = _mm512_loadu_ps(self.scales.as_ptr().add((block * groups + g) * 16));
-                for f in 0..F {
-                    let index = (frame0 + f) * groups + g;
-                    let corrected = _mm512_sub_epi32(dots[b][f], _mm512_set1_epi32(q.sums[index]));
-                    let scale = _mm512_mul_ps(wscale, _mm512_set1_ps(q.scales[index]));
-                    acc[b][f] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(corrected), scale, acc[b][f]);
-                }
+            let wscale0 = _mm512_loadu_ps(s0_base.add(g * 16));
+            let wscale1 = _mm512_loadu_ps(s1_base.add(g * 16));
+            for f in 0..F {
+                let xscale = _mm512_set1_ps(*x_scales.add(f * groups + g));
+                let scale0 = _mm512_mul_ps(wscale0, xscale);
+                let scale1 = _mm512_mul_ps(wscale1, xscale);
+                acc[0][f] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(dots[0][f]), scale0, acc[0][f]);
+                acc[1][f] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(dots[1][f]), scale1, acc[1][f]);
             }
         }
         for (b, block) in blocks.iter().enumerate() {
@@ -673,15 +687,19 @@ impl Quantized {
         // Parakeet call.
         let (mut values, mut scales, mut sums) =
             QUANTIZED.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-        // The quantizer writes every value of the first m x k, so a buffer that
-        // is long enough is used as it is: no fill on the calling thread.
+        // The quantizer writes every value, scale, and sum for the first m rows,
+        // so buffers that are long enough are reused as they are without zero-fill.
         if values.len() < m * k {
             values.resize(m * k, 0);
         }
-        // Exactly one scale and one sum for each row and group; the
-        // quantizer writes each of them.
-        scales.resize(m * groups, 0.0);
-        sums.resize(m * groups, 0);
+        if scales.len() < m * groups {
+            scales.resize(m * groups, 0.0);
+        }
+        if sums.len() < m * groups {
+            sums.resize(m * groups, 0);
+        }
+        #[cfg(target_arch = "x86_64")]
+        let f16c = half_scales && super::fgemm::level() != super::fgemm::Level::Scalar;
         let (all_values, all_scales, all_sums) = (
             team::SendPtr::new(&mut values),
             team::SendPtr::new(&mut scales),
@@ -719,6 +737,14 @@ impl Quantized {
                         Isa::Scalar => quantize_scalar(&src[span.clone()], &mut values[span]),
                     };
                     scales[g] = if half_scales {
+                        #[cfg(target_arch = "x86_64")]
+                        if f16c {
+                            // SAFETY: `fgemm::level() != Scalar` implies F16C.
+                            unsafe { round_f16_f16c(scale) }
+                        } else {
+                            super::tensors::f16_to_f32(super::tensors::f32_to_f16(scale))
+                        }
+                        #[cfg(not(target_arch = "x86_64"))]
                         super::tensors::f16_to_f32(super::tensors::f32_to_f16(scale))
                     } else {
                         scale
@@ -779,31 +805,75 @@ fn quantize_scalar(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "f16c")]
+unsafe fn round_f16_f16c(value: f32) -> f32 {
+    use std::arch::x86_64::*;
+    let half = _mm_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(_mm_set_ss(value));
+    _mm_cvtss_f32(_mm_cvtph_ps(half))
+}
+
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     use std::arch::x86_64::*;
     let p = src.as_ptr();
-    let mut vmax = _mm512_setzero_ps();
-    for i in 0..src.len() / 16 {
-        vmax = _mm512_max_ps(vmax, _mm512_abs_ps(_mm512_loadu_ps(p.add(i * 16))));
+    let d = dst.as_mut_ptr();
+    let high = _mm512_set1_epi32(127);
+    let low = _mm512_set1_epi32(-127);
+    if src.len() == 32 {
+        // ggml Q8_0 block: keep both 16-lane vectors in registers so pass 2 never reloads.
+        let x0 = _mm512_loadu_ps(p);
+        let x1 = _mm512_loadu_ps(p.add(16));
+        let vmax = _mm512_max_ps(_mm512_abs_ps(x0), _mm512_abs_ps(x1));
+        let scale = group_scale(_mm512_reduce_max_ps(vmax));
+        let inv = _mm512_set1_ps(1.0 / scale);
+        let q0 = _mm512_max_epi32(
+            _mm512_min_epi32(_mm512_cvtps_epi32(_mm512_mul_ps(x0, inv)), high),
+            low,
+        );
+        let q1 = _mm512_max_epi32(
+            _mm512_min_epi32(_mm512_cvtps_epi32(_mm512_mul_ps(x1, inv)), high),
+            low,
+        );
+        _mm_storeu_si128(d.cast(), _mm512_cvtepi32_epi8(q0));
+        _mm_storeu_si128(d.add(16).cast(), _mm512_cvtepi32_epi8(q1));
+        return (scale, _mm512_reduce_add_epi32(_mm512_add_epi32(q0, q1)));
     }
-    let scale = group_scale(_mm512_reduce_max_ps(vmax));
+    let pairs = src.len() / 32;
+    let mut vmax0 = _mm512_setzero_ps();
+    let mut vmax1 = _mm512_setzero_ps();
+    for i in 0..pairs {
+        vmax0 = _mm512_max_ps(vmax0, _mm512_abs_ps(_mm512_loadu_ps(p.add(i * 32))));
+        vmax1 = _mm512_max_ps(vmax1, _mm512_abs_ps(_mm512_loadu_ps(p.add(i * 32 + 16))));
+    }
+    let scale = group_scale(_mm512_reduce_max_ps(_mm512_max_ps(vmax0, vmax1)));
     let inv = _mm512_set1_ps(1.0 / scale);
-    let limit = _mm512_set1_epi32(127);
-    let mut vsum = _mm512_setzero_si512();
-    for i in 0..src.len() / 16 {
-        let q = _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_loadu_ps(p.add(i * 16)), inv));
-        let q = _mm512_max_epi32(
-            _mm512_min_epi32(q, limit),
-            _mm512_sub_epi32(_mm512_setzero_si512(), limit),
+    let mut vsum0 = _mm512_setzero_si512();
+    let mut vsum1 = _mm512_setzero_si512();
+    for i in 0..pairs {
+        let q0 = _mm512_max_epi32(
+            _mm512_min_epi32(
+                _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_loadu_ps(p.add(i * 32)), inv)),
+                high,
+            ),
+            low,
         );
-        vsum = _mm512_add_epi32(vsum, q);
-        _mm_storeu_si128(
-            dst.as_mut_ptr().add(i * 16).cast(),
-            _mm512_cvtsepi32_epi8(q),
+        let q1 = _mm512_max_epi32(
+            _mm512_min_epi32(
+                _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_loadu_ps(p.add(i * 32 + 16)), inv)),
+                high,
+            ),
+            low,
         );
+        vsum0 = _mm512_add_epi32(vsum0, q0);
+        vsum1 = _mm512_add_epi32(vsum1, q1);
+        _mm_storeu_si128(d.add(i * 32).cast(), _mm512_cvtepi32_epi8(q0));
+        _mm_storeu_si128(d.add(i * 32 + 16).cast(), _mm512_cvtepi32_epi8(q1));
     }
-    (scale, _mm512_reduce_add_epi32(vsum))
+    (
+        scale,
+        _mm512_reduce_add_epi32(_mm512_add_epi32(vsum0, vsum1)),
+    )
 }
 
 #[cfg(target_arch = "x86_64")]
