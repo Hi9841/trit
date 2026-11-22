@@ -3756,9 +3756,12 @@ probes.
   buffers plus `dw2`/`pw2` (12.3 MB each).
 - Hypothesis: stream `conv0 -> dw1 -> pw1 -> dw2 -> pw2 -> transpose` in strips of `h3`
   output rows (`MAX_FUSED_STRIP_ROWS = 16`, `4 * threads` target strips on heterogeneous
-  teams and `2 * threads` on homogeneous teams) using 3-row rolling rings (~360 KB per
-  worker, L2-resident on every CPU) when `pw1` and `pw2` are CPU `F32`/`F16` (`Dense::can_forward_into`,
-  `fgemm::matmul_into_then`). Eliminates both 49.2 MB buffers and both 12.3 MB intermediates.
+  teams and `2 * threads` on homogeneous teams) using 3-row rolling rings (~352 KiB per
+  worker at 128 mels and 256 channels, fitting in private L2 on desktop, laptop, and big
+  mobile cores and in shared L3 on smaller efficiency cores such as Cortex-A55) when `pw1`
+  and `pw2` are CPU `F32`/`F16` (`Dense::can_forward_into`, `fgemm::matmul_into_then`).
+  Eliminates both 49.2 MB buffers and both 12.3 MB intermediates. Runtime measurements
+  below were taken on the Ryzen 9 7950X3D host.
 - Result (`B0_0686d8e.dll` vs `B_si061b.dll`, 3 rounds each, 0 differing texts everywhere):
   - Redux `long-clean,long-other` (80 clips, 187 / 479 errors):
     fwd per-clip B/A `0.972` (`p = 2.2e-7`), wall `0.961`, CPU `0.962`, mem `1652/793 -> 1592/692 MB`;

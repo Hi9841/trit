@@ -368,7 +368,8 @@ impl Config {
         if config.heads == 0
             || config.hidden == 0
             || !config.hidden.is_multiple_of(config.heads)
-            || (config.subsampler == SubsamplerKind::Conv2d && !config.mels.is_multiple_of(8))
+            || (config.subsampler == SubsamplerKind::Conv2d
+                && (config.sub_channels == 0 || !config.mels.is_multiple_of(8)))
             || (config.position != Position::Relative && config.attention != Attention::Full)
             || (head == HeadKind::Transducer && config.durations.is_empty())
             || (transducer && config.max_symbols == 0)
@@ -699,16 +700,21 @@ impl Subsampling {
 
 impl Subsampling {
     /// Streams `conv0 -> dw1 -> pw1 -> dw2 -> pw2 -> transpose` in strips of
-    /// `h3` output rows with 3-row rolling rings per worker. Avoids two
-    /// `h2 * w2 * ch` buffers (98 MB for a 60 s window) and keeps `pw1`/`pw2`
-    /// working sets inside L2 cache on every CPU.
+    /// `h3` output rows with 3-row rolling rings per worker (~352 KiB at 128
+    /// mels and 256 channels: fits in private L2 on desktop, laptop, and big
+    /// mobile cores and in shared L3 on smaller efficiency cores such as
+    /// Cortex-A55). Avoids two `h2 * w2 * ch` buffers (98 MB for a 60 s window)
+    /// and two `h3 * w3 * ch` intermediates.
     fn fused_convs(&self, features: &[f32], frames: usize, mels: usize) -> (Buf, usize) {
         let (ch, pad) = (self.channels, self.pad);
         let (h1, w1) = (out_len(frames, pad), out_len(mels, pad));
         let (h2, w2) = (out_len(h1, pad), out_len(w1, pad));
         let (h3, w3) = (out_len(h2, pad), out_len(w2, pad));
-        if h1 == 0 || h2 == 0 || h3 == 0 || w1 == 0 || w2 == 0 || w3 == 0 || ch == 0 {
+        if h3 == 0 {
             return (Buf::scratch(0), 0);
+        }
+        if h1 == 0 || h2 == 0 || w1 == 0 || w2 == 0 || w3 == 0 || ch == 0 {
+            return (Buf::scratch(0), h3);
         }
         let mut flat = Buf::scratch(h3 * ch * w3);
         let threads = team::threads().max(1);
@@ -905,7 +911,12 @@ fn tap_major((weight, bias): (Vec<f32>, Vec<f32>), ch: usize) -> (Vec<f32>, Vec<
 /// Output length of a kernel-3, stride-2 convolution with `pad` zeros
 /// before the input and one after.
 fn out_len(n: usize, pad: usize) -> usize {
-    (n + pad - 2) / 2 + 1
+    let padded = n.saturating_add(pad);
+    if padded < 2 {
+        0
+    } else {
+        (padded - 2) / 2 + 1
+    }
 }
 
 /// Input value at padded position (row, col), or None in the zero padding.
