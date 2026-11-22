@@ -100,6 +100,10 @@ pub(super) struct Config {
     /// (empty when `domain` covers all pinned CPUs or no pinning is needed).
     #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
     pub pin_cpus: Vec<usize>,
+    /// Windows multi-group affinity `(group, mask)` for `Spread::OneCache` on
+    /// hosts with more than 64 logical processors.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub pin_group: Option<(u16, usize)>,
 }
 
 pub struct Team {
@@ -122,6 +126,9 @@ pub struct Team {
     /// Multi-word Linux affinity CPU list for >64-CPU L3 pinning.
     #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
     pin_cpus: Vec<usize>,
+    /// Windows multi-group affinity `(group, mask)` for >64-CPU `OneCache` pinning.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pin_group: Option<(u16, usize)>,
     /// The last look at the processors.
     load: Mutex<Option<Look>>,
     /// One caller at a time; a nested call from inside a task runs inline.
@@ -159,10 +166,13 @@ impl Team {
             let for_worker = Arc::clone(&shared);
             let ideal = ideal_cpu(domain, &config.core_cpus, index + 1, threads);
             let pin_cpus = config.pin_cpus.clone();
+            let pin_group = config.pin_group;
             let spawned = std::thread::Builder::new()
                 .name(format!("trit-speech-{slot}-{index}"))
                 .spawn(move || {
-                    if !pin_cpus.is_empty() {
+                    if let Some((group, mask)) = pin_group {
+                        set_group_affinity(group, mask);
+                    } else if !pin_cpus.is_empty() {
                         set_affinity_cpus(&pin_cpus);
                     } else {
                         set_affinity(domain);
@@ -188,6 +198,7 @@ impl Team {
             heterogeneous: config.heterogeneous,
             core_cpus: config.core_cpus,
             pin_cpus: config.pin_cpus,
+            pin_group: config.pin_group,
             load: Mutex::new(None),
             submit: Mutex::new(()),
         }
@@ -452,16 +463,19 @@ pub fn enter(slot: usize) -> Entered {
     #[cfg(target_os = "android")]
     team.fit_to(thread_mask());
     let domain = team.domain.load(Ordering::Relaxed);
-    let (affinity, affinity_cpus) = if !team.pin_cpus.is_empty() {
-        (0, set_affinity_cpus(&team.pin_cpus))
+    let (affinity, affinity_cpus, affinity_group) = if let Some((group, mask)) = team.pin_group {
+        (0, Vec::new(), set_group_affinity(group, mask))
+    } else if !team.pin_cpus.is_empty() {
+        (0, set_affinity_cpus(&team.pin_cpus), None)
     } else {
-        (set_affinity(domain), Vec::new())
+        (set_affinity(domain), Vec::new(), None)
     };
     Entered {
         previous,
         throttle: keep_full_speed(),
         affinity,
         affinity_cpus,
+        affinity_group,
         priority: set_priority(ABOVE_NORMAL),
         ideal: set_ideal(ideal_cpu(domain, &team.core_cpus, 0, team.workers + 1)),
     }
@@ -469,12 +483,14 @@ pub fn enter(slot: usize) -> Entered {
 
 /// The caller's previous team, power throttling (`None`: nothing to
 /// restore), affinity mask (0: nothing to restore), multi-word affinity list,
-/// priority, and ideal processor (`None`: nothing to restore).
+/// Windows group affinity, priority, and ideal processor (`None`: nothing to
+/// restore).
 pub struct Entered {
     previous: usize,
     throttle: Option<Throttle>,
     affinity: usize,
     affinity_cpus: Vec<usize>,
+    affinity_group: Option<(u16, usize)>,
     priority: Option<i32>,
     ideal: Option<u32>,
 }
@@ -491,7 +507,9 @@ impl Drop for Entered {
         if let Some(priority) = self.priority {
             set_priority(priority);
         }
-        if !self.affinity_cpus.is_empty() {
+        if let Some((group, mask)) = self.affinity_group {
+            set_group_affinity(group, mask);
+        } else if !self.affinity_cpus.is_empty() {
             set_affinity_cpus(&self.affinity_cpus);
         } else {
             set_affinity(self.affinity);
@@ -899,29 +917,63 @@ fn set_affinity(mask: usize) -> usize {
     unsafe { SetThreadAffinityMask(GetCurrentThread(), mask) }
 }
 
-/// Linux and Android: the same, with `sched_setaffinity` on the calling thread.
+/// Windows: pins the calling thread to processor group `group` and mask `mask`,
+/// returning its previous `(group, mask)` if the call succeeds.
+#[cfg(windows)]
+fn set_group_affinity(group: u16, mask: usize) -> Option<(u16, usize)> {
+    use windows::Win32::System::SystemInformation::GROUP_AFFINITY;
+    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadGroupAffinity};
+    if mask == 0 {
+        return None;
+    }
+    let next = GROUP_AFFINITY {
+        Mask: mask,
+        Group: group,
+        Reserved: [0; 3],
+    };
+    let mut prev = GROUP_AFFINITY::default();
+    // SAFETY: the pseudo handle names the calling thread and both pointers name locals.
+    unsafe { SetThreadGroupAffinity(GetCurrentThread(), &next, Some(&mut prev)) }
+        .ok()
+        .ok()?;
+    (prev.Mask != 0).then_some((prev.Group, prev.Mask))
+}
+
+#[cfg(not(windows))]
+fn set_group_affinity(_group: u16, _mask: usize) -> Option<(u16, usize)> {
+    None
+}
+
+/// Linux and Android: the same, with a 16-word `sched_getaffinity` /
+/// `sched_setaffinity` buffer (up to 1024 CPUs) so hosts with >64 CPUs never
+/// reject a 1-word buffer with `EINVAL`.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn set_affinity(mask: usize) -> usize {
     extern "C" {
         fn sched_getaffinity(pid: i32, size: usize, mask: *mut usize) -> i32;
         fn sched_setaffinity(pid: i32, size: usize, mask: *const usize) -> i32;
     }
+    const WORDS: usize = 16;
     if mask == 0 {
         return 0;
     }
-    let size = std::mem::size_of::<usize>();
-    let mut previous = 0usize;
-    // SAFETY: pid 0 is the calling thread; both masks are `size` bytes. A
-    // mask outside the allowed processors fails and changes nothing. A
-    // previous mask with processors past the first 64 reads as 0: nothing
-    // to restore.
+    let bytes = WORDS * std::mem::size_of::<usize>();
+    let mut previous = [0usize; WORDS];
+    let mut next = [0usize; WORDS];
+    next[0] = mask;
+    // SAFETY: pid 0 is the calling thread; both buffers hold `bytes` bytes.
     unsafe {
-        if sched_getaffinity(0, size, &mut previous) != 0 || sched_setaffinity(0, size, &mask) != 0
+        if sched_getaffinity(0, bytes, previous.as_mut_ptr()) != 0
+            || sched_setaffinity(0, bytes, next.as_ptr()) != 0
         {
             return 0;
         }
     }
-    previous
+    if previous[1..].iter().all(|&word| word == 0) {
+        previous[0]
+    } else {
+        0
+    }
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
@@ -1036,6 +1088,7 @@ fn team() -> &'static Team {
                 heterogeneous: false,
                 core_cpus: Vec::new(),
                 pin_cpus: Vec::new(),
+                pin_group: None,
             },
         )
     })

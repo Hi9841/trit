@@ -117,23 +117,33 @@ pub fn isa_problem() -> Option<String> {
     })
 }
 
-/// One physical core: its processor bitmask inside the active 64-bit group
-/// (0 when pinning is unavailable or the host spans multiple groups / >64 CPUs)
-/// and its relative performance class/capacity (higher is faster).
+/// One physical core: its Windows processor group (0 elsewhere), its bitmask
+/// inside the active 64-bit group (0 when pinning is unavailable or the host
+/// uses multi-word CPU lists), and its relative performance class/capacity
+/// (higher is faster).
 #[derive(Clone, Copy)]
 struct CoreInfo {
+    group: u16,
     mask: usize,
     class: u64,
 }
 
+/// Best single-L3 team when a host exceeds a single 64-bit mask (multi-group
+/// Windows or >64-CPU Linux).
+struct WideOneCache {
+    threads: usize,
+    pin_group: Option<(u16, usize)>,
+    pin_cpus: Vec<usize>,
+}
+
 /// Physical cores and L3 cache domains `(mask, size_bytes)`. When CPUs span
 /// multiple Windows processor groups or Linux CPU ids >= 64, `wide_one_cache`
-/// carries the best single-L3 core count and its CPU list (for Linux multi-word
-/// pinning) so `Spread::OneCache` preserves L3 locality.
+/// carries the best single-L3 core count and its group/CPU affinity target so
+/// `Spread::OneCache` preserves L3 locality.
 struct Topology {
     cores: Vec<CoreInfo>,
     l3: Vec<(usize, u32)>,
-    wide_one_cache: Option<(usize, Vec<usize>)>,
+    wide_one_cache: Option<WideOneCache>,
 }
 
 /// Team size, pinning mask, equal L3 domains for steering, heterogeneity flag,
@@ -154,13 +164,15 @@ fn team_config(spread: Spread) -> team::Config {
         .filter(|t| *t > 0)
     {
         let threads = threads.min(MAX_THREADS);
+        // `TRIT_THREADS` disables fast-core pinning, so on Android check speed
+        // differences across all CPUs rather than only the fast subset.
         #[cfg(target_os = "android")]
-        let heterogeneous = threads > 1 && android_fast.is_some_and(|(_, _, h)| h);
+        let heterogeneous = threads > 1 && android_fast.is_some_and(|(_, _, _, all_h)| all_h);
         #[cfg(not(target_os = "android"))]
         let heterogeneous = threads > 1
             && layout
                 .as_ref()
-                .is_some_and(|t| cores_heterogeneous(&t.cores, 0));
+                .is_some_and(|t| cores_heterogeneous(&t.cores, None, 0));
         return team::Config {
             threads,
             domain: 0,
@@ -168,22 +180,24 @@ fn team_config(spread: Spread) -> team::Config {
             heterogeneous,
             core_cpus,
             pin_cpus: Vec::new(),
+            pin_group: None,
         };
     }
     #[cfg(target_os = "android")]
-    if let Some((threads, mask, heterogeneous)) = android_fast {
+    if let Some((threads, mask, fast_hetero, _)) = android_fast {
         return team::Config {
             threads,
             domain: mask,
             domains: Vec::new(),
-            heterogeneous,
+            heterogeneous: fast_hetero,
             core_cpus: Vec::new(),
             pin_cpus: Vec::new(),
+            pin_group: None,
         };
     }
     let fallback = || {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-        (threads, 0usize, Vec::new())
+        (threads, 0usize, Vec::new(), None)
     };
     // Not measured on a hybrid CPU yet, so `TRIT_FAST_CORES=1` turns it on:
     // with few fast cores, all the cores can be the faster team.
@@ -197,20 +211,21 @@ fn team_config(spread: Spread) -> team::Config {
                 heterogeneous: false,
                 core_cpus,
                 pin_cpus: Vec::new(),
+                pin_group: None,
             };
         }
     }
-    let (threads, domain, pin_cpus) = match (spread, layout.as_ref()) {
+    let (threads, domain, pin_cpus, pin_group) = match (spread, layout.as_ref()) {
         (Spread::OneCache, Some(t)) => {
-            if let Some((n, cpus)) = &t.wide_one_cache {
-                (*n, 0, cpus.clone())
+            if let Some(wide) = &t.wide_one_cache {
+                (wide.threads, 0, wide.pin_cpus.clone(), wide.pin_group)
             } else {
                 pick_domain(&t.cores, &t.l3)
-                    .map(|(n, d)| (n, d, Vec::new()))
+                    .map(|(n, d)| (n, d, Vec::new(), None))
                     .unwrap_or_else(fallback)
             }
         }
-        (Spread::AllCores, Some(t)) if !t.cores.is_empty() => (t.cores.len(), 0, Vec::new()),
+        (Spread::AllCores, Some(t)) if !t.cores.is_empty() => (t.cores.len(), 0, Vec::new(), None),
         _ => fallback(),
     };
     let threads = threads.clamp(1, MAX_THREADS);
@@ -221,7 +236,7 @@ fn team_config(spread: Spread) -> team::Config {
     let heterogeneous = threads > 1
         && layout
             .as_ref()
-            .is_some_and(|t| cores_heterogeneous(&t.cores, domain));
+            .is_some_and(|t| cores_heterogeneous(&t.cores, pin_group, domain));
     let domains = layout
         .as_ref()
         .map(|t| equal_domains(t, domain))
@@ -233,6 +248,7 @@ fn team_config(spread: Spread) -> team::Config {
         heterogeneous,
         core_cpus,
         pin_cpus,
+        pin_group,
     }
 }
 
@@ -240,6 +256,9 @@ fn team_config(spread: Spread) -> team::Config {
 /// class first so hybrid CPUs with asymmetric SMT (e.g. 8P+16E) never place
 /// two workers on SMT siblings of the same core.
 fn physical_core_cpus(cores: &[CoreInfo]) -> Vec<u32> {
+    if cores.iter().any(|c| c.group != 0) {
+        return Vec::new();
+    }
     let allowed = allowed_mask();
     let mut ordered: Vec<(u64, u32)> = cores
         .iter()
@@ -252,14 +271,18 @@ fn physical_core_cpus(cores: &[CoreInfo]) -> Vec<u32> {
     ordered.into_iter().map(|(_, cpu)| cpu).collect()
 }
 
-/// True when the physical cores selected by `domain` (0: all cores) span
-/// performance classes differing by more than 10 %.
-fn cores_heterogeneous(cores: &[CoreInfo], domain: usize) -> bool {
+/// True when the physical cores selected by `pin_group` or `domain` (0: all
+/// cores) span performance classes differing by more than 10 %.
+fn cores_heterogeneous(cores: &[CoreInfo], pin_group: Option<(u16, usize)>, domain: usize) -> bool {
     let mut min_class = u64::MAX;
     let mut max_class = 0u64;
     let mut seen = 0usize;
     for core in cores {
-        if domain != 0 && core.mask != 0 && core.mask & domain == 0 {
+        if let Some((g, mask)) = pin_group {
+            if core.group != g || (core.mask != 0 && core.mask & mask == 0) {
+                continue;
+            }
+        } else if domain != 0 && core.mask != 0 && core.mask & domain == 0 {
             continue;
         }
         min_class = min_class.min(core.class);
@@ -450,8 +473,9 @@ fn topology() -> Option<Topology> {
 
     if !single_group {
         // Multi-group process (>64 logical CPUs): count only cores in allowed
-        // groups, disable single-group 64-bit pinning, and keep the best L3
-        // domain's core count so `Spread::OneCache` still avoids cross-CCD scaling.
+        // groups, and pin `Spread::OneCache` to the best single L3 domain's
+        // `(group, mask)` via `SetThreadGroupAffinity`.
+        let multi_l3 = raw_l3.len() > 1;
         let wide_one_cache = raw_l3
             .iter()
             .filter_map(|&(g, mask, size)| {
@@ -459,13 +483,17 @@ fn topology() -> Option<Topology> {
                     .iter()
                     .filter(|(cg, cm, _)| *cg == g && (*cm & mask) != 0)
                     .count();
-                (n > 0).then_some((n, size))
+                (n > 0).then_some((n, size, g, mask))
             })
-            .max_by_key(|&(n, size)| (n, size))
-            .map(|(n, _)| (n, Vec::new()));
+            .max_by_key(|&(n, size, _, _)| (n, size))
+            .map(|(n, _, g, mask)| WideOneCache {
+                threads: n,
+                pin_group: multi_l3.then_some((g, mask)),
+                pin_cpus: Vec::new(),
+            });
         let cores = raw_cores
             .into_iter()
-            .map(|(_, _, class)| CoreInfo { mask: 0, class })
+            .map(|(group, mask, class)| CoreInfo { group, mask, class })
             .collect();
         return Some(Topology {
             cores,
@@ -478,7 +506,7 @@ fn topology() -> Option<Topology> {
     let cores: Vec<CoreInfo> = raw_cores
         .into_iter()
         .filter(|(_, mask, _)| mask & allowed != 0)
-        .map(|(_, mask, class)| CoreInfo { mask, class })
+        .map(|(group, mask, class)| CoreInfo { group, mask, class })
         .collect();
     if cores.is_empty() {
         return None;
@@ -592,7 +620,11 @@ fn sysfs_topology(root: &std::path::Path, allowed: Option<&[usize]>) -> Option<T
                 0
             };
             seen_cores.push(siblings);
-            cores.push(CoreInfo { mask, class });
+            cores.push(CoreInfo {
+                group: 0,
+                mask,
+                class,
+            });
         }
         for index in 0..8 {
             let cache = dir.join(format!("cache/index{index}"));
@@ -643,7 +675,11 @@ fn sysfs_topology(root: &std::path::Path, allowed: Option<&[usize]>) -> Option<T
             (n > 0).then_some((n, size, list))
         })
         .max_by_key(|(n, size, _)| (*n, *size))
-        .map(|(n, _, list)| (n, if multi_l3 { list } else { Vec::new() }));
+        .map(|(n, _, list)| WideOneCache {
+            threads: n,
+            pin_group: None,
+            pin_cpus: if multi_l3 { list } else { Vec::new() },
+        });
     Some(Topology {
         cores,
         l3: Vec::new(),
@@ -764,7 +800,11 @@ fn topology() -> Option<Topology> {
             if include {
                 let class = (levels - level) as u64;
                 for _ in 0..count {
-                    cores.push(CoreInfo { mask: 0, class });
+                    cores.push(CoreInfo {
+                        group: 0,
+                        mask: 0,
+                        class,
+                    });
                 }
             }
         }
@@ -774,7 +814,11 @@ fn topology() -> Option<Topology> {
             .and_then(|c| usize::try_from(c).ok())
             .filter(|&c| c > 0)?;
         for _ in 0..count {
-            cores.push(CoreInfo { mask: 0, class: 1 });
+            cores.push(CoreInfo {
+                group: 0,
+                mask: 0,
+                class: 1,
+            });
         }
     }
     Some(Topology {
@@ -791,10 +835,11 @@ fn topology() -> Option<Topology> {
 
 /// Android: the fast cores, those with at least half the capacity of the
 /// fastest (`cpuN/cpu_capacity`, else `cpufreq/cpuinfo_max_freq`), along with
-/// whether the selected fast cores themselves span multiple speed tiers (e.g.
-/// Snapdragon Prime + Performance clusters).
+/// heterogeneity flags for the selected fast subset (`fast_hetero`, e.g.
+/// Snapdragon Prime + Performance) and for all cores (`all_hetero`, used when
+/// `TRIT_THREADS` disables fast-core pinning).
 #[cfg(target_os = "android")]
-fn fast_cores(root: &std::path::Path) -> Option<(usize, usize, bool)> {
+fn fast_cores(root: &std::path::Path) -> Option<(usize, usize, bool, bool)> {
     let read = |cpu: usize, file: &str| -> Option<u64> {
         let path = root.join(format!("cpu{cpu}/{file}"));
         std::fs::read_to_string(path).ok()?.trim().parse().ok()
@@ -809,6 +854,12 @@ fn fast_cores(root: &std::path::Path) -> Option<(usize, usize, bool)> {
         speeds = speeds_from("cpufreq/cpuinfo_max_freq");
     }
     let fastest = speeds.iter().map(|(_, speed)| *speed).max()?;
+    let slowest_all = speeds
+        .iter()
+        .map(|(_, speed)| *speed)
+        .min()
+        .unwrap_or(fastest);
+    let all_hetero = speeds.len() > 1 && slowest_all.saturating_mul(10) < fastest.saturating_mul(9);
     let selected: Vec<(usize, u64)> = speeds
         .into_iter()
         .filter(|(_, speed)| 2 * speed >= fastest)
@@ -820,7 +871,7 @@ fn fast_cores(root: &std::path::Path) -> Option<(usize, usize, bool)> {
         .iter()
         .fold(0usize, |mask, (cpu, _)| mask | (1usize << cpu));
     let min_speed = selected.iter().map(|(_, s)| *s).min().unwrap_or(fastest);
-    let heterogeneous =
+    let fast_hetero =
         selected.len() > 1 && min_speed.saturating_mul(10) < fastest.saturating_mul(9);
-    Some((selected.len(), mask, heterogeneous))
+    Some((selected.len(), mask, fast_hetero, all_hetero))
 }

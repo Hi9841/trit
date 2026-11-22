@@ -3719,6 +3719,7 @@ each, `oploop/results/s1122/ab_v2_*.txt`):
   - `src/cpu/activation.rs`: `vbslq_f32` with `vcgeq_f32`/`vcleq_f32` in NEON `exp`/`exp4`
     so both quiet and signaling NaNs clamp to `LOW` like x86 and scalar.
   - `src/cpu/mod.rs`, `src/cpu/team.rs`: Windows multi-group `GetProcessGroupAffinity`
-    filtering + best-L3 `OneCache` sizing; Linux >64-CPU L3 domain selection + multi-word
-    `sched_setaffinity` pinning up to 1024 CPUs; Android `TRIT_THREADS` preserves speed-tier
-    heterogeneity detection.
+    filtering + `SetThreadGroupAffinity` `OneCache` pinning; Linux >64-CPU L3 domain
+    selection + 16-word `sched_getaffinity`/`sched_setaffinity` pinning up to 1024 CPUs
+    (both `set_affinity` and `set_affinity_cpus`); Android `TRIT_THREADS` checks speed-tier
+    heterogeneity across all CPUs when unpinned.
