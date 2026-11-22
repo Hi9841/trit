@@ -35,7 +35,6 @@ struct Live<S> {
     tokens: Vec<usize>,
     score: f32,
     state: S,
-    logits: Buf,
     /// The best next tokens and their scores, best first: filled by the
     /// beam's task of a step. The caller gives it its room, so the task
     /// allocates nothing.
@@ -54,15 +53,23 @@ struct Ended {
 /// logits are `logits`, for at most `limit` tokens. `mask(scores, tokens)`
 /// blocks the tokens a sequence may not take next; `step(states, tokens)`
 /// feeds `tokens[i]` to `states[i]`, all beams as one batch (the weights are
-/// read once per step), and returns the next logits of each. `S` is the
-/// decoder's own state (its self-attention caches), cloned when a beam splits.
+/// read once per step), and returns their next logits packed as `beams x vocab`
+/// in one contiguous buffer. `S` is the decoder's own state (its self-attention
+/// caches), cloned when a beam splits.
 pub fn search<S: Clone + Send>(
     (width, rules): (usize, Rules),
     (state, logits): (S, Buf),
     (limit, eos): (usize, usize),
     mask: impl Fn(&mut [f32], &[usize]) + Sync,
-    mut step: impl FnMut(&mut [S], &[usize]) -> Vec<Buf>,
+    mut step: impl FnMut(&mut [S], &[usize]) -> Buf,
 ) -> Best {
+    let vocab = logits.len();
+    if vocab == 0 {
+        return Best {
+            tokens: Vec::new(),
+            log_probability: 0.0,
+        };
+    }
     // The candidates each sequence offers.
     let offered = match rules {
         Rules::OpenAi => width + 1,
@@ -72,39 +79,48 @@ pub fn search<S: Clone + Send>(
         tokens: Vec::new(),
         score: 0.0,
         state,
-        logits,
         offers: Vec::with_capacity(offered + 1),
     }];
+    let mut logits = Some(logits);
     let mut ended: Vec<Ended> = Vec::new();
     for generated in 0..limit {
         let last = generated + 1 == limit;
         // (score, beam, token), best first.
-        // One task per sequence: each reads its own logits (three passes
+        // One task per sequence: each reads its own logits row (three passes
         // over the vocabulary). One after the other on the caller, 5 beams
         // took 0.65 ms of each Whisper step, with all other threads idle.
+        let mut step_logits = logits.take().expect("live beam logits");
+        assert_eq!(step_logits.len(), live.len() * vocab);
         let scores = crate::prof::span(crate::prof::Stage::BeamScores);
-        crate::cpu::team::chunks_mut(&mut live, 1, |_, beam| {
+        let logits_ptr = crate::cpu::team::SendPtr::new(&mut step_logits);
+        crate::cpu::team::chunks_mut(&mut live, 1, |b, beam| {
             let beam = &mut beam[0];
+            // SAFETY: each task owns a disjoint `vocab`-wide row of `step_logits`,
+            // which outlives `chunks_mut`.
+            let row = unsafe { logits_ptr.slice_mut(b * vocab, vocab) };
             // log softmax(x) = (x - max) - log sum exp(x - max); the order of
             // the logits is the order of their log probabilities.
             let (max, log_sum) = match rules {
                 Rules::OpenAi => {
-                    mask(&mut beam.logits, &beam.tokens);
-                    log_sum_exp(&beam.logits)
+                    mask(row, &beam.tokens);
+                    log_sum_exp(row)
                 }
                 Rules::Transformers => {
-                    let normalizer = log_sum_exp(&beam.logits);
-                    mask(&mut beam.logits, &beam.tokens);
+                    let normalizer = log_sum_exp(row);
+                    mask(row, &beam.tokens);
                     normalizer
                 }
             };
-            top(&beam.logits, offered, &mut beam.offers);
+            top(row, offered, &mut beam.offers);
             let score = beam.score;
             for (_, logit) in &mut beam.offers {
                 *logit = score + ((*logit - max) - log_sum);
             }
         });
         scores.end();
+        // Return the `beams x vocab` buffer to the pool before `step` runs so
+        // the next vocab projection reuses it in place.
+        drop(step_logits);
         let mut candidates: Vec<(f32, usize, usize)> = Vec::with_capacity(live.len() * offered);
         for (b, beam) in live.iter().enumerate() {
             candidates.extend(beam.offers.iter().map(|(token, score)| (*score, b, *token)));
@@ -181,24 +197,22 @@ pub fn search<S: Clone + Send>(
             states.extend(state);
         }
         let fed: Vec<usize> = kept.iter().map(|(_, token, _)| *token).collect();
-        let logits = if kept.is_empty() {
-            Vec::new()
+        logits = if kept.is_empty() {
+            None
         } else {
             let _span = crate::prof::span(crate::prof::Stage::BeamStep);
-            step(&mut states, &fed)
+            Some(step(&mut states, &fed))
         };
         live = kept
             .iter()
             .zip(states)
-            .zip(logits)
-            .map(|((&(b, token, score), state), logits)| {
+            .map(|(&(b, token, score), state)| {
                 let mut tokens = parents[b].0.clone();
                 tokens.push(token);
                 Live {
                     tokens,
                     score,
                     state,
-                    logits,
                     offers: Vec::with_capacity(offered + 1),
                 }
             })

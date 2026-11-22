@@ -289,7 +289,7 @@ impl Moonshine {
         run.map_or(ids, bias::Run::finish)
     }
 
-    fn step_beams(&self, cross: &[HeadMajor], caches: &mut [Cache], tokens: &[usize]) -> Vec<Buf> {
+    fn step_beams(&self, cross: &[HeadMajor], caches: &mut [Cache], tokens: &[usize]) -> Buf {
         let c = &self.config;
         let (d, m) = (c.d, tokens.len());
         let mut x = Buf::scratch(m * d);
@@ -351,19 +351,10 @@ impl Moonshine {
             normed
         };
         caches.iter_mut().for_each(|cache| cache.position += 1);
-        let logits = self
-            .head
+        self.head
             .as_ref()
             .unwrap_or(&self.embed)
-            .forward(&normed, m);
-        logits
-            .chunks_exact(c.vocab)
-            .map(|row| {
-                let mut out = Buf::scratch(c.vocab);
-                out.copy_from_slice(row);
-                out
-            })
-            .collect()
+            .forward(&normed, m)
     }
 
     fn step(&self, cross: &[HeadMajor], cache: &mut Cache, token: usize) -> Buf {

@@ -177,8 +177,8 @@ impl Whisper {
 
     /// Feeds `tokens[i]` to `sessions[i]` (beams of one window, which share
     /// its cross-attention keys) as one batch, so each layer's weights are
-    /// read once for all beams. Returns the next logits of each.
-    pub fn step_beams(&self, sessions: &mut [Session], tokens: &[usize]) -> Vec<Buf> {
+    /// read once for all beams. Returns their next logits as `beams x vocab`.
+    pub fn step_beams(&self, sessions: &mut [Session], tokens: &[usize]) -> Buf {
         let c = &self.config;
         let (d, m) = (c.d, tokens.len());
         let cross = std::sync::Arc::clone(&sessions[0].cross);
@@ -237,15 +237,7 @@ impl Whisper {
             normed
         };
         sessions.iter_mut().for_each(|s| s.position += 1);
-        let logits = self.embed.forward(&normed, m);
-        logits
-            .chunks_exact(c.vocab)
-            .map(|row| {
-                let mut out = Buf::scratch(c.vocab);
-                out.copy_from_slice(row);
-                out
-            })
-            .collect()
+        self.embed.forward(&normed, m)
     }
 
     /// Feeds `tokens` as one batch (a prompt) and returns the logits after

@@ -201,14 +201,16 @@ impl Canary {
         if beam > 1 && dictionary.is_none() {
             // A beam's state: its caches; their length is its position.
             let step = |states: &mut [Caches], tokens: &[usize]| {
-                states
-                    .iter_mut()
-                    .zip(tokens)
-                    .map(|((keys, values), &token)| {
-                        let position = keys[0].len() / d;
-                        self.forward(&[token], position, &cross, (keys, values))
-                    })
-                    .collect()
+                let mut packed = Buf::scratch(tokens.len() * c.vocab);
+                for (row, ((keys, values), &token)) in packed
+                    .chunks_exact_mut(c.vocab)
+                    .zip(states.iter_mut().zip(tokens))
+                {
+                    let position = keys[0].len() / d;
+                    let logits = self.forward(&[token], position, &cross, (keys, values));
+                    row.copy_from_slice(&logits);
+                }
+                packed
             };
             let limit = c.max_tokens.saturating_sub(prompt.len());
             return crate::models::parts::beam::search(
