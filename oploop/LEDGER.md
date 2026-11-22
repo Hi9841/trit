@@ -3583,3 +3583,81 @@ x86-64 Windows and aarch64-linux-android.
   - `bench/paths.py`: Redux identical across default, `scalar`, `avx2`, `avxvnni`, and
     `TRIT_THREADS=1`.
   - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.
+
+### SI-058 `fgemm::matmul_into` 4x6 AVX-512 tile and L1 column-panel blocking (reverted)
+
+- Re-profile after `K8` (`prof_K8_redux_long.txt`, `prof_K8_unified_long.txt`) showed
+  `f32 into 685 x 128` (`m <= 32`) at 71 to 77 % of floor in FastConformer attention.
+- Tested an AVX-512 `4 x 6` tile (`tile_wide<4, 6>`) when `!k.is_multiple_of(1024)` plus
+  L1 column-panel blocking in `src/cpu/fgemm.rs`.
+- Result (`K8_si057.dll` vs `B_si058.dll`, 3 rounds each, `oploop/results/s1122/ab_si058_*.txt`):
+  regressed across every journey (`kernel_bench` f32 `256x256` -14 %, 1-thread `685x128` -24 %;
+  Parakeet Redux `long-clean` B/A 1.101 fwd / 1.091 rev = +9.5 % slower, Redux `clean` +2.0 %,
+  Unified Q8_0 `long-clean` +4.1 %, Moonshine tiny `clean` +1.7 %; 0 texts differed).
+- Cause: `4 + 6 = 10` concurrent input and weight streams exceed Zen 4's 8-way L1D
+  associativity and stream prefetcher capacity and add 24 horizontal reductions.
+- Decision: revert (`git checkout -- src/cpu/fgemm.rs`). Keep `4 x 3` / `5 x 3` tiles.
+
+### SI-059 Parallel strip-chunked `HeadMajor::new` and inline small `Gelu::apply` (reverted)
+
+- Re-profile after `K8` (`prof_K8_whisper_clean.txt`) showed `head-major copy` at 303.2 ms
+  (6 heads on 16 threads) and `GELU pass` at 257.3 ms (21,184 decoder calls of `5 x 1536`).
+- Tested two variants (`K8_si057.dll` vs `B_si059.dll` and `B_si059b.dll`, 3 rounds each,
+  `oploop/results/s1122/ab_si059*.txt`, 0 texts differed on all runs):
+  - `SI-059` (both strip-chunked 8x8 AVX2 `HeadMajor::new` + inline `Gelu <= 16384`):
+    Whisper tiny `clean` fwd B/A 1.020 (+2.0 % slower, CPU 1.038), rev B/A 0.992 (mixed /
+    net slower); Moonshine tiny `clean` fwd 0.999, rev 0.996 (flat, CPU 1.028).
+  - `SI-059b` (`Gelu::apply` `GELU_CHUNK = 8192` alone, keeping `5 x 1536` inline):
+    Whisper tiny `clean` fwd B/A 1.005 (p = 0.0013), rev B/A 1.002 (p = 0.72) — slightly
+    slower; Moonshine tiny `clean` fwd 0.998 (0.2 %, flat).
+- Cause: splitting `HeadMajor` across 16 threads pulled 9 MB of keys/values across both CCDs
+  (instead of staying inside CCD0's 96 MB V-cache on 6 threads), and 5 spinning cores finish
+  5 rows of exact `erfcc` GELU faster (~2 us) than 1 core inline (~4-5 us).
+- Decision: revert (`git checkout -- src/layers.rs`).
+
+### SI-060 Zero-copy `values` and task batching in `attention_steps` (reverted)
+
+- Re-profile after `K8` (`prof_K8_moonshine_clean.txt`, `prof_K8_whisper_clean.txt`) showed
+  `self-attention of a decoder step` at 194.6 ms (33,930 calls) on Moonshine tiny and
+  146.2 ms (21,184 calls) on Whisper tiny.
+- Tested two variants (`K8_si057.dll` vs `B_si060.dll` and `B_si060b.dll`, 3 rounds each,
+  `oploop/results/s1122/ab_si060*.txt`, 0 texts differed on all runs):
+  - `SI-060` (inline `<= 16384`, 1 task/sequence for `tk < 128`, plus strided `matmul_nn`
+    directly over `values` without copying `vh`/`head_out`): Moonshine tiny `clean` fwd B/A
+    1.025 (p = 3.6e-24), rev A/B 1.025 (+2.5 % slower); Whisper tiny `clean` neutral (fwd
+    0.997, rev 1.006).
+  - `SI-060b` (keep `sequences * kv_heads` tasks, only add `fgemm::matmul_nn_strided_into`
+    to skip copying `vh` and `head_out`): Moonshine tiny `clean` fwd 0.998 (p = 0.038),
+    rev 1.020 (p = 0.029, noisy); Whisper tiny `clean` fwd 0.996 (p = 0.76), rev 1.002
+    (p = 0.48).
+- Cause: 5 sequence tasks leave 3 of 8 spinning cores idle on Moonshine tiny, inline steps
+  are slower than the hot-spinning 8-core team, and reading strided `values` (1.1-1.5 KB
+  stride) offers no wall gain over copying 16-30 tiny rows into contiguous L1 scratch.
+- Decision: revert (`git checkout -- src/cpu/fgemm.rs src/layers.rs`). Stop optimization
+  loop (three consecutive reverted hypotheses after re-profiling; dominant kernels sit at
+  87 to 94 % of hardware peak).
+
+### Final A/B (`ea900fd` vs `b77e6b5`, 8 kept commits, 3 reverted)
+
+Interleaved A/B (`oploop/results/s1122/A0_ea900fd.dll` vs `FINAL.dll`, quiet 7950X3D,
+3 rounds each in forward and reversed orders; `other` sets 1 round quality/speed check;
+`oploop/results/s1122/ab_final_*.txt`):
+
+| Journey | A0 median (rounds) | Final median (rounds) | Per-clip Final/A0 (fwd / rev) | Round wall Final/A0 | CPU Final/A0 | Errors (A0 / Final) | Texts differing |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Parakeet Redux `clean,other` (400) | 30.0 ms (29.8-30.1) | 29.0 ms (28.5-29.4) | 0.970 / 0.964 (-3.3 %) | 0.968 / 0.942 | 0.975 / 0.942 | 81, 172 / 81, 172 | 0 / 400 |
+| Parakeet Redux `long-clean,long-other` (80) | 442.8 ms (441.7-450.2) | 426.2 ms (422.7-428.9) | 0.953 / 0.957 (-4.5 %) | 0.953 / 0.956 | 0.955 / 0.957 | 187, 479 / 187, 479 | 0 / 80 |
+| Parakeet Unified Q8_0 `clean` (200) | 45.0 ms (44.6-45.0) | 43.0 ms (42.8-43.4) | 0.963 / 0.964 (-3.7 %) | 0.961 / 0.965 | 0.983 / 0.952 | 56 / 56 | 0 / 200 |
+| Parakeet Unified Q8_0 `long-clean` (40) | 591.4 ms (583.5-597.5) | 568.6 ms (564.3-570.6) | 0.949 / 0.961 (-4.5 %) | 0.950 / 0.960 | 0.949 / 0.960 | 120 / 120 | 0 / 40 |
+| Whisper tiny `clean` (200) | 37.7 ms (37.3-38.0) | 33.7 ms (33.5-33.8) | 0.904 / 0.899 (-9.9 %) | 0.902 / 0.900 | 0.876 / 0.901 | 231 / 231 | 0 / 200 |
+| Whisper tiny `other` (200, 1 rd) | 36.2 ms | 31.1 ms | 0.867 (-13.3 %) | 0.856 | 0.872 | 487 / 487 | 0 / 200 |
+| Moonshine tiny `clean` (200) | 18.4 ms (18.3-18.9) | 16.1 ms (15.9-16.3) | 0.885 / 0.882 (-11.7 %) | 0.891 / 0.895 | 0.926 / 0.907 | 133 / 133 | 0 / 200 |
+| Moonshine tiny `other` (200, 1 rd) | 18.3 ms | 15.7 ms | 0.880 (-12.0 %) | 0.885 | 0.898 | 374 / 374 | 0 / 200 |
+
+All paired signed-rank p <= 1.8e-12 in both orders. Final gates clean: `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets --release -- -D warnings` (default and `--features trit/gpu`),
+`trit skill --check skill/SKILL.md --check-docs docs/reference.md --check-catalog site/catalog.json`,
+`bench/paths.py` (Redux, Unified Q8_0, Moonshine tiny identical across default, `scalar`, `avx2`,
+`avxvnni`, `TRIT_THREADS=1`; Whisper tiny identical across default, `avx2`, `avxvnni`,
+`TRIT_THREADS=1` with the pre-existing `scalar` difference on clip `1089-134686-0009.wav`), and
+`TRIT_KERNELS=v2` exact text match on Redux.
