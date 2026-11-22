@@ -251,6 +251,28 @@ impl Whisper {
     /// Feeds `tokens` as one batch (a prompt) and returns the logits after
     /// the last one.
     pub fn feed(&self, session: &mut Session, tokens: &[usize]) -> Buf {
+        let x = self.run_batch(session, tokens);
+        let d = self.config.d;
+        let normed = self.decoder_norm.apply(&x[(tokens.len() - 1) * d..], d);
+        self.embed.forward(&normed, 1)
+    }
+
+    /// Feeds `tokens` (at least two) as one causal batch and returns the
+    /// logits after the first token followed by the logits after the last,
+    /// reading the token table once for both (`2 x vocab`).
+    pub fn feed_first_and_last(&self, session: &mut Session, tokens: &[usize]) -> Buf {
+        assert!(tokens.len() >= 2);
+        let d = self.config.d;
+        let x = self.run_batch(session, tokens);
+        let mut pair = Buf::scratch(2 * d);
+        pair[..d].copy_from_slice(&x[..d]);
+        pair[d..].copy_from_slice(&x[(tokens.len() - 1) * d..]);
+        let normed = self.decoder_norm.apply(&pair, d);
+        self.embed.forward(&normed, 2)
+    }
+
+    /// Runs the decoder layers over `tokens` causally and updates `session`.
+    fn run_batch(&self, session: &mut Session, tokens: &[usize]) -> Buf {
         let c = &self.config;
         let (d, m) = (c.d, tokens.len());
         let mut x = Buf::scratch(m * d);
@@ -303,7 +325,6 @@ impl Whisper {
             }
         }
         session.position += m;
-        let normed = self.decoder_norm.apply(&x[(m - 1) * d..], d);
-        self.embed.forward(&normed, 1)
+        x
     }
 }

@@ -206,31 +206,54 @@ impl Family for Whisper {
         speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             let encoded = self.model.encode(&self.mel.compute(window));
             let mut session = self.model.session(&encoded);
-            let logits = self.model.step(&mut session, self.tokens.sot);
-            let no_speech = self
-                .tokens
-                .no_speech
-                .map_or(0.0, |id| log_softmax(&logits, id).exp());
-            let mut prompt = Vec::with_capacity(previous.len() + 4);
-            if !previous.is_empty() {
-                // The previous text goes before the start of the transcript:
-                // decode again from position 0 with it.
-                session.rewind(0, self.model.config.d);
-                prompt.extend_from_slice(&previous);
+            let vocab = self.model.config.vocab;
+            let (no_speech, prompt_logits, first_offset) = if previous.is_empty()
+                && (self.tokens.languages.is_empty() || language.is_some())
+            {
+                // Prompt tokens are known up front: run one causal decoder batch
+                // and read the token table once for both `sot` and the last prompt token.
+                let mut prompt = Vec::with_capacity(4);
                 prompt.push(self.tokens.sot);
-            }
-            if !self.tokens.languages.is_empty() {
-                // Detect once, on the first window, then keep it.
-                let lang = *language.get_or_insert_with(|| {
-                    let ids = self.tokens.languages.iter().map(|(_, id)| *id);
-                    ids.max_by(|a, b| logits[*a].total_cmp(&logits[*b]))
-                        .unwrap_or(self.tokens.sot)
-                });
-                prompt.push(lang);
-                prompt.extend(task);
-            }
-            prompt.push(self.tokens.no_timestamps);
-            let first = self.model.feed(&mut session, &prompt);
+                if let Some(lang) = language {
+                    prompt.push(lang);
+                    prompt.extend(task);
+                }
+                prompt.push(self.tokens.no_timestamps);
+                if let Some(id) = self.tokens.no_speech {
+                    let both = self.model.feed_first_and_last(&mut session, &prompt);
+                    let no_speech = log_softmax(&both[..vocab], id).exp();
+                    (no_speech, both, vocab)
+                } else {
+                    (0.0, self.model.feed(&mut session, &prompt), 0)
+                }
+            } else {
+                let logits = self.model.step(&mut session, self.tokens.sot);
+                let no_speech = self
+                    .tokens
+                    .no_speech
+                    .map_or(0.0, |id| log_softmax(&logits, id).exp());
+                let mut prompt = Vec::with_capacity(previous.len() + 4);
+                if !previous.is_empty() {
+                    // The previous text goes before the start of the transcript:
+                    // decode again from position 0 with it.
+                    session.rewind(0, self.model.config.d);
+                    prompt.extend_from_slice(&previous);
+                    prompt.push(self.tokens.sot);
+                }
+                if !self.tokens.languages.is_empty() {
+                    // Detect once, on the first window, then keep it.
+                    let lang = *language.get_or_insert_with(|| {
+                        let ids = self.tokens.languages.iter().map(|(_, id)| *id);
+                        ids.max_by(|a, b| logits[*a].total_cmp(&logits[*b]))
+                            .unwrap_or(self.tokens.sot)
+                    });
+                    prompt.push(lang);
+                    prompt.extend(task);
+                }
+                prompt.push(self.tokens.no_timestamps);
+                (no_speech, self.model.feed(&mut session, &prompt), 0)
+            };
+            let first = &prompt_logits[first_offset..first_offset + vocab];
             let after_prompt = session.position;
             // OpenAI's rule: decode at temperature 0; while the text repeats
             // itself (compresses too well) or the model is unsure, decode
@@ -241,7 +264,7 @@ impl Family for Whisper {
                     session.rewind(after_prompt, self.model.config.d);
                 }
                 let mut logits = Buf::scratch(first.len());
-                logits.copy_from_slice(&first);
+                logits.copy_from_slice(first);
                 let decoded =
                     self.generate(&mut session, logits, *temperature, options.beams(BEAMS));
                 let unsure = decoded.log_probability < LOW_LOG_PROBABILITY;
