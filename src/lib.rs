@@ -107,12 +107,15 @@ pub struct LoadOptions {
 /// and do not finish sooner than calls made one after another.
 pub struct Trit {
     model: models::Model,
+    mapping: Option<std::sync::Arc<cpu::store::Mapping>>,
+    cache_hit: bool,
 }
 
 impl std::fmt::Debug for Trit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Trit")
             .field("kind", &self.kind())
+            .field("cache_hit", &self.cache_hit)
             .finish_non_exhaustive()
     }
 }
@@ -141,10 +144,27 @@ impl Trit {
         let cache = options
             .cache
             .then(|| cpu::store::file_name(options.precision.name()));
-        let model = cpu::store::load(model_dir, cache, progress, release_memory, || {
+        let loaded = cpu::store::load(model_dir, cache, progress, release_memory, || {
             models::Model::load(model_dir, options.precision, options.device)
         })?;
-        Ok(Self { model })
+        Ok(Self {
+            model: loaded.model,
+            mapping: loaded.mapping,
+            cache_hit: loaded.cache_hit,
+        })
+    }
+
+    /// Hints to the OS to fault mapped cache weight pages into RAM
+    /// sequentially. No-op when the model was loaded without a mapped cache.
+    pub fn prefetch_weights(&self) {
+        if let Some(mapping) = &self.mapping {
+            mapping.prefetch();
+        }
+    }
+
+    /// True when this model loaded from an existing mapped weight cache.
+    pub fn loaded_from_cache(&self) -> bool {
+        self.cache_hit
     }
 
     /// The model family, for example `parakeet_tdt`.
@@ -217,7 +237,7 @@ pub fn release_memory() {
     #[cfg(feature = "gpu")]
     gpu::trim();
     // Each thread's heap keeps the pages its own frees left (layers load
-    // on the workers), and mi_collect reaches only the calling thread's.
-    // SAFETY: mi_collect only walks mimalloc's own free lists.
-    cpu::team::on_every_thread(|| unsafe { libmimalloc_sys::mi_collect(true) });
+    // on the workers); ask each worker to collect asynchronously without
+    // blocking `team::submit`.
+    cpu::team::request_collect();
 }

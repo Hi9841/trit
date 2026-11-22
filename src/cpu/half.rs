@@ -18,8 +18,28 @@ pub struct HalfDense {
 }
 
 impl HalfDense {
+    /// Maps a previously cached f16 layer directly from the active read cache.
+    pub fn load_cached(
+        tag: &str,
+        bias: Option<Vec<f32>>,
+        out_features: usize,
+        in_features: usize,
+    ) -> Option<Self> {
+        if bias.as_ref().is_some_and(|b| b.len() != out_features) {
+            return None;
+        }
+        let weight = Store::<u16>::mapped(tag, out_features * in_features)?;
+        Some(Self {
+            out_features,
+            in_features,
+            weight,
+            bias,
+        })
+    }
+
     /// `weight` is row-major `out x in` f16 bits.
-    pub fn new(
+    pub fn new_named(
+        tag: Option<&str>,
         weight: Vec<u16>,
         bias: Option<Vec<f32>>,
         out_features: usize,
@@ -33,10 +53,14 @@ impl HalfDense {
                 weight.len()
             ));
         }
+        let weight = match tag {
+            Some(tag) => Store::named(tag, weight),
+            None => Store::weights(weight),
+        };
         Ok(Self {
             out_features,
             in_features,
-            weight: Store::weights(weight),
+            weight,
             bias,
         })
     }

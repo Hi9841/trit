@@ -85,10 +85,38 @@ pub struct Ternary {
 }
 
 impl Ternary {
-    /// A layer as the model file stores it: `packed` holds 5 base-3 digits
-    /// per byte, least significant first, `ceil(k / 5)` bytes per row, and
-    /// `w = scale[row][col / GROUP] * (code - 1)`.
-    pub fn from_base3(
+    /// Maps a previously cached ternary layer directly from the active read
+    /// cache without unpacking base-3 weights.
+    pub fn load_cached(tag: &str, n: usize, k: usize, group: usize) -> Option<Self> {
+        if group != GROUP || !k.is_multiple_of(GROUP) || super::v2::enabled() {
+            return None;
+        }
+        let detected = Isa::detect();
+        let rows = detected.rows();
+        let isa = if k.is_multiple_of(GROUP) && n.is_multiple_of(2 * rows) {
+            detected
+        } else {
+            Isa::Scalar
+        };
+        let scalar = isa == Isa::Scalar;
+        let groups = k / GROUP;
+        let code_len = if scalar { n * k } else { n * k / 4 };
+        let codes = Store::<u8>::mapped(&format!("{tag}:c"), code_len)?;
+        let scales = Store::<f32>::mapped(&format!("{tag}:s"), n * groups)?;
+        Some(Self {
+            isa,
+            n,
+            k,
+            codes,
+            scales,
+            v2: None,
+            #[cfg(feature = "gpu")]
+            gpu: None,
+        })
+    }
+
+    pub fn from_base3_named(
+        tag: Option<&str>,
         packed: &[u8],
         scales: &[f32],
         n: usize,
@@ -109,15 +137,14 @@ impl Ternary {
         {
             return Err(format!("ternary byte above 242 in row {row}"));
         }
-        Ok(Self::from_rows(
+        Ok(Self::from_rows_named(
+            tag,
             Isa::detect(),
             scales,
             n,
             k,
             |row, codes| {
                 let packed_row = &packed[row * row_bytes..(row + 1) * row_bytes];
-                // A copy of exactly 5 bytes for each file byte: a copy of a
-                // length the compiler does not know was most of a load.
                 let (fives, rest) = codes.as_chunks_mut::<5>();
                 for (five, byte) in fives.iter_mut().zip(packed_row) {
                     *five = DIGITS[usize::from(*byte)];
@@ -134,6 +161,17 @@ impl Ternary {
     /// `scales` is `n x (k / GROUP)`. Rows come one block at a time, so the
     /// whole byte-per-code matrix never exists.
     pub fn from_rows(
+        isa: Isa,
+        scales: &[f32],
+        n: usize,
+        k: usize,
+        row: impl Fn(usize, &mut [u8]),
+    ) -> Self {
+        Self::from_rows_named(None, isa, scales, n, k, row)
+    }
+
+    fn from_rows_named(
+        tag: Option<&str>,
         isa: Isa,
         scales: &[f32],
         n: usize,
@@ -189,12 +227,19 @@ impl Ternary {
                 }
             }
         }
+        let (codes, scales) = match tag {
+            Some(tag) => (
+                Store::named(&format!("{tag}:c"), packed),
+                Store::named(&format!("{tag}:s"), packed_scales),
+            ),
+            None => (Store::weights(packed), Store::weights(packed_scales)),
+        };
         Self {
             isa,
             n,
             k,
-            codes: Store::weights(packed),
-            scales: Store::weights(packed_scales),
+            codes,
+            scales,
             v2: None,
             #[cfg(feature = "gpu")]
             gpu: None,

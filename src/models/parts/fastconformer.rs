@@ -450,13 +450,23 @@ fn stacked(
         if group == 0 {
             return Err("config.json has no ternary_group_size for the ternary layers".into());
         }
+        let total_out = names.len() * out;
+        let tag = format!("ternary:{total_out}x{inp}:{group}:{}", names.join("+"));
+        let all_present = names
+            .iter()
+            .all(|name| t.has(&format!("{name}.qweight")) && t.has(&format!("{name}.scales")));
+        if all_present {
+            if let Some(layer) = Ternary::load_cached(&tag, total_out, inp, group) {
+                return layer.on_gpu(t.device()).map(Linear::Ternary);
+            }
+        }
         let mut packed = Vec::new();
         let mut scales = Vec::new();
         for name in names {
             packed.extend_from_slice(&t.u8(&format!("{name}.qweight"))?);
             scales.extend(t.f32_len(&format!("{name}.scales"), out * (inp / group))?);
         }
-        return Ternary::from_base3(&packed, &scales, names.len() * out, inp, group)
+        return Ternary::from_base3_named(Some(&tag), &packed, &scales, total_out, inp, group)
             .and_then(|layer| layer.on_gpu(t.device()))
             .map(Linear::Ternary);
     }
@@ -483,9 +493,19 @@ fn dense_in(t: &Tensors, name: &str, out: usize, inp: usize, gpu: bool) -> Resul
             Dense::load_cpu(t, &[(name, out)], inp)
         };
     }
-    let weight = t.f32_len(&format!("{name}.weight"), out * inp)?;
     let bias = t.f32_len(&format!("{name}.bias"), out)?;
-    let layer = Dense::new(weight, Some(bias), out, inp)?;
+    let tag = format!("dense_f32:{out}x{inp}:{name}");
+    if t.has(&format!("{name}.weight")) {
+        if let Some(layer) = Dense::load_f32_cached(&tag, Some(bias.clone()), out, inp) {
+            return if gpu {
+                layer.on_gpu(t.device())
+            } else {
+                Ok(layer)
+            };
+        }
+    }
+    let weight = t.f32_len(&format!("{name}.weight"), out * inp)?;
+    let layer = Dense::new_named(Some(&tag), weight, Some(bias), out, inp)?;
     if gpu {
         layer.on_gpu(t.device())
     } else {
@@ -1423,6 +1443,36 @@ impl RelCache {
         }
         rows
     }
+    /// Maps a precomputed position table for `POSITION_REACH` directly from the
+    /// active read cache, or projects and stores it under `tag`.
+    fn warm_cached(
+        &self,
+        tag: &str,
+        (d, heads): (usize, usize),
+        project: impl Fn(&[f32], usize) -> Buf,
+    ) {
+        let reach = POSITION_REACH;
+        let count = 2 * reach + 1;
+        if let Some(mapped) = Store::<f32>::mapped(tag, count * d) {
+            *self.table.write() = Some(Arc::new(RelRows {
+                reach,
+                rows: mapped,
+            }));
+            return;
+        }
+        let projected = project(&sines(reach, d), count);
+        let hd = d / heads;
+        let mut by_head = Buf::scratch(count * d);
+        team::chunks_mut(&mut by_head, count * hd, |h, head| {
+            for (row, out) in projected.chunks_exact(d).zip(head.chunks_exact_mut(hd)) {
+                out.copy_from_slice(&row[h * hd..][..hd]);
+            }
+        });
+        *self.table.write() = Some(Arc::new(RelRows {
+            reach,
+            rows: Store::named(tag, by_head.into_vec()),
+        }));
+    }
 }
 
 /// The sinusoid table of the last reach and width that a position table
@@ -1761,9 +1811,15 @@ impl Parakeet {
         frames: usize,
         cancel: Option<&Cancel>,
     ) -> Option<(Buf, usize)> {
+        if cancel.is_some_and(Cancel::is_cancelled) {
+            return None;
+        }
         let (x, t) = self.subsampling.forward(features, frames, self.config.mels);
         // A take too short for one frame of this subsampler holds no speech.
-        if t == 0 || self.vad.as_ref().is_some_and(|vad| !vad.speech(&x, t)) {
+        if t == 0
+            || cancel.is_some_and(Cancel::is_cancelled)
+            || self.vad.as_ref().is_some_and(|vad| !vad.speech(&x, t))
+        {
             return None;
         }
         Some(self.encode_subsampled(x, t, cancel))
@@ -1827,14 +1883,16 @@ impl Parakeet {
         #[cfg(feature = "gpu")]
         let _host = HostProducts::new();
         let shape = (self.config.hidden, self.config.heads);
-        for block in &self.blocks {
+        for (index, block) in self.blocks.iter().enumerate() {
             if let Positions::Relative {
                 rel_k, rel_cache, ..
             } = &block.positions
             {
-                rel_cache.rows(POSITION_REACH + 1, shape, Store::weights, |table, rows| {
-                    rel_k.forward(table, rows)
-                });
+                let tag = format!(
+                    "rel_pos:{index}:{POSITION_REACH}:{}x{}",
+                    self.config.hidden, self.config.heads
+                );
+                rel_cache.warm_cached(&tag, shape, |table, rows| rel_k.forward(table, rows));
             }
         }
         // The layers are done with the sinusoid table of the load.
@@ -1853,10 +1911,16 @@ impl Parakeet {
         banned: &[usize],
         cancel: Option<&Cancel>,
     ) -> (Vec<usize>, Vec<usize>) {
+        if cancel.is_some_and(Cancel::is_cancelled) {
+            return (Vec::new(), Vec::new());
+        }
         let c = &self.config;
         match &self.head {
             Head::Transducer(tdt) => {
                 let projected = tdt.encoder_projector.forward(encoded, t);
+                if cancel.is_some_and(Cancel::is_cancelled) {
+                    return (Vec::new(), Vec::new());
+                }
                 tdt.decode(c, &projected, t, dictionary, banned, cancel)
             }
             Head::Ctc(head) => crate::models::parts::ctc::greedy(
