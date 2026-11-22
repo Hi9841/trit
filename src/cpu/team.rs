@@ -86,6 +86,18 @@ struct Shared {
     wake: Condvar,
 }
 
+pub(super) struct Config {
+    pub threads: usize,
+    pub domain: usize,
+    pub domains: Vec<usize>,
+    /// True when the team spans cores of different speed tiers (e.g. Intel
+    /// P+E+LP-E, Apple M5 Pro/Max Super+Performance, Snapdragon big.LITTLE).
+    pub heterogeneous: bool,
+    /// One logical processor per physical core (fast cores first), so Windows
+    /// ideal-processor hints never place two workers on SMT siblings of one core.
+    pub core_cpus: Vec<u32>,
+}
+
 pub struct Team {
     shared: Arc<Shared>,
     workers: usize,
@@ -99,6 +111,10 @@ pub struct Team {
     home: usize,
     /// Domains of the same size that the team can move to, its own included.
     domains: Vec<usize>,
+    /// True when the team mixes fast and slow cores (triggers finer dynamic work stealing).
+    heterogeneous: bool,
+    /// One logical processor per physical core, fast cores first.
+    core_cpus: Vec<u32>,
     /// The last look at the processors.
     load: Mutex<Option<Look>>,
     /// One caller at a time; a nested call from inside a task runs inline.
@@ -112,9 +128,11 @@ thread_local! {
 }
 
 impl Team {
-    /// `threads` includes the calling thread, which works on every job too.
+    /// `config.threads` includes the calling thread, which works on every job too.
     /// `slot` names the threads: a process can have both teams.
-    fn new(slot: usize, threads: usize, domain: usize, domains: Vec<usize>) -> Self {
+    fn new(slot: usize, config: Config) -> Self {
+        let threads = config.threads.max(1);
+        let domain = config.domain;
         let shared = Arc::new(Shared {
             generation: AtomicUsize::new(0),
             job: AtomicPtr::new(std::ptr::null_mut()),
@@ -124,7 +142,7 @@ impl Team {
             parked: AtomicUsize::new(0),
             // No generation has this value, so no worker rests before a call ends.
             rest: AtomicUsize::new(usize::MAX),
-            active: AtomicUsize::new(threads.max(1)),
+            active: AtomicUsize::new(threads),
             lock: Mutex::new(()),
             wake: Condvar::new(),
         });
@@ -132,13 +150,14 @@ impl Team {
         let mut handles = Vec::with_capacity(workers);
         for index in 0..workers {
             let for_worker = Arc::clone(&shared);
+            let ideal = ideal_cpu(domain, &config.core_cpus, index + 1, threads);
             let spawned = std::thread::Builder::new()
                 .name(format!("trit-speech-{slot}-{index}"))
                 .spawn(move || {
                     set_affinity(domain);
                     set_priority(ABOVE_NORMAL);
                     keep_full_speed();
-                    set_ideal(ideal_cpu(domain, index + 1, threads));
+                    set_ideal(ideal);
                     work(&for_worker, index, domain);
                 });
             match spawned {
@@ -153,7 +172,9 @@ impl Team {
             threads: handles,
             domain: AtomicUsize::new(domain),
             home: domain,
-            domains,
+            domains: config.domains,
+            heterogeneous: config.heterogeneous,
+            core_cpus: config.core_cpus,
             load: Mutex::new(None),
             submit: Mutex::new(()),
         }
@@ -257,7 +278,11 @@ impl Team {
         self.domain.store(domain, Ordering::Relaxed);
         let threads = self.workers + 1;
         for (index, handle) in self.threads.iter().enumerate() {
-            pin_thread(handle, domain, ideal_cpu(domain, index + 1, threads));
+            pin_thread(
+                handle,
+                domain,
+                ideal_cpu(domain, &self.core_cpus, index + 1, threads),
+            );
         }
     }
 
@@ -397,14 +422,10 @@ fn work(s: &Shared, index: usize, domain: usize) {
 pub const TEAMS: usize = super::Spread::TEAMS;
 static TEAM: [OnceLock<Team>; TEAMS] = [const { OnceLock::new() }; TEAMS];
 
-/// Starts team `slot` with the threads (the caller included), the affinity
-/// mask (0: none), and the masks it can move to that `size` gives. Later
-/// calls do nothing.
-pub fn start(slot: usize, size: impl FnOnce() -> (usize, usize, Vec<usize>)) {
-    TEAM[slot].get_or_init(|| {
-        let (threads, domain, domains) = size();
-        Team::new(slot, threads.max(1), domain, domains)
-    });
+/// Starts team `slot` with the configuration that `config` gives. Later calls
+/// do nothing.
+pub(super) fn start(slot: usize, config: impl FnOnce() -> Config) {
+    TEAM[slot].get_or_init(|| Team::new(slot, config()));
 }
 
 /// Runs the calling thread's steps on team `slot`, pinned to its L3 domain,
@@ -423,7 +444,7 @@ pub fn enter(slot: usize) -> Entered {
         throttle: keep_full_speed(),
         affinity: set_affinity(domain),
         priority: set_priority(ABOVE_NORMAL),
-        ideal: set_ideal(ideal_cpu(domain, 0, team.workers + 1)),
+        ideal: set_ideal(ideal_cpu(domain, &team.core_cpus, 0, team.workers + 1)),
     }
 }
 
@@ -465,7 +486,21 @@ impl Drop for Entered {
 /// Windows assigns ideal processors round-robin per process: two team
 /// threads with one ideal processor made some processes wait a time slice
 /// per step.
-fn ideal_cpu(domain: usize, index: usize, threads: usize) -> Option<u32> {
+fn ideal_cpu(domain: usize, core_cpus: &[u32], index: usize, threads: usize) -> Option<u32> {
+    if !core_cpus.is_empty() {
+        let filtered: Vec<u32> = if domain != 0 {
+            core_cpus
+                .iter()
+                .copied()
+                .filter(|&cpu| cpu < usize::BITS && (domain >> cpu) & 1 == 1)
+                .collect()
+        } else {
+            core_cpus.to_vec()
+        };
+        if !filtered.is_empty() {
+            return Some(filtered[index % filtered.len()]);
+        }
+    }
     let mask = if domain != 0 { domain } else { process_mask() };
     let cpus: Vec<u32> = (0..usize::BITS)
         .filter(|bit| mask >> bit & 1 == 1)
@@ -635,7 +670,45 @@ pub(super) fn process_mask() -> usize {
     }
 }
 
-#[cfg(not(windows))]
+/// Linux and Android: allowed CPU ids of this process/thread (up to 1024 CPUs),
+/// or `None` when the kernel call fails.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(super) fn process_cpus() -> Option<Vec<usize>> {
+    extern "C" {
+        fn sched_getaffinity(pid: i32, size: usize, mask: *mut usize) -> i32;
+    }
+    const WORDS: usize = 16;
+    let mut words = [0usize; WORDS];
+    let bytes = WORDS * std::mem::size_of::<usize>();
+    // SAFETY: pid 0 names the calling thread and `words` holds `bytes` bytes.
+    if unsafe { sched_getaffinity(0, bytes, words.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let mut cpus = Vec::new();
+    for (w, &word) in words.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            cpus.push(w * usize::BITS as usize + bit);
+            bits &= bits - 1;
+        }
+    }
+    (!cpus.is_empty()).then_some(cpus)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(super) fn process_mask() -> usize {
+    let Some(cpus) = process_cpus() else {
+        return 0;
+    };
+    if cpus.iter().any(|&cpu| cpu >= usize::BITS as usize) {
+        return 0;
+    }
+    cpus.into_iter()
+        .fold(0usize, |mask, cpu| mask | (1usize << cpu))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 pub(super) fn process_mask() -> usize {
     0
 }
@@ -836,15 +909,7 @@ fn set_affinity(_mask: usize) -> usize {
 /// For a thread that did not set its own, that is the app's cpuset now.
 #[cfg(target_os = "android")]
 pub(super) fn thread_mask() -> usize {
-    extern "C" {
-        fn sched_getaffinity(pid: i32, size: usize, mask: *mut usize) -> i32;
-    }
-    let mut mask = 0usize;
-    // SAFETY: pid 0 is the calling thread; the mask is `size` bytes.
-    match unsafe { sched_getaffinity(0, std::mem::size_of::<usize>(), &mut mask) } {
-        0 => mask,
-        _ => 0,
-    }
+    process_mask()
 }
 
 /// Runs `run` once on every thread of every started team, the workers
@@ -901,15 +966,26 @@ fn team() -> &'static Team {
     TEAM[CURRENT.get()].get_or_init(|| {
         Team::new(
             CURRENT.get(),
-            std::thread::available_parallelism().map_or(4, |n| n.get()),
-            0,
-            Vec::new(),
+            Config {
+                threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
+                domain: 0,
+                domains: Vec::new(),
+                heterogeneous: false,
+                core_cpus: Vec::new(),
+            },
         )
     })
 }
 
+/// Active threads on the current team (respects Android cpuset reductions).
 pub fn threads() -> usize {
-    team().workers + 1
+    team().shared.active.load(Ordering::Relaxed).max(1)
+}
+
+/// True when the current team spans cores with meaningfully different speeds
+/// (e.g. Intel hybrid P+E, Apple M5 Pro/Max Super+Performance, ARM big.LITTLE).
+pub fn is_heterogeneous() -> bool {
+    team().heterogeneous
 }
 
 /// True on a thread that runs a task of a job: a step there runs inline.

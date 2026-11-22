@@ -34,11 +34,12 @@ pub(super) enum Path {
     Scalar,
     #[cfg(target_arch = "x86_64")]
     Avx2,
-    /// 8 outputs per block with 256-bit `vpdpbusd`: the VEX form (AVX-VNNI),
-    /// or the EVEX form where AVX-512 VNNI runs it (`TRIT_ISA=avxvnni`, to
-    /// check this path on such a CPU).
+    /// 8 outputs per block with 256-bit `vpdpbusd` (VEX form, AVX-VNNI).
     #[cfg(target_arch = "x86_64")]
-    Vnni256,
+    Vnni256Vex,
+    /// 8 outputs per block with 256-bit `vpdpbusd` (EVEX form, AVX-512 VNNI + VL).
+    #[cfg(target_arch = "x86_64")]
+    Vnni256Evex,
     #[cfg(target_arch = "x86_64")]
     Vnni512,
     /// 8 outputs per block, widening multiplies (every arm64 CPU).
@@ -60,7 +61,7 @@ impl Path {
         match self {
             Self::Scalar => 1,
             #[cfg(target_arch = "x86_64")]
-            Self::Avx2 | Self::Vnni256 => 8,
+            Self::Avx2 | Self::Vnni256Vex | Self::Vnni256Evex => 8,
             #[cfg(target_arch = "x86_64")]
             Self::Vnni512 => 16,
             #[cfg(target_arch = "aarch64")]
@@ -86,23 +87,23 @@ impl Path {
 
     fn flipped(self) -> bool {
         #[cfg(target_arch = "x86_64")]
-        return matches!(self, Self::Vnni256 | Self::Vnni512);
+        return matches!(self, Self::Vnni256Vex | Self::Vnni256Evex | Self::Vnni512);
         #[cfg(not(target_arch = "x86_64"))]
         false
     }
 }
 
-/// One 8-output block of `Path::Vnni256` over every frame, 4 frames per
-/// tile, with `$dpbusd` the VEX or the EVEX instruction (the same result).
+/// One 8-output block of 256-bit VNNI over `frames`, 4 frames per tile, with
+/// `$dpbusd` the VEX or the EVEX instruction (the same result).
 #[cfg(target_arch = "x86_64")]
 macro_rules! vnni256_task {
-    ($self:ident, $q:ident, $block:ident, $out:ident, $dpbusd:ident) => {{
+    ($self:ident, $q:ident, $block:ident, $frames:ident, $out:ident, $dpbusd:ident) => {{
         use std::arch::x86_64::*;
         let (k, k4s, groups) = ($self.k, $self.k / 4, $self.k / $self.group);
         let quads = $self.group / 4;
-        let mut frame0 = 0;
-        while frame0 < $q.m {
-            let frames = ($q.m - frame0).min(4);
+        let mut frame0 = $frames.start;
+        while frame0 < $frames.end {
+            let frames = ($frames.end - frame0).min(4);
             let mut acc = [_mm256_setzero_ps(); 4];
             for g in 0..groups {
                 let mut dots = [_mm256_setzero_si256(); 4];
@@ -140,7 +141,7 @@ pub fn path_name() -> &'static str {
         #[cfg(target_arch = "x86_64")]
         Path::Avx2 => "avx2",
         #[cfg(target_arch = "x86_64")]
-        Path::Vnni256 => "vnni256",
+        Path::Vnni256Vex | Path::Vnni256Evex => "vnni256",
         #[cfg(target_arch = "x86_64")]
         Path::Vnni512 => "vnni512",
         #[cfg(target_arch = "aarch64")]
@@ -438,75 +439,44 @@ impl Int8 {
         match self.path {
             Path::Scalar => grouped(self.n, q.m * self.k, |row| self.scalar_row(&q, row, ptr)),
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: Path::detect confirmed the CPU features.
-            Path::Vnni512 => {
-                let units = self.n / (2 * rows);
-                let threads = team::threads().max(1);
-                let min_spans = threads / gcd(units, threads);
-                let spans =
-                    if threads > 1 && min_spans > 1 && units < 6 * threads && q.m >= min_spans * 24
-                    {
-                        if units * min_spans < 2 * threads && q.m >= min_spans * 48 {
-                            min_spans * 2
-                        } else {
-                            min_spans
-                        }
-                    } else {
-                        1
-                    };
-                if spans > 1 {
-                    let tile_groups = q.m.div_ceil(6);
-                    team::for_each(units * spans, |task| {
-                        let (unit, span) = (task / spans, task % spans);
-                        let start = (span * tile_groups / spans) * 6;
-                        let end = (((span + 1) * tile_groups / spans) * 6).min(q.m);
-                        // SAFETY: Path::detect confirmed AVX-512 VNNI; each (unit, span)
-                        // writes disjoint output rows and columns.
-                        unsafe { self.vnni_task(&q, unit, start..end, bias, ptr) }
-                    });
-                } else {
-                    // SAFETY: Path::detect confirmed AVX-512 VNNI; each unit writes
-                    // disjoint output columns.
-                    grouped(units, 2 * block_work, |unit| unsafe {
-                        self.vnni_task(&q, unit, 0..q.m, bias, ptr)
-                    });
-                }
-            }
-            #[cfg(target_arch = "x86_64")]
-            // SAFETY: Path::detect confirmed the CPU features: AVX-VNNI, or
-            // AVX-512 VNNI (with VL), which runs the EVEX form.
-            Path::Vnni256 => grouped(self.n / rows, block_work, |block| unsafe {
-                if is_x86_feature_detected!("avxvnni") {
-                    self.vnni256_vex(&q, block, ptr)
-                } else {
-                    self.vnni256_evex(&q, block, ptr)
-                }
+            Path::Vnni512 => dispatch_2d(self.n / (2 * rows), 2 * block_work, q.m, 6, |unit, f| {
+                // SAFETY: `isa_choice` confirmed AVX-512 VNNI; each (unit, f) writes disjoint outputs.
+                unsafe { self.vnni_task(&q, unit, f, bias, ptr) }
             }),
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: Isa::detect confirmed the CPU features.
-            Path::Avx2 => grouped(self.n / rows, block_work, |block| unsafe {
-                self.avx2_task(&q, block, ptr)
+            Path::Vnni256Vex => dispatch_2d(self.n / rows, block_work, q.m, 4, |block, f| {
+                // SAFETY: `isa_choice` confirmed AVX2 + FMA + AVX-VNNI.
+                unsafe { self.vnni256_vex(&q, block, f, ptr) }
+            }),
+            #[cfg(target_arch = "x86_64")]
+            Path::Vnni256Evex => dispatch_2d(self.n / rows, block_work, q.m, 4, |block, f| {
+                // SAFETY: `isa_choice` confirmed AVX2 + FMA + AVX-512F/BW/VL/VNNI.
+                unsafe { self.vnni256_evex(&q, block, f, ptr) }
+            }),
+            #[cfg(target_arch = "x86_64")]
+            Path::Avx2 => dispatch_2d(self.n / rows, block_work, q.m, 4, |block, f| {
+                // SAFETY: `isa_choice` confirmed AVX2 + FMA.
+                unsafe { self.avx2_task(&q, block, f, ptr) }
             }),
             #[cfg(target_arch = "aarch64")]
-            // SAFETY: NEON is part of every arm64 CPU.
-            Path::Neon => grouped(self.n / rows, block_work, |block| unsafe {
-                self.neon_task::<neon::Smull>(&q, block, ptr)
+            Path::Neon => dispatch_2d(self.n / rows, block_work, q.m, 4, |block, f| {
+                // SAFETY: NEON is part of every arm64 CPU.
+                unsafe { self.neon_task::<neon::Smull>(&q, block, f, ptr) }
             }),
             #[cfg(target_arch = "aarch64")]
-            // SAFETY: Isa::detect confirmed the dot product feature.
-            Path::NeonDot => grouped(self.n / rows, block_work, |block| unsafe {
-                self.sdot_task(&q, block, ptr)
+            Path::NeonDot => dispatch_2d(self.n / rows, block_work, q.m, 4, |block, f| {
+                // SAFETY: `isa_choice` confirmed the arm64 dotprod feature.
+                unsafe { self.sdot_task(&q, block, f, ptr) }
             }),
             #[cfg(target_arch = "aarch64")]
             Path::NeonMmla => {
                 let x = paired(&q, self.k, self.k / self.group);
                 // A tile reads whole frame pairs: an odd last frame costs a pair.
                 let work = x.pairs * 2 * self.k * rows;
-                // SAFETY: Path::detect confirmed the int8 matrix multiply
-                // feature; each task writes the columns of its own blocks.
-                grouped(self.n / rows, work, |block| unsafe {
-                    self.mmla_task(&x, q.m, block, ptr)
-                })
+                dispatch_2d(self.n / rows, work, x.pairs, 2, |block, pairs| {
+                    // SAFETY: `isa_choice` confirmed arm64 i8mm; each (block, pairs) writes disjoint outputs.
+                    unsafe { self.mmla_task(&x, q.m, block, pairs, ptr) }
+                });
             }
         }
         out
@@ -701,27 +671,45 @@ impl Int8 {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma,avxvnni")]
-    unsafe fn vnni256_vex(&self, q: &Quantized, block: usize, out: OutPtr) {
+    unsafe fn vnni256_vex(
+        &self,
+        q: &Quantized,
+        block: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
         use std::arch::x86_64::_mm256_dpbusd_avx_epi32 as dpbusd;
-        vnni256_task!(self, q, block, out, dpbusd);
+        vnni256_task!(self, q, block, frames, out, dpbusd);
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2,fma,avx512vl,avx512vnni")]
-    unsafe fn vnni256_evex(&self, q: &Quantized, block: usize, out: OutPtr) {
+    #[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512vl,avx512vnni")]
+    unsafe fn vnni256_evex(
+        &self,
+        q: &Quantized,
+        block: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
         use std::arch::x86_64::_mm256_dpbusd_epi32 as dpbusd;
-        vnni256_task!(self, q, block, out, dpbusd);
+        vnni256_task!(self, q, block, frames, out, dpbusd);
     }
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
-    unsafe fn avx2_task(&self, q: &Quantized, block: usize, out: OutPtr) {
-        let mut frame = 0;
-        while frame + 4 <= q.m {
+    unsafe fn avx2_task(
+        &self,
+        q: &Quantized,
+        block: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        let mut frame = frames.start;
+        while frame + 4 <= frames.end {
             self.avx2_tile::<4>(q, block, frame, out);
             frame += 4;
         }
-        match q.m - frame {
+        match frames.end - frame {
             1 => self.avx2_tile::<1>(q, block, frame, out),
             2 => self.avx2_tile::<2>(q, block, frame, out),
             3 => self.avx2_tile::<3>(q, block, frame, out),
@@ -772,20 +760,32 @@ impl Int8 {
 
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "dotprod")]
-    unsafe fn sdot_task(&self, q: &Quantized, block: usize, out: OutPtr) {
-        self.neon_task::<neon::Sdot>(q, block, out);
+    unsafe fn sdot_task(
+        &self,
+        q: &Quantized,
+        block: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        self.neon_task::<neon::Sdot>(q, block, frames, out);
     }
 
-    /// One 8-output block over every frame, 4 frames per tile, as on AVX2.
+    /// One 8-output block over `frames`, 4 frames per tile, as on AVX2.
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
-    unsafe fn neon_task<D: neon::Dot>(&self, q: &Quantized, block: usize, out: OutPtr) {
-        let mut frame = 0;
-        while frame + 4 <= q.m {
+    unsafe fn neon_task<D: neon::Dot>(
+        &self,
+        q: &Quantized,
+        block: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        let mut frame = frames.start;
+        while frame + 4 <= frames.end {
             self.neon_tile::<4, D>(q, block, frame, out);
             frame += 4;
         }
-        match q.m - frame {
+        match frames.end - frame {
             1 => self.neon_tile::<1, D>(q, block, frame, out),
             2 => self.neon_tile::<2, D>(q, block, frame, out),
             3 => self.neon_tile::<3, D>(q, block, frame, out),
@@ -856,16 +856,23 @@ impl Int8 {
         }
     }
 
-    /// One 8-output block over every frame pair, two pairs per tile.
+    /// One 8-output block over `pairs`, two pairs per tile.
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "i8mm")]
-    unsafe fn mmla_task(&self, x: &Paired, m: usize, block: usize, out: OutPtr) {
-        let mut pair = 0;
-        while pair + 2 <= x.pairs {
+    unsafe fn mmla_task(
+        &self,
+        x: &Paired,
+        m: usize,
+        block: usize,
+        pairs: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        let mut pair = pairs.start;
+        while pair + 2 <= pairs.end {
             self.mmla_tile::<2>(x, m, block, pair, out);
             pair += 2;
         }
-        if pair < x.pairs {
+        if pair < pairs.end {
             self.mmla_tile::<1>(x, m, block, pair, out);
         }
     }
@@ -970,10 +977,13 @@ impl Drop for Paired {
 /// Below this total multiply-add count, run inline on the calling thread
 /// rather than paying cross-thread synchronization overhead.
 const INLINE_WORK: usize = 250_000;
-/// Least work per task once parallelized.
-const MIN_TASK_WORK: usize = 180_000;
+/// Least work per task on small/medium decoder steps.
+const MIN_DECODER_TASK_WORK: usize = 180_000;
+/// Least work of a large product task, in multiply-adds of whole tiles. Keeps
+/// task claims cheap on slower or arm64 cores while giving every thread plenty
+/// of chunks on large encoders.
+const MIN_TASK_WORK: usize = 800_000;
 
-#[cfg(target_arch = "x86_64")]
 fn gcd(mut a: usize, mut b: usize) -> usize {
     while b != 0 {
         (a, b) = (b, a % b);
@@ -981,24 +991,80 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
     a
 }
 
+/// Splits an int8 product over `(unit, frame_span)` when column units alone do
+/// not balance across the active team (or on heterogeneous CPUs that need finer
+/// chunks for fast cores to steal dynamically); otherwise delegates to `grouped`.
+fn dispatch_2d(
+    units: usize,
+    work_per_unit: usize,
+    extent: usize,
+    tile: usize,
+    run: impl Fn(usize, std::ops::Range<usize>) + Sync,
+) {
+    if units == 0 || extent == 0 {
+        return;
+    }
+    let threads = team::threads().max(1);
+    let hetero = team::is_heterogeneous();
+    let spans = if threads <= 1 {
+        1
+    } else if hetero {
+        let target = 4 * threads;
+        if units < target && extent >= 8 * tile {
+            target.div_ceil(units).min(extent / (4 * tile)).max(1)
+        } else {
+            1
+        }
+    } else {
+        let min_spans = threads / gcd(units, threads);
+        if min_spans > 1 && units < 6 * threads && extent >= min_spans * (4 * tile) {
+            if units * min_spans < 2 * threads && extent >= min_spans * (8 * tile) {
+                min_spans * 2
+            } else {
+                min_spans
+            }
+        } else {
+            1
+        }
+    };
+    if spans > 1 {
+        let tile_groups = extent.div_ceil(tile);
+        team::for_each(units * spans, |task| {
+            let (unit, span) = (task / spans, task % spans);
+            let start = (span * tile_groups / spans) * tile;
+            let end = (((span + 1) * tile_groups / spans) * tile).min(extent);
+            if start < end {
+                run(unit, start..end);
+            }
+        });
+    } else {
+        grouped(units, work_per_unit, |unit| run(unit, 0..extent));
+    }
+}
+
 /// Runs `run` for each of `units` units of `work` multiply-adds, running tiny
-/// products inline and spreading larger products evenly across threads.
+/// products inline and spreading larger products across threads (with finer
+/// chunks on heterogeneous teams so fast cores steal work from slower cores).
 fn grouped(units: usize, work: usize, run: impl Fn(usize) + Sync) {
     if units == 0 {
         return;
     }
     let threads = team::threads().max(1);
+    let hetero = team::is_heterogeneous();
     let total = units.saturating_mul(work);
     let tasks = if threads == 1 || total <= INLINE_WORK {
         1
     } else if total < 8_000_000 {
-        // Medium decoder steps: spread across up to one task per thread so
-        // synchronization is paid once without extra atomic claims.
-        total.div_ceil(MIN_TASK_WORK).min(threads).clamp(1, units)
+        let cap = if hetero { 4 * threads } else { threads };
+        total
+            .div_ceil(MIN_DECODER_TASK_WORK)
+            .min(cap)
+            .clamp(1, units)
     } else {
+        let waves = if hetero { 4 } else { 2 };
         let per_task = MIN_TASK_WORK
             .div_ceil(work.max(1))
-            .clamp(1, (units / (2 * threads)).max(1));
+            .clamp(1, (units / (waves * threads)).max(1));
         units.div_ceil(per_task).clamp(1, units)
     };
     team::for_each(tasks, |task| {

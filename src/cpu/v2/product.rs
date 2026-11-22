@@ -71,9 +71,8 @@ impl Path {
             match crate::cpu::isa::isa_choice().int8 {
                 First::Scalar => Self::Scalar,
                 First::Avx2 => Self::Avx2,
-                First::Vnni256 if is_x86_feature_detected!("avxvnni") => Self::Vnni256Vex,
-                First::Vnni256 if is_x86_feature_detected!("avx512vl") => Self::Vnni256Evex,
-                First::Vnni256 => Self::Avx2,
+                First::Vnni256Vex => Self::Vnni256Vex,
+                First::Vnni256Evex => Self::Vnni256Evex,
                 First::Vnni512 => Self::Vnni512,
             }
         }

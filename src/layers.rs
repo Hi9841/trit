@@ -52,10 +52,10 @@ impl Norm {
     }
 
     pub fn apply(&self, x: &[f32], d: usize) -> Buf {
-        debug_assert_eq!(d, self.weight.len());
+        assert!(d > 0 && d == self.weight.len() && x.len().is_multiple_of(d));
         let _span = crate::prof::span(crate::prof::Stage::Norm);
         let mut out = Buf::scratch(x.len());
-        let rows_per_task = (ELEMENTWISE_CHUNK / d.max(1)).max(1);
+        let rows_per_task = (ELEMENTWISE_CHUNK / d).max(1);
         team::chunks_mut(&mut out, rows_per_task * d, |block, chunk| {
             let first = block * rows_per_task;
             for (r, o) in chunk.chunks_exact_mut(d).enumerate() {
@@ -74,9 +74,10 @@ impl Norm {
 
     pub fn residual(&self, x: &mut [f32], y: &[f32], scale: f32) -> Buf {
         let size = self.weight.len();
+        assert!(size > 0 && x.len() == y.len() && x.len().is_multiple_of(size));
         let _span = crate::prof::span(crate::prof::Stage::Norm);
         let mut out = Buf::scratch(x.len());
-        let rows_per_task = (ELEMENTWISE_CHUNK / size.max(1)).max(1);
+        let rows_per_task = (ELEMENTWISE_CHUNK / size).max(1);
         let rows = team::SendPtr::new(x);
         team::chunks_mut(&mut out, rows_per_task * size, |block, chunk| {
             let first = block * rows_per_task;
@@ -171,9 +172,10 @@ impl RmsNorm {
 
     pub fn apply(&self, x: &[f32]) -> Buf {
         let d = self.weight.len();
+        assert!(d > 0 && x.len().is_multiple_of(d));
         let mut out = Buf::scratch(x.len());
         out.copy_from_slice(x);
-        let rows_per_task = (ELEMENTWISE_CHUNK / d.max(1)).max(1);
+        let rows_per_task = (ELEMENTWISE_CHUNK / d).max(1);
         team::chunks_mut(&mut out, rows_per_task * d, |_, rows| {
             self.apply_in_place(rows)
         });

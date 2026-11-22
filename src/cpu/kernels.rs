@@ -816,15 +816,19 @@ unsafe fn round_f16_f16c(value: f32) -> f32 {
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     use std::arch::x86_64::*;
+    assert!(src.len() == dst.len() && src.len().is_multiple_of(16));
     let p = src.as_ptr();
     let d = dst.as_mut_ptr();
     let high = _mm512_set1_epi32(127);
     let low = _mm512_set1_epi32(-127);
     if src.len() == 32 {
         // ggml Q8_0 block: keep both 16-lane vectors in registers so pass 2 never reloads.
+        // Put the new value first in `max_ps(val, acc)` so x86 `vmaxps` keeps the finite
+        // accumulator on NaN, matching `f32::max` in `quantize_scalar`.
         let x0 = _mm512_loadu_ps(p);
         let x1 = _mm512_loadu_ps(p.add(16));
-        let vmax = _mm512_max_ps(_mm512_abs_ps(x0), _mm512_abs_ps(x1));
+        let vmax0 = _mm512_max_ps(_mm512_abs_ps(x0), _mm512_setzero_ps());
+        let vmax = _mm512_max_ps(_mm512_abs_ps(x1), vmax0);
         let scale = group_scale(_mm512_reduce_max_ps(vmax));
         let inv = _mm512_set1_ps(1.0 / scale);
         let q0 = _mm512_max_epi32(
@@ -840,11 +844,15 @@ unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
         return (scale, _mm512_reduce_add_epi32(_mm512_add_epi32(q0, q1)));
     }
     let pairs = src.len() / 32;
+    let has_tail = src.len() % 32 == 16;
     let mut vmax0 = _mm512_setzero_ps();
     let mut vmax1 = _mm512_setzero_ps();
     for i in 0..pairs {
-        vmax0 = _mm512_max_ps(vmax0, _mm512_abs_ps(_mm512_loadu_ps(p.add(i * 32))));
-        vmax1 = _mm512_max_ps(vmax1, _mm512_abs_ps(_mm512_loadu_ps(p.add(i * 32 + 16))));
+        vmax0 = _mm512_max_ps(_mm512_abs_ps(_mm512_loadu_ps(p.add(i * 32))), vmax0);
+        vmax1 = _mm512_max_ps(_mm512_abs_ps(_mm512_loadu_ps(p.add(i * 32 + 16))), vmax1);
+    }
+    if has_tail {
+        vmax0 = _mm512_max_ps(_mm512_abs_ps(_mm512_loadu_ps(p.add(pairs * 32))), vmax0);
     }
     let scale = group_scale(_mm512_reduce_max_ps(_mm512_max_ps(vmax0, vmax1)));
     let inv = _mm512_set1_ps(1.0 / scale);
@@ -870,6 +878,17 @@ unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
         _mm_storeu_si128(d.add(i * 32).cast(), _mm512_cvtepi32_epi8(q0));
         _mm_storeu_si128(d.add(i * 32 + 16).cast(), _mm512_cvtepi32_epi8(q1));
     }
+    if has_tail {
+        let q0 = _mm512_max_epi32(
+            _mm512_min_epi32(
+                _mm512_cvtps_epi32(_mm512_mul_ps(_mm512_loadu_ps(p.add(pairs * 32)), inv)),
+                high,
+            ),
+            low,
+        );
+        vsum0 = _mm512_add_epi32(vsum0, q0);
+        _mm_storeu_si128(d.add(pairs * 32).cast(), _mm512_cvtepi32_epi8(q0));
+    }
     (
         scale,
         _mm512_reduce_add_epi32(_mm512_add_epi32(vsum0, vsum1)),
@@ -880,11 +899,12 @@ unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn quantize_avx2(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     use std::arch::x86_64::*;
+    assert!(src.len() == dst.len() && src.len().is_multiple_of(32));
     let p = src.as_ptr();
     let sign = _mm256_set1_ps(-0.0);
     let mut vmax = _mm256_setzero_ps();
     for i in 0..src.len() / 8 {
-        vmax = _mm256_max_ps(vmax, _mm256_andnot_ps(sign, _mm256_loadu_ps(p.add(i * 8))));
+        vmax = _mm256_max_ps(_mm256_andnot_ps(sign, _mm256_loadu_ps(p.add(i * 8))), vmax);
     }
     let mut lanes = [0.0f32; 8];
     _mm256_storeu_ps(lanes.as_mut_ptr(), vmax);
@@ -920,12 +940,13 @@ unsafe fn quantize_avx2(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
 #[cfg(target_arch = "aarch64")]
 unsafe fn quantize_neon(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     use std::arch::aarch64::*;
+    assert!(src.len() == dst.len() && src.len().is_multiple_of(32));
     let p = src.as_ptr();
     let mut vmax = vdupq_n_f32(0.0);
     for i in 0..src.len() / 4 {
-        vmax = vmaxq_f32(vmax, vabsq_f32(vld1q_f32(p.add(i * 4))));
+        vmax = vmaxnmq_f32(vmax, vabsq_f32(vld1q_f32(p.add(i * 4))));
     }
-    let scale = group_scale(vmaxvq_f32(vmax));
+    let scale = group_scale(vmaxnmvq_f32(vmax));
     let inv = vdupq_n_f32(1.0 / scale);
     let (limit, low) = (vdupq_n_s32(127), vdupq_n_s32(-127));
     let mut vsum = vdupq_n_s32(0);

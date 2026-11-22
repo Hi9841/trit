@@ -100,6 +100,7 @@ pub fn max(values: &[f32]) -> f32 {
 /// `sum_i exp(values[i] - shift)`, without writing the exponentials to memory.
 /// Accumulates in 16 fixed lanes and reduces with the binary tree of
 /// `_mm512_reduce_add_ps`, so AVX-512, AVX2, and NEON give the same bits.
+/// Nonfinite arguments clamp to `[LOW, HIGH]` (NaN clamps to `LOW`, matching x86 `maxps`/`minps`).
 pub fn exp_sum(values: &[f32], shift: f32) -> f32 {
     match level() {
         #[cfg(target_arch = "x86_64")]
@@ -255,7 +256,10 @@ fn scalar(v: f32, op: Op) -> f32 {
 }
 
 fn exp_scalar(x: f32) -> f32 {
-    let x = x.clamp(LOW, HIGH);
+    // IEEE maxNum/minNum clamps NaN to `LOW` (`f32::clamp` propagates NaN),
+    // matching x86 `maxps`/`minps` and NEON `vmaxnm`/`vminnm`.
+    #[allow(clippy::manual_clamp)]
+    let x = x.max(LOW).min(HIGH);
     let n = (x * LOG2E).round_ties_even();
     let r = x - n * LN2_HI - n * LN2_LO;
     let p = POLY.iter().fold(0.0f32, |p, c| p * r + c);
@@ -885,7 +889,7 @@ mod neon {
         let mut n = [vdupq_n_f32(0.0); 4];
         let mut r = [vdupq_n_f32(0.0); 4];
         for i in 0..4 {
-            x[i] = vminq_f32(vmaxq_f32(x[i], vdupq_n_f32(LOW)), vdupq_n_f32(HIGH));
+            x[i] = vminnmq_f32(vmaxnmq_f32(x[i], vdupq_n_f32(LOW)), vdupq_n_f32(HIGH));
         }
         for i in 0..4 {
             n_int[i] = vcvtnq_s32_f32(vmulq_n_f32(x[i], LOG2E));
@@ -922,7 +926,7 @@ mod neon {
 
     #[inline(always)]
     unsafe fn exp(x: float32x4_t) -> float32x4_t {
-        let x = vminq_f32(vmaxq_f32(x, vdupq_n_f32(LOW)), vdupq_n_f32(HIGH));
+        let x = vminnmq_f32(vmaxnmq_f32(x, vdupq_n_f32(LOW)), vdupq_n_f32(HIGH));
         let n_int = vcvtnq_s32_f32(vmulq_n_f32(x, LOG2E));
         let n = vcvtq_f32_s32(n_int);
         let r = vfmsq_n_f32(x, n, LN2_HI);

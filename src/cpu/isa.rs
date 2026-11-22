@@ -93,23 +93,46 @@ fn ternary_of(forced: &str) -> Isa {
 }
 
 fn int8_of(forced: &str, isa: Isa) -> Path {
-    match isa {
-        Isa::Scalar => Path::Scalar,
-        #[cfg(target_arch = "x86_64")]
-        Isa::Avx2 if is_x86_feature_detected!("avxvnni") => Path::Vnni256,
-        #[cfg(target_arch = "x86_64")]
-        Isa::Avx2 => Path::Avx2,
-        #[cfg(target_arch = "x86_64")]
-        Isa::Avx512Vnni if forced == "avxvnni" => Path::Vnni256,
-        #[cfg(target_arch = "x86_64")]
-        Isa::Avx512Vnni => Path::Vnni512,
-        #[cfg(target_arch = "aarch64")]
-        Isa::Neon => Path::Neon,
-        #[cfg(target_arch = "aarch64")]
-        Isa::NeonDot if std::arch::is_aarch64_feature_detected!("i8mm") && forced != "dotprod" => {
-            Path::NeonMmla
+    #[cfg(target_arch = "x86_64")]
+    {
+        let avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        let vnni512 = is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512vnni");
+        let vnni256_vex = avx2 && is_x86_feature_detected!("avxvnni");
+        let vnni256_evex = avx2 && vnni512 && is_x86_feature_detected!("avx512vl");
+        match forced {
+            "scalar" => Path::Scalar,
+            // Forced `avx2` always selects plain AVX2 so AVX-VNNI hosts can test it.
+            "avx2" if avx2 => Path::Avx2,
+            "avxvnni" if vnni256_vex => Path::Vnni256Vex,
+            "avxvnni" if vnni256_evex => Path::Vnni256Evex,
+            "avxvnni" if avx2 => Path::Avx2,
+            _ => match isa {
+                Isa::Scalar => Path::Scalar,
+                Isa::Avx512Vnni if vnni512 => Path::Vnni512,
+                Isa::Avx2 if vnni256_vex => Path::Vnni256Vex,
+                Isa::Avx2 if avx2 => Path::Avx2,
+                _ => Path::Scalar,
+            },
         }
-        #[cfg(target_arch = "aarch64")]
-        Isa::NeonDot => Path::NeonDot,
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        match isa {
+            Isa::Scalar => Path::Scalar,
+            Isa::Neon => Path::Neon,
+            Isa::NeonDot
+                if std::arch::is_aarch64_feature_detected!("i8mm") && forced != "dotprod" =>
+            {
+                Path::NeonMmla
+            }
+            Isa::NeonDot => Path::NeonDot,
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (forced, isa);
+        Path::Scalar
     }
 }

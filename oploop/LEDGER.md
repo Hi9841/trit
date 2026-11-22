@@ -3661,3 +3661,50 @@ All paired signed-rank p <= 1.8e-12 in both orders. Final gates clean: `cargo fm
 `avxvnni`, `TRIT_THREADS=1`; Whisper tiny identical across default, `avx2`, `avxvnni`,
 `TRIT_THREADS=1` with the pre-existing `scalar` difference on clip `1089-134686-0009.wav`), and
 `TRIT_KERNELS=v2` exact text match on Redux.
+
+### Cross-CPU dynamic topology, hybrid work stealing, and review fixes
+
+Following an independent review with `gpt-6.2-sol` (medium) covering all 15 changed files
+plus `src/cpu/{mod,isa,team}.rs`, landed portability and edge-case fixes without changing
+measured speed on the homogeneous 7950X3D baseline (`FINAL.dll` vs `FINAL_v2.dll`, 3 rounds
+each, `oploop/results/s1122/ab_v2_*.txt`):
+
+- Dynamic CPU topology (`src/cpu/mod.rs`, `src/cpu/team.rs`):
+  - Windows: switched `topology()` to `GetLogicalProcessorInformationEx` (group-aware,
+    handles >64-CPU multi-group hosts without broken 64-bit pinning, records per-core
+    `EfficiencyClass`, assigns one physical core per worker in `ideal_cpu` so asymmetric-SMT
+    Intel hybrid CPUs never double-book a P-core).
+  - macOS: enumerates `hw.perflevel0..hw.nperflevels` by name, including every non-Efficiency
+    tier (uses both Super and Performance cores on Apple M5 Pro/Max instead of only
+    `perflevel0`, while still skipping Efficiency cores on M1 to M5) and sets `heterogeneous`
+    when multiple fast tiers are included.
+  - Linux/Android: reads allowed CPUs up to 1024 via `sched_getaffinity`, intersects sysfs
+    cores and L3 domains with the process affinity mask, handles >64 CPUs cleanly, reads
+    `cpu_capacity` / `cpuinfo_max_freq` for heterogeneity detection, and makes `team::threads()`
+    return the active thread count (`s.active`) for Android cpuset reductions.
+- Hybrid-CPU work stealing (`src/cpu/fgemm.rs`, `src/cpu/half.rs`, `src/cpu/int8.rs`):
+  - Exposes `team::is_heterogeneous()`; when true (Intel P+E+LP-E, Apple M5 Pro/Max
+    Super+Performance, Snapdragon big.LITTLE/X2 Elite), keeps >= 4x task waves in the
+    work-claiming queue so fast cores dynamically steal from slower cores, while leaving
+    homogeneous scheduling unchanged.
+  - Extended 2D `(unit, frame_span)` splitting in `int8.rs` to every SIMD path (`Vnni512`,
+    `Vnni256Vex`, `Vnni256Evex`, `Avx2`, `Neon`, `NeonDot`, `NeonMmla`) and restored
+    `MIN_TASK_WORK = 800_000` for large encoder products (`>= 8M` MACs).
+- Review correctness and ISA dispatch fixes:
+  - `src/cpu/isa.rs`, `src/cpu/int8.rs`, `src/cpu/v2/product.rs`: split `Path::Vnni256Vex`
+    and `Path::Vnni256Evex`, checked all target features (`avx2`, `fma`, `avx512f/bw/vl/vnni`,
+    `avxvnni`) in one place, and made `TRIT_ISA=avx2` select plain AVX2 on AVX-VNNI CPUs.
+  - `src/models/parts/beam.rs`: early return for `count == 0` and scan whenever `floor.is_nan()`
+    in `beam::top`.
+  - `src/cpu/kernels.rs`: IEEE maxNum NaN-ignoring operand order in `quantize_avx512` and
+    `quantize_avx2`, `vmaxnmq_f32`/`vmaxnmvq_f32` in `quantize_neon`, plus odd-16 tail handling
+    and length assertions in `quantize_avx512`.
+  - `src/cpu/activation.rs`: clamp NaN to `LOW` uniformly in `exp_scalar` (`max(LOW).min(HIGH)`)
+    and NEON `exp`/`exp4` (`vmaxnmq_f32`/`vminnmq_f32`), matching x86.
+  - `src/layers.rs`: assert positive width and whole rows in `Norm::apply`, `Norm::residual`,
+    and `RmsNorm::apply`.
+- Regression A/B (`FINAL.dll` vs `FINAL_v2.dll`, 3 rounds each, 0 texts differing on all 1,000
+  clips): Redux `clean,other` B/A 1.001 (p = 0.035, 81 / 172 errors), Unified Q8_0 `clean`
+  1.000 (p = 0.44, 56 errors), Whisper tiny `clean` 1.003 (p = 0.084, 231 errors), Moonshine
+  tiny `clean` 0.995 (p = 0.67, 133 errors). Clippy (default and `trit/gpu`), fmt, `trit skill
+  --check`, and `bench/paths.py` clean.

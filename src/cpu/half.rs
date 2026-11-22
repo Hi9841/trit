@@ -99,6 +99,9 @@ impl HalfDense {
         let row_groups = n.div_ceil(8);
         let tasks = if threads == 1 || work <= INLINE_WORK {
             1
+        } else if team::is_heterogeneous() {
+            // Finer chunks on mixed-capacity teams let fast cores steal from slow cores.
+            (4 * threads).min(row_groups).min((work / 65_536).max(1))
         } else if work < TWO_WAVE_WORK {
             threads.min(row_groups)
         } else {

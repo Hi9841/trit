@@ -395,20 +395,26 @@ fn block_counts(m: usize, n: usize, k: usize) -> (usize, usize) {
     let col_tiles = n.div_ceil(TILE_C);
     let base_cols = n.div_ceil(COL_BLOCK);
     let threads = team::threads().max(1);
+    let hetero = team::is_heterogeneous();
+    // Heterogeneous teams (e.g. Intel P+E, Apple M5 Super+Performance, ARM big.LITTLE)
+    // keep >= 4 waves in the queue so fast cores dynamically steal work from slower cores.
+    let min_waves = if hetero { 4 } else { 1 };
     let col_blocks = if threads == 1 {
         base_cols
     } else if row_blocks == 1 {
         let max_by_work = (m * n * k / MIN_COL_WORK).max(1);
         let limit = col_tiles.min(max_by_work);
-        if base_cols <= 6 * threads {
+        if hetero {
+            base_cols.max(min_waves * threads).min(limit)
+        } else if base_cols <= 6 * threads {
             let waves = (base_cols + threads / 2) / threads;
             (waves.max(1) * threads).min(limit)
         } else {
             base_cols.min(col_tiles)
         }
-    } else if row_blocks * base_cols < threads {
+    } else if row_blocks * base_cols < min_waves * threads {
         let max_by_work = (m * n * k / MIN_COL_WORK).max(1);
-        threads
+        (min_waves * threads)
             .div_ceil(row_blocks)
             .min(col_tiles)
             .min(max_by_work.div_ceil(row_blocks).max(1))

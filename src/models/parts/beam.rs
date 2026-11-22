@@ -259,15 +259,19 @@ multiversion! {
         /// floor; one branchless vector scan over 32 values skips it.
         const BLOCK: usize = 32;
         best.clear();
+        if count == 0 {
+            return;
+        }
         let (blocks, tail) = values.as_chunks::<BLOCK>();
         for (block, part) in blocks.iter().enumerate() {
             let floor = match best.len() == count {
                 true => best[count - 1].1,
                 false => f32::NEG_INFINITY,
             };
-            if part
-                .iter()
-                .fold(false, |hit, &v| hit | (v > floor) | v.is_nan())
+            if floor.is_nan()
+                || part
+                    .iter()
+                    .fold(false, |hit, &v| hit | (v > floor) | v.is_nan())
             {
                 offer(block * BLOCK, part, count, best);
             }
