@@ -3285,3 +3285,59 @@ Reviewed by GPT-6.2 Sol (high, read-only); its findings are in SI-046 (NaN rows)
 stable clippy that failed `-D warnings` since 0.13.0. Rewritten in the same steps (a
 `cfg` return; an iterator over `reversed`). Clippy with `-D warnings` is clean for
 x86-64 Windows and aarch64-linux-android.
+
+## Session 2026-11-22 (ordered softmax)
+
+### SI-049 Reduce softmax across rows
+
+- AVX2 transposes exponentials from four to seven rows into columns and adds the columns
+  in order. A full group of eight rows uses the existing reduction. Six pairs of
+  `kernel_bench softmax one 5 1500` runs on a 7950X3D with forced AVX2 gave 1,290 to
+  820 ns per row and equal hashes. The full-group probe at 128 x 1,500 gave 715 to
+  723 ns per row, so the AVX2 dispatch keeps the existing path for that group size.
+- NEON adds columns from four rows at a time. AVX2 and QEMU ARM64 NEON produced
+  identical exponentials and sums against the baseline on 2,295 shapes per path.
+  The probe included masked values, partial rows, and nonzero initial sums.
+- FastConformer applies the relative-position scores and context mask before it calls
+  the shared softmax. Four alternating CLI pairs on 12 long clips with Parakeet Unified
+  English Q8_0 and forced AVX2 gave a median of 1,061.40 to 1,053.44 ms, a paired ratio
+  of 0.9957, and p = 0.00049. Every run gave identical transcripts.
+- Six alternating CLI pairs on 80 Whisper tiny clips with forced AVX2 gave a median
+  of 53.07 to 52.21 ms, a paired ratio of 0.9869, and p = 7.25e-7. The 95th percentile
+  was 94.15 to 89.62 ms. Every run gave identical transcripts.
+- The 200-clip Whisper FFI run gave 228 errors on both builds and zero transcript
+  differences in round one. The per-clip ratio was 1.141, p = 6e-32. Control medians
+  ranged from 54.3 to 73.5 ms. A later measurement found a background process used
+  about six logical CPUs. The run cannot establish steady-state FFI performance.
+- A second Whisper FFI run used eight workers, 80 clips, and six alternating pairs.
+  Every transcript matched. The paired ratio was 1.0433, p = 1.73e-14, and the 95th
+  percentile went from 118.76 to 126.75 ms.
+- Decision: revert the new SIMD paths. ARM64 timing needs a native CPU, and the
+  Whisper FFI regression exceeds the gain in the five-row microbenchmark.
+- Windows workspace release build and Clippy passed. ARM64 Android Clippy passed.
+  Native ARM64 latency and the Redux quality sets still need results.
+
+### SI-050 Use the shared softmax in FastConformer
+
+- The final build keeps only the FastConformer change. It applies the context mask
+  before the shared softmax, which selects the existing CPU path at runtime.
+- Four alternating FFI pairs on the same 12 long Parakeet Unified English Q8_0
+  clips used the default CPU path on the 7950X3D. The median of the per-clip
+  medians was 648.01 to 587.91 ms. The paired ratio was 0.9060, p = 0.00146,
+  and the 95th percentile was 1,041.86 to 892.08 ms. All runs gave identical
+  transcripts and 80 word errors. Raw samples are in
+  `target/softmax-ab-parakeet-ffi-default.json`.
+- Decision: keep the shared softmax.
+- Quiet repeat (CPU load under 1.5 %, `A0_ea900fd.dll` vs `B_si050.dll`, 3 rounds each,
+  `oploop/results/s1122/ab_si050_*.txt`):
+  - Parakeet Redux `long-clean,long-other` (80 clips): forward 443.5 -> 438.0 ms, per-clip
+    B/A 0.979, paired p = 1.4e-13, CPU time 0.979; reversed (B first) 434.1 vs 447.6 ms,
+    per-clip A/B 1.031 (B/A 0.970), paired p = 1.3e-14, CPU time B/A 0.974. Errors
+    187 / 479 equal on both sides; 0 of 80 texts differ.
+  - Parakeet Redux `clean,other` (400 clips): 30.8 -> 30.6 ms, per-clip B/A 1.001,
+    paired p = 0.17 (no regression). Errors 81 / 172 equal; 0 of 400 texts differ.
+  - Parakeet Unified English Q8_0 `long-clean` (40 clips): 583.3 -> 573.8 ms, per-clip
+    B/A 0.986, paired p = 1.3e-10, CPU time 0.988. Errors 120 equal; 0 of 40 texts differ.
+  - `bench/paths.py` on Redux (short and long): same text on default, `scalar`, `avx2`,
+    `avxvnni`, and `TRIT_THREADS=1`. Release build, Clippy, fmt, and `trit skill --check`
+    clean. Native ARM64 timing remains open.

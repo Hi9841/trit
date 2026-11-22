@@ -13,7 +13,7 @@ use crate::cpu::kernels::Ternary;
 use crate::cpu::store::Store;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
-use crate::layers::{conv_columns, folded_batch_norm, relu, scale_all, Norm, Rotary};
+use crate::layers::{conv_columns, folded_batch_norm, relu, scale_all, softmax_rows, Norm, Rotary};
 use crate::Cancel;
 use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, Weak};
@@ -1074,26 +1074,14 @@ impl Block {
                 for (row, i) in scores.chunks_exact_mut(t).zip(rows.clone()) {
                     let local = i - rows.start;
                     let position = &shifted[local * width + (rows.end - 1 - i)..][..t];
-                    let mut max = f32::NEG_INFINITY;
                     for (value, p) in row.iter_mut().zip(position) {
                         *value = (*value + p) * scale;
-                        max = max.max(*value);
                     }
                     let keys = c.attention.keys(i, t);
-                    if keys != (0..t) {
-                        // Keys outside the context get no weight; the
-                        // largest score is the largest of the ones kept.
-                        row[..keys.start].fill(f32::NEG_INFINITY);
-                        row[keys.end..].fill(f32::NEG_INFINITY);
-                        max = row[keys.clone()]
-                            .iter()
-                            .fold(f32::NEG_INFINITY, |m, v| m.max(*v));
-                    }
-                    row.iter_mut().for_each(|value| *value -= max);
-                    activation::exp(row);
-                    let inv = 1.0 / row.iter().sum::<f32>();
-                    row.iter_mut().for_each(|value| *value *= inv);
+                    row[..keys.start].fill(f32::NEG_INFINITY);
+                    row[keys.end..].fill(f32::NEG_INFINITY);
                 }
+                softmax_rows(scores, t, |_| t);
                 fgemm::matmul_into(scores, m, t, v_t, hd, head_out);
                 for (part, i) in head_out.chunks_exact(hd).zip(rows.clone()) {
                     // SAFETY: row i, head h belongs to this task only; `context` outlives the step.
