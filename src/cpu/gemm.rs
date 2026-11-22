@@ -163,8 +163,16 @@ impl Q8 {
         out
     }
 
-    fn matmul(&self, x: &[f32], m: usize, k: usize, n: usize) -> Buf {
-        fgemm::matmul_widened(x, m, k, n, |cols, panel| {
+    fn matmul_then(
+        &self,
+        x: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+        bias: Option<&[f32]>,
+        relu: bool,
+    ) -> Buf {
+        fgemm::matmul_widened(x, m, k, n, bias, relu, |cols, panel| {
             for (j, row) in cols.enumerate() {
                 widen_q8(
                     &self.values[row * k..(row + 1) * k],
@@ -514,13 +522,37 @@ impl Dense {
         }
         let n = self.out_features;
         let mut bias = self.bias.as_deref();
+        let mut relu = relu;
         let mut out = match &self.weight {
-            Weights::F32(w) => fgemm::matmul(x, rows, self.in_features, w, n),
-            Weights::F16(w) => fgemm::matmul(x, rows, self.in_features, w, n),
+            Weights::F32(w) => fgemm::matmul_then(
+                x,
+                rows,
+                self.in_features,
+                w,
+                n,
+                bias.take(),
+                std::mem::take(&mut relu),
+            ),
+            Weights::F16(w) => fgemm::matmul_then(
+                x,
+                rows,
+                self.in_features,
+                w,
+                n,
+                bias.take(),
+                std::mem::take(&mut relu),
+            ),
             // The tile adds the bias where it can: no pass over the output for it.
             Weights::Int8(w) if w.adds_bias() => w.forward_biased(x, rows, bias.take()),
             Weights::Int8(w) => w.forward(x, rows),
-            Weights::Q8(w) => w.matmul(x, rows, self.in_features, n),
+            Weights::Q8(w) => w.matmul_then(
+                x,
+                rows,
+                self.in_features,
+                n,
+                bias.take(),
+                std::mem::take(&mut relu),
+            ),
         };
         if bias.is_none() && !relu {
             return out;

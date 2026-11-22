@@ -13,7 +13,18 @@
 use super::buf::Buf;
 use super::team;
 
-const BLOCK: usize = 64;
+const ROW_BLOCK: usize = 64;
+#[cfg(target_arch = "aarch64")]
+const TILE_C: usize = 4;
+#[cfg(not(target_arch = "aarch64"))]
+const TILE_C: usize = 3;
+#[cfg(target_arch = "aarch64")]
+const COL_BLOCK: usize = 64;
+#[cfg(not(target_arch = "aarch64"))]
+const COL_BLOCK: usize = 66;
+/// Least multiply-adds per column task when splitting a single row block
+/// across worker threads.
+const MIN_COL_WORK: usize = 32_768;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Level {
@@ -209,20 +220,39 @@ unsafe impl Send for OutPtr {}
 // SAFETY: as for `Send`: tasks write disjoint output blocks.
 unsafe impl Sync for OutPtr {}
 
-/// `out[i][j] = sum_k x[i][k] * w[j][k]`, parallel over 64 x 64 blocks.
+/// `out[i][j] = sum_k x[i][k] * w[j][k]`, parallel over tile-aligned blocks.
 pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Buf {
+    matmul_then(x, m, k, w, n, None, false)
+}
+
+/// `matmul` with an optional per-column `bias` and ReLU folded into each tile
+/// store, so output rows are written once.
+pub fn matmul_then<W: Weight>(
+    x: &[f32],
+    m: usize,
+    k: usize,
+    w: &[W],
+    n: usize,
+    bias: Option<&[f32]>,
+    relu: bool,
+) -> Buf {
     let _span = crate::prof::span(crate::prof::Stage::Float);
     let _product = crate::prof::product(W::PRODUCT, n, k, m);
     if super::v2::float_enabled() {
-        return super::v2::float::matmul(x, m, k, w, n);
+        let mut out = super::v2::float::matmul(x, m, k, w, n);
+        apply_epilogue(&mut out, n, bias, relu);
+        return out;
     }
-    assert!(x.len() >= m * k && w.len() >= n * k);
+    assert!(x.len() >= m * k && w.len() >= n * k && bias.is_none_or(|b| b.len() >= n));
+    if m == 0 || n == 0 {
+        return Buf::scratch(0);
+    }
     let mut out = Buf::scratch(m * n);
-    let (row_blocks, col_blocks) = block_counts(m, n);
+    let (row_blocks, col_blocks) = block_counts(m, n, k);
     let ptr = OutPtr(out.as_mut_ptr());
     let level = level();
     team::for_each(row_blocks * col_blocks, |task| {
-        let (rows, cols) = block_span(task, col_blocks, m, n);
+        let (rows, cols) = block_span(task, row_blocks, col_blocks, m, n);
         // On the AVX-512 level the tile widens f16 weights itself: the
         // conversion does not wait for the multiply-add (Zen 4), and the
         // f32 copy of the panel cost 35 % of a 5-row product.
@@ -232,15 +262,29 @@ pub fn matmul<W: Weight>(x: &[f32], m: usize, k: usize, w: &[W], n: usize) -> Bu
                 panel.resize(cols.len() * k, 0.0);
                 W::widen(&w[cols.start * k..cols.end * k], &mut panel);
                 let shifted = OutPtr(ptr.0.wrapping_add(cols.start));
+                let block_bias = bias.map(|b| &b[cols.start..cols.end]);
                 // SAFETY: as below; the panel holds this block's columns from 0,
                 // so the output pointer moves to the block's first column.
-                unsafe { block(level, x, k, &panel[..], n, rows, 0..cols.len(), shifted) };
+                unsafe {
+                    block(
+                        level,
+                        x,
+                        k,
+                        &panel[..],
+                        n,
+                        rows,
+                        0..cols.len(),
+                        block_bias,
+                        relu,
+                        shifted,
+                    )
+                };
             });
             return;
         }
-        // SAFETY: the block is inside all three buffers and belongs to this task only;
+        // SAFETY: the block is inside all buffers and belongs to this task only;
         // the level was detected from the CPU.
-        unsafe { block(level, x, k, w, n, rows, cols, ptr) };
+        unsafe { block(level, x, k, w, n, rows, cols, bias, relu, ptr) };
     });
     out
 }
@@ -255,61 +299,146 @@ pub fn matmul_into(x: &[f32], m: usize, k: usize, w: &[f32], n: usize, out: &mut
     }
     assert!(x.len() >= m * k && w.len() >= n * k && out.len() >= m * n);
     // SAFETY: the block covers `out` exactly; the level was detected from the CPU.
-    unsafe { block(level(), x, k, w, n, 0..m, 0..n, OutPtr(out.as_mut_ptr())) };
+    unsafe {
+        block(
+            level(),
+            x,
+            k,
+            w,
+            n,
+            0..m,
+            0..n,
+            None,
+            false,
+            OutPtr(out.as_mut_ptr()),
+        )
+    };
 }
 
 /// `out[i][j] = sum_k x[i][k] * w[j][k]` where the weights come from
 /// `widen(cols, panel)`, which writes rows `cols` of `w` as f32 into a
-/// `cols.len() x k` panel. Each 64 x 64 block widens its columns once, then
-/// runs the f32 tiles; for int8 storage with f32 math.
+/// `cols.len() x k` panel. Each block widens its columns once, then runs
+/// the f32 tiles with optional `bias` and ReLU; for int8 storage with f32 math.
 pub fn matmul_widened(
     x: &[f32],
     m: usize,
     k: usize,
     n: usize,
+    bias: Option<&[f32]>,
+    relu: bool,
     widen: impl Fn(std::ops::Range<usize>, &mut [f32]) + Sync,
 ) -> Buf {
     let _product = crate::prof::product(crate::prof::Product::Q8Widened, n, k, m);
     if super::v2::float_enabled() {
-        return super::v2::float::matmul_widened(x, m, k, n, widen);
+        let mut out = super::v2::float::matmul_widened(x, m, k, n, widen);
+        apply_epilogue(&mut out, n, bias, relu);
+        return out;
     }
-    assert!(x.len() >= m * k);
+    assert!(x.len() >= m * k && bias.is_none_or(|b| b.len() >= n));
+    if m == 0 || n == 0 {
+        return Buf::scratch(0);
+    }
     let mut out = Buf::scratch(m * n);
-    let (row_blocks, col_blocks) = block_counts(m, n);
+    let (row_blocks, col_blocks) = block_counts(m, n, k);
     let ptr = OutPtr(out.as_mut_ptr());
     let level = level();
     team::for_each(row_blocks * col_blocks, |task| {
-        let (rows, cols) = block_span(task, col_blocks, m, n);
+        let (rows, cols) = block_span(task, row_blocks, col_blocks, m, n);
         PANEL.with(|panel| {
             let mut panel = panel.borrow_mut();
             panel.resize(cols.len() * k, 0.0);
             widen(cols.clone(), &mut panel);
             let shifted = OutPtr(ptr.get().wrapping_add(cols.start));
+            let block_bias = bias.map(|b| &b[cols.start..cols.end]);
             // SAFETY: the panel holds this block's columns from 0, so the output
             // pointer moves to the block's first column; the block belongs to
             // this task only; the level was detected from the CPU.
-            unsafe { block(level, x, k, &panel[..], n, rows, 0..cols.len(), shifted) };
+            unsafe {
+                block(
+                    level,
+                    x,
+                    k,
+                    &panel[..],
+                    n,
+                    rows,
+                    0..cols.len(),
+                    block_bias,
+                    relu,
+                    shifted,
+                )
+            };
         });
     });
     out
 }
 
-fn block_counts(m: usize, n: usize) -> (usize, usize) {
-    (m.div_ceil(BLOCK), n.div_ceil(BLOCK))
+fn apply_epilogue(out: &mut [f32], n: usize, bias: Option<&[f32]>, relu: bool) {
+    if bias.is_none() && !relu {
+        return;
+    }
+    team::chunks_mut(out, ROW_BLOCK * n, |_, block| {
+        for row in block.chunks_exact_mut(n) {
+            if let Some(bias) = bias {
+                for (value, b) in row.iter_mut().zip(bias) {
+                    *value += b;
+                }
+            }
+            if relu {
+                row.iter_mut().for_each(|v| *v = v.max(0.0));
+            }
+        }
+    });
+}
+
+fn block_counts(m: usize, n: usize, k: usize) -> (usize, usize) {
+    let row_blocks = m.div_ceil(ROW_BLOCK);
+    let col_tiles = n.div_ceil(TILE_C);
+    let base_cols = n.div_ceil(COL_BLOCK);
+    let threads = team::threads().max(1);
+    let col_blocks = if threads == 1 {
+        base_cols
+    } else if row_blocks == 1 {
+        let max_by_work = (m * n * k / MIN_COL_WORK).max(1);
+        let limit = col_tiles.min(max_by_work);
+        if base_cols <= 6 * threads {
+            let waves = (base_cols + threads / 2) / threads;
+            (waves.max(1) * threads).min(limit)
+        } else {
+            base_cols.min(col_tiles)
+        }
+    } else if row_blocks * base_cols < threads {
+        let max_by_work = (m * n * k / MIN_COL_WORK).max(1);
+        threads
+            .div_ceil(row_blocks)
+            .min(col_tiles)
+            .min(max_by_work.div_ceil(row_blocks).max(1))
+    } else {
+        base_cols.min(col_tiles)
+    };
+    (row_blocks, col_blocks.max(1))
 }
 
 fn block_span(
     task: usize,
+    row_blocks: usize,
     col_blocks: usize,
     m: usize,
     n: usize,
 ) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
     let row = task / col_blocks;
     let col = task % col_blocks;
-    (
-        row * BLOCK..((row + 1) * BLOCK).min(m),
-        col * BLOCK..((col + 1) * BLOCK).min(n),
-    )
+    let rows = if row_blocks == 1 {
+        0..m
+    } else {
+        let row_tiles = m.div_ceil(4);
+        let start = (row * row_tiles / row_blocks) * 4;
+        let end = (((row + 1) * row_tiles / row_blocks) * 4).min(m);
+        start..end
+    };
+    let col_tiles = n.div_ceil(TILE_C);
+    let col_start = (col * col_tiles / col_blocks) * TILE_C;
+    let col_end = (((col + 1) * col_tiles / col_blocks) * TILE_C).min(n);
+    (rows, col_start..col_end)
 }
 
 /// On the calling thread.
@@ -322,20 +451,28 @@ unsafe fn block<W: Weight>(
     n: usize,
     rows: std::ops::Range<usize>,
     cols: std::ops::Range<usize>,
+    bias: Option<&[f32]>,
+    relu: bool,
     out: OutPtr,
 ) {
     match level {
         #[cfg(target_arch = "x86_64")]
-        Level::Avx512 => avx512::block(x, k, w, n, rows, cols, out.0),
+        Level::Avx512 => avx512::block(x, k, w, n, rows, cols, bias, relu, out.0),
         #[cfg(target_arch = "x86_64")]
-        Level::Avx2 => avx2::block(x, k, w, n, rows, cols, out.0),
+        Level::Avx2 => avx2::block(x, k, w, n, rows, cols, bias, relu, out.0),
         #[cfg(target_arch = "aarch64")]
-        Level::Neon => neon::block(x, k, w, n, rows, cols, out.0),
+        Level::Neon => neon::block(x, k, w, n, rows, cols, bias, relu, out.0),
         Level::Scalar => {
             for i in rows {
                 for j in cols.clone() {
-                    *out.0.add(i * n + j) =
-                        dot_scalar(&x[i * k..(i + 1) * k], &w[j * k..(j + 1) * k]);
+                    let mut total = dot_scalar(&x[i * k..(i + 1) * k], &w[j * k..(j + 1) * k]);
+                    if let Some(bias) = bias {
+                        total += bias[j];
+                    }
+                    if relu {
+                        total = total.max(0.0);
+                    }
+                    *out.0.add(i * n + j) = total;
                 }
             }
         }
@@ -361,6 +498,7 @@ mod avx512 {
     use std::arch::x86_64::*;
 
     #[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,fma,f16c")]
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn block<W: Weight>(
         x: &[f32],
         k: usize,
@@ -368,6 +506,8 @@ mod avx512 {
         n: usize,
         rows: std::ops::Range<usize>,
         cols: std::ops::Range<usize>,
+        bias: Option<&[f32]>,
+        relu: bool,
         out: *mut f32,
     ) {
         let mut i = rows.start;
@@ -383,23 +523,24 @@ mod avx512 {
                 let c = (cols.end - j).min(3);
                 let xp = x.as_ptr().add(i * k);
                 let wp = w.as_ptr().add(j * k);
+                let bp = bias.map(|b| b.as_ptr().add(j));
                 let op = out.add(i * n + j);
                 match (r, c) {
-                    (5, 3) => tile::<5, 3, W>(xp, wp, k, op, n),
-                    (5, 2) => tile::<5, 2, W>(xp, wp, k, op, n),
-                    (5, 1) => tile::<5, 1, W>(xp, wp, k, op, n),
-                    (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n),
-                    (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n),
-                    (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n),
-                    (3, 3) => tile::<3, 3, W>(xp, wp, k, op, n),
-                    (3, 2) => tile::<3, 2, W>(xp, wp, k, op, n),
-                    (3, 1) => tile::<3, 1, W>(xp, wp, k, op, n),
-                    (2, 3) => tile::<2, 3, W>(xp, wp, k, op, n),
-                    (2, 2) => tile::<2, 2, W>(xp, wp, k, op, n),
-                    (2, 1) => tile::<2, 1, W>(xp, wp, k, op, n),
-                    (1, 3) => tile::<1, 3, W>(xp, wp, k, op, n),
-                    (1, 2) => tile::<1, 2, W>(xp, wp, k, op, n),
-                    _ => tile::<1, 1, W>(xp, wp, k, op, n),
+                    (5, 3) => tile::<5, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (5, 2) => tile::<5, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (5, 1) => tile::<5, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 3) => tile::<3, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 2) => tile::<3, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 1) => tile::<3, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 3) => tile::<2, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 2) => tile::<2, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 1) => tile::<2, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (1, 3) => tile::<1, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (1, 2) => tile::<1, 2, W>(xp, wp, k, op, n, bp, relu),
+                    _ => tile::<1, 1, W>(xp, wp, k, op, n, bp, relu),
                 }
                 j += c;
             }
@@ -416,6 +557,8 @@ mod avx512 {
         k: usize,
         out: *mut f32,
         n: usize,
+        bias: Option<*const f32>,
+        relu: bool,
     ) {
         let mut acc = [[_mm512_setzero_ps(); C]; R];
         let mut kk = 0;
@@ -447,9 +590,42 @@ mod avx512 {
                 }
             }
         }
-        for (r, row) in acc.iter().enumerate() {
-            for (c, a) in row.iter().enumerate() {
-                *out.add(r * n + c) = _mm512_reduce_add_ps(*a);
+        match (bias, relu) {
+            (None, false) => {
+                for (r, row) in acc.iter().enumerate() {
+                    for (c, a) in row.iter().enumerate() {
+                        *out.add(r * n + c) = _mm512_reduce_add_ps(*a);
+                    }
+                }
+            }
+            (Some(bias), false) => {
+                let mut b = [0.0f32; C];
+                for (c, slot) in b.iter_mut().enumerate() {
+                    *slot = *bias.add(c);
+                }
+                for (r, row) in acc.iter().enumerate() {
+                    for (c, a) in row.iter().enumerate() {
+                        *out.add(r * n + c) = _mm512_reduce_add_ps(*a) + b[c];
+                    }
+                }
+            }
+            (None, true) => {
+                for (r, row) in acc.iter().enumerate() {
+                    for (c, a) in row.iter().enumerate() {
+                        *out.add(r * n + c) = _mm512_reduce_add_ps(*a).max(0.0);
+                    }
+                }
+            }
+            (Some(bias), true) => {
+                let mut b = [0.0f32; C];
+                for (c, slot) in b.iter_mut().enumerate() {
+                    *slot = *bias.add(c);
+                }
+                for (r, row) in acc.iter().enumerate() {
+                    for (c, a) in row.iter().enumerate() {
+                        *out.add(r * n + c) = (_mm512_reduce_add_ps(*a) + b[c]).max(0.0);
+                    }
+                }
             }
         }
     }
@@ -461,6 +637,7 @@ mod avx2 {
     use std::arch::x86_64::*;
 
     #[target_feature(enable = "avx2,fma,f16c")]
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn block<W: Weight>(
         x: &[f32],
         k: usize,
@@ -468,6 +645,8 @@ mod avx2 {
         n: usize,
         rows: std::ops::Range<usize>,
         cols: std::ops::Range<usize>,
+        bias: Option<&[f32]>,
+        relu: bool,
         out: *mut f32,
     ) {
         let mut i = rows.start;
@@ -478,20 +657,21 @@ mod avx2 {
                 let c = (cols.end - j).min(3);
                 let xp = x.as_ptr().add(i * k);
                 let wp = w.as_ptr().add(j * k);
+                let bp = bias.map(|b| b.as_ptr().add(j));
                 let op = out.add(i * n + j);
                 match (r, c) {
-                    (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n),
-                    (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n),
-                    (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n),
-                    (3, 3) => tile::<3, 3, W>(xp, wp, k, op, n),
-                    (3, 2) => tile::<3, 2, W>(xp, wp, k, op, n),
-                    (3, 1) => tile::<3, 1, W>(xp, wp, k, op, n),
-                    (2, 3) => tile::<2, 3, W>(xp, wp, k, op, n),
-                    (2, 2) => tile::<2, 2, W>(xp, wp, k, op, n),
-                    (2, 1) => tile::<2, 1, W>(xp, wp, k, op, n),
-                    (1, 3) => tile::<1, 3, W>(xp, wp, k, op, n),
-                    (1, 2) => tile::<1, 2, W>(xp, wp, k, op, n),
-                    _ => tile::<1, 1, W>(xp, wp, k, op, n),
+                    (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 3) => tile::<3, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 2) => tile::<3, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 1) => tile::<3, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 3) => tile::<2, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 2) => tile::<2, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 1) => tile::<2, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (1, 3) => tile::<1, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (1, 2) => tile::<1, 2, W>(xp, wp, k, op, n, bp, relu),
+                    _ => tile::<1, 1, W>(xp, wp, k, op, n, bp, relu),
                 }
                 j += c;
             }
@@ -514,6 +694,8 @@ mod avx2 {
         k: usize,
         out: *mut f32,
         n: usize,
+        bias: Option<*const f32>,
+        relu: bool,
     ) {
         let mut acc = [[_mm256_setzero_ps(); C]; R];
         let mut kk = 0;
@@ -536,6 +718,12 @@ mod avx2 {
                 for t in kk..k {
                     total += *x.add(r * k + t) * (*w.add(c * k + t)).to_f32();
                 }
+                if let Some(bias) = bias {
+                    total += *bias.add(c);
+                }
+                if relu {
+                    total = total.max(0.0);
+                }
                 *out.add(r * n + c) = total;
             }
         }
@@ -548,6 +736,7 @@ mod neon {
     use std::arch::aarch64::*;
 
     /// 4 x 4 tiles, as on AVX-512: 16 accumulators, 4 weight vectors, 1 input.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn block<W: Weight>(
         x: &[f32],
         k: usize,
@@ -555,6 +744,8 @@ mod neon {
         n: usize,
         rows: std::ops::Range<usize>,
         cols: std::ops::Range<usize>,
+        bias: Option<&[f32]>,
+        relu: bool,
         out: *mut f32,
     ) {
         let mut i = rows.start;
@@ -565,24 +756,25 @@ mod neon {
                 let c = (cols.end - j).min(4);
                 let xp = x.as_ptr().add(i * k);
                 let wp = w.as_ptr().add(j * k);
+                let bp = bias.map(|b| b.as_ptr().add(j));
                 let op = out.add(i * n + j);
                 match (r, c) {
-                    (4, 4) => tile::<4, 4, W>(xp, wp, k, op, n),
-                    (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n),
-                    (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n),
-                    (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n),
-                    (3, 4) => tile::<3, 4, W>(xp, wp, k, op, n),
-                    (3, 3) => tile::<3, 3, W>(xp, wp, k, op, n),
-                    (3, 2) => tile::<3, 2, W>(xp, wp, k, op, n),
-                    (3, 1) => tile::<3, 1, W>(xp, wp, k, op, n),
-                    (2, 4) => tile::<2, 4, W>(xp, wp, k, op, n),
-                    (2, 3) => tile::<2, 3, W>(xp, wp, k, op, n),
-                    (2, 2) => tile::<2, 2, W>(xp, wp, k, op, n),
-                    (2, 1) => tile::<2, 1, W>(xp, wp, k, op, n),
-                    (1, 4) => tile::<1, 4, W>(xp, wp, k, op, n),
-                    (1, 3) => tile::<1, 3, W>(xp, wp, k, op, n),
-                    (1, 2) => tile::<1, 2, W>(xp, wp, k, op, n),
-                    _ => tile::<1, 1, W>(xp, wp, k, op, n),
+                    (4, 4) => tile::<4, 4, W>(xp, wp, k, op, n, bp, relu),
+                    (4, 3) => tile::<4, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (4, 2) => tile::<4, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (4, 1) => tile::<4, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 4) => tile::<3, 4, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 3) => tile::<3, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 2) => tile::<3, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (3, 1) => tile::<3, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 4) => tile::<2, 4, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 3) => tile::<2, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 2) => tile::<2, 2, W>(xp, wp, k, op, n, bp, relu),
+                    (2, 1) => tile::<2, 1, W>(xp, wp, k, op, n, bp, relu),
+                    (1, 4) => tile::<1, 4, W>(xp, wp, k, op, n, bp, relu),
+                    (1, 3) => tile::<1, 3, W>(xp, wp, k, op, n, bp, relu),
+                    (1, 2) => tile::<1, 2, W>(xp, wp, k, op, n, bp, relu),
+                    _ => tile::<1, 1, W>(xp, wp, k, op, n, bp, relu),
                 }
                 j += c;
             }
@@ -598,6 +790,8 @@ mod neon {
         k: usize,
         out: *mut f32,
         n: usize,
+        bias: Option<*const f32>,
+        relu: bool,
     ) {
         let mut acc = [[vdupq_n_f32(0.0); C]; R];
         let mut kk = 0;
@@ -619,6 +813,12 @@ mod neon {
                 let mut total = vaddvq_f32(acc[r][c]);
                 for t in kk..k {
                     total += *x.add(r * k + t) * (*w.add(c * k + t)).to_f32();
+                }
+                if let Some(bias) = bias {
+                    total += *bias.add(c);
+                }
+                if relu {
+                    total = total.max(0.0);
                 }
                 *out.add(r * n + c) = total;
             }

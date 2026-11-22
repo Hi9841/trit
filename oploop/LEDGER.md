@@ -3374,3 +3374,37 @@ x86-64 Windows and aarch64-linux-android.
     `TRIT_THREADS=1`. Whisper tiny identical across default, `avx2`, `avxvnni`,
     `TRIT_THREADS=1` (pre-existing `scalar` difference on `1089-134686-0009.wav` unchanged).
   - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.
+
+### SI-052 Tile-aligned blocking and fused bias/ReLU epilogue in `fgemm`
+
+- Profile of `A0` showed Moonshine tiny spending 77.7 ms (73,086 calls) and Parakeet
+  Unified English Q8_0 spending 100.0 ms (36,956 calls) in the separate `Stage::Bias`
+  pass after `fgemm::matmul`, while `BLOCK = 64` was not a multiple of the x86 `C = 3`
+  tile width (leaving a `C = 1` tail in every block) and split narrow decoder layers
+  (`n = 288` on 8 threads) into 5 tasks with 3 idle threads.
+- Change: replaced fixed `64 x 64` blocks in `src/cpu/fgemm.rs` with tile-aligned
+  (`TILE_C = 3` on x86, `4` on arm64) column and row spans, balancing single-row-block
+  products (`m <= 64`) to multiples of `team::threads()` when work allows; added
+  `fgemm::matmul_then` and folded optional `bias` and ReLU into tile stores across
+  AVX-512, AVX2, NEON, and scalar (`gemm.rs`, `half.rs`).
+- `kernel_bench` (M0 vs SI-052): `f16 288x288 m=5` 0.218 -> 0.259 T/s; `f16 288x1152 m=5`
+  0.259 -> 0.369 T/s; `f16 32768x288 m=5` 104 -> 98 us; `f32 640x640 m=1` 0.146 -> 0.178 T/s.
+- Interleaved A/B (`K2_si051.dll` vs `B_si052.dll`, quiet 7950X3D, 3 rounds each,
+  `oploop/results/s1122/ab_si052_*.txt`):
+  - Moonshine tiny `clean` (200 clips): forward 17.2 -> 16.1 ms, per-clip B/A 0.962,
+    paired p = 3.6e-28, CPU time 35.9 -> 33.0 s (B/A 0.922), round wall 4.45 -> 4.30 s;
+    reversed (B first) 16.3 vs 17.4 ms, per-clip A/B 1.041 (B/A 0.961), paired p = 1.3e-26,
+    CPU time 34.6 vs 37.5 s (B/A 0.921), round wall 4.32 vs 4.48 s. Errors 133 equal;
+    0 of 200 texts differ.
+  - Parakeet Unified English Q8_0 `clean` (200 clips): forward 44.8 -> 44.5 ms, per-clip
+    B/A 0.987, paired p = 1.9e-20, round wall 11.16 -> 10.99 s; reversed (B first)
+    44.5 vs 44.8 ms, per-clip A/B 1.008 (B/A 0.992), paired p = 1.8e-13, round wall
+    11.01 vs 11.08 s. Errors 56 equal; 0 of 200 texts differ.
+  - Parakeet Redux `clean,other` (400 clips): 29.5 -> 29.4 ms, per-clip B/A 0.996,
+    paired p = 1.3e-16, round wall 14.91 -> 14.86 s. Errors 81 / 172 equal; 0 of 400 texts
+    differ.
+  - Whisper tiny `clean` (200 clips): 35.2 -> 35.2 ms, per-clip B/A 1.001, paired p = 0.47
+    (no regression). Errors 231 equal; 0 of 200 texts differ.
+  - `bench/paths.py`: Moonshine tiny and Parakeet Unified English Q8_0 identical across
+    default, `scalar`, `avx2`, `avxvnni`, and `TRIT_THREADS=1`.
+  - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.
