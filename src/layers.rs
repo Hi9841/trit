@@ -4,6 +4,9 @@
 use crate::cpu::{activation, buf::Buf, fgemm, gemm::Dense, team, tensors::Tensors};
 
 const LAYER_NORM_EPS: f32 = 1e-5;
+/// Floats per task for element-wise and row-norm passes: keeps small decoder
+/// batches (e.g. 5 x 384) inline while reducing task claims on large encoders.
+const ELEMENTWISE_CHUNK: usize = 4096;
 
 /// Layers with the same input and `out` rows each, stacked by output rows
 /// (`Dense::load`: int8 where the shape allows). A missing bias is zero.
@@ -52,27 +55,42 @@ impl Norm {
         debug_assert_eq!(d, self.weight.len());
         let _span = crate::prof::span(crate::prof::Stage::Norm);
         let mut out = Buf::scratch(x.len());
-        team::chunks_mut(&mut out, d, |index, o| {
-            normalize_row(
-                &x[index * d..(index + 1) * d],
-                &self.weight,
-                &self.bias,
-                self.eps,
-                o,
-            );
+        let rows_per_task = (ELEMENTWISE_CHUNK / d.max(1)).max(1);
+        team::chunks_mut(&mut out, rows_per_task * d, |block, chunk| {
+            let first = block * rows_per_task;
+            for (r, o) in chunk.chunks_exact_mut(d).enumerate() {
+                let row = first + r;
+                normalize_row(
+                    &x[row * d..(row + 1) * d],
+                    &self.weight,
+                    &self.bias,
+                    self.eps,
+                    o,
+                );
+            }
         });
         out
     }
 
     pub fn residual(&self, x: &mut [f32], y: &[f32], scale: f32) -> Buf {
         let size = self.weight.len();
+        let _span = crate::prof::span(crate::prof::Stage::Norm);
         let mut out = Buf::scratch(x.len());
+        let rows_per_task = (ELEMENTWISE_CHUNK / size.max(1)).max(1);
         let rows = team::SendPtr::new(x);
-        team::chunks_mut(&mut out, size, |index, o| {
-            // SAFETY: each row of `x` belongs to the task of the same output row.
-            let row = unsafe { rows.slice_mut(index * size, size) };
-            add_scaled(row, &y[index * size..(index + 1) * size], scale);
-            normalize_row(row, &self.weight, &self.bias, self.eps, o);
+        team::chunks_mut(&mut out, rows_per_task * size, |block, chunk| {
+            let first = block * rows_per_task;
+            for (r, o) in chunk.chunks_exact_mut(size).enumerate() {
+                let at = (first + r) * size;
+                // SAFETY: each row of `x` belongs to the task of the same output row.
+                let row = unsafe { rows.slice_mut(at, size) };
+                if scale == 1.0 {
+                    add_plain(row, &y[at..at + size]);
+                } else {
+                    add_scaled(row, &y[at..at + size], scale);
+                }
+                normalize_row(row, &self.weight, &self.bias, self.eps, o);
+            }
         });
         out
     }
@@ -84,6 +102,14 @@ multiversion! {
         let inv = 1.0 / (var + eps).sqrt();
         for (((o, v), w), b) in out.iter_mut().zip(row).zip(weight).zip(bias) {
             *o = (v - mean) * inv * w + b;
+        }
+    }
+}
+
+multiversion! {
+    fn add_plain(row: &mut [f32], add: &[f32]) {
+        for (v, a) in row.iter_mut().zip(add) {
+            *v += a;
         }
     }
 }
@@ -147,7 +173,10 @@ impl RmsNorm {
         let d = self.weight.len();
         let mut out = Buf::scratch(x.len());
         out.copy_from_slice(x);
-        team::chunks_mut(&mut out, d, |_, row| self.apply_in_place(row));
+        let rows_per_task = (ELEMENTWISE_CHUNK / d.max(1)).max(1);
+        team::chunks_mut(&mut out, rows_per_task * d, |_, rows| {
+            self.apply_in_place(rows)
+        });
         out
     }
 }
@@ -176,11 +205,17 @@ impl Gelu {
     pub fn apply(self, values: &mut [f32], d: usize) {
         const C: f32 = 0.797_884_6; // sqrt(2 / pi)
         let _span = crate::prof::span(crate::prof::Stage::Gelu);
-        team::chunks_mut(values, d, |_, row| match self {
-            Self::Exact => activation::gelu(row),
+        let rows = values.len() / d.max(1);
+        let rows_per_task = if rows > 2 * team::threads() {
+            (ELEMENTWISE_CHUNK / d.max(1)).max(1)
+        } else {
+            1
+        };
+        team::chunks_mut(values, rows_per_task * d, |_, chunk| match self {
+            Self::Exact => activation::gelu(chunk),
             Self::Tanh => {
                 let mut inner = [0.0f32; 256];
-                for block in row.chunks_mut(inner.len()) {
+                for block in chunk.chunks_mut(inner.len()) {
                     let inner = &mut inner[..block.len()];
                     for (t, x) in inner.iter_mut().zip(block.iter()) {
                         *t = C * (x + 0.044_715 * x * x * x);

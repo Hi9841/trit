@@ -6,8 +6,8 @@
 use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team};
 use crate::layers::{
-    add_into, argmax, attention, attention_steps, attention_with, conv_columns, linear, stacked,
-    Gelu, HeadMajor, Norm, Rotary,
+    argmax, attention, attention_steps, attention_with, conv_columns, linear, stacked, Gelu,
+    HeadMajor, Norm, Rotary,
 };
 use crate::models::files::Files;
 use crate::models::parts::beam;
@@ -194,8 +194,11 @@ impl Moonshine {
         let frames = (l2 - 3) / 2 + 1;
         let mut x = conv3.forward(&conv_columns(&h, (l2, 2 * d), (3, 2, 0), frames), frames);
         Gelu::Exact.apply(&mut x, d);
-        for layer in layers {
-            let normed = layer.norm_attn.apply(&x, d);
+        if layers.is_empty() {
+            return (norm.apply(&x, d), frames);
+        }
+        let mut normed = layers[0].norm_attn.apply(&x, d);
+        for (i, layer) in layers.iter().enumerate() {
             let mut qkv = layer.qkv.forward(&normed, frames);
             self.rotary
                 .apply(&mut qkv, (frames, 3 * d), (c.heads, d / c.heads), 0);
@@ -209,13 +212,18 @@ impl Moonshine {
                 (d, c.heads, c.heads),
                 false,
             );
-            add_into(&mut x, &layer.out.forward(&att, frames));
-            let normed = layer.norm_mlp.apply(&x, d);
-            let mut hidden = layer.fc1.forward(&normed, frames);
+            let normed_mlp = layer
+                .norm_mlp
+                .residual(&mut x, &layer.out.forward(&att, frames), 1.0);
+            let mut hidden = layer.fc1.forward(&normed_mlp, frames);
             c.gelu.apply(&mut hidden, c.ffn);
-            add_into(&mut x, &layer.fc2.forward(&hidden, frames));
+            let ffn_out = layer.fc2.forward(&hidden, frames);
+            normed = match layers.get(i + 1) {
+                Some(next) => next.norm_attn.residual(&mut x, &ffn_out, 1.0),
+                None => norm.residual(&mut x, &ffn_out, 1.0),
+            };
         }
-        (norm.apply(&x, d), frames)
+        (normed, frames)
     }
 
     fn generate(
@@ -288,49 +296,61 @@ impl Moonshine {
         for (row, &token) in x.chunks_exact_mut(d).zip(tokens) {
             self.embed.row(token, row);
         }
-        for (l, layer) in self.decoder.iter().enumerate() {
-            let normed = layer.norm_self.apply(&x, d);
-            let mut qkv = layer.self_qkv.forward(&normed, m);
-            let mut att = Buf::scratch(m * d);
-            for (row, cache) in qkv.chunks_exact_mut(3 * d).zip(caches.iter_mut()) {
-                let position = cache.position;
-                self.rotary
-                    .apply(row, (1, 3 * d), (c.heads, d / c.heads), position);
-                self.rotary
-                    .apply(&mut row[d..], (1, 3 * d), (c.heads, d / c.heads), position);
-                cache.keys[l].extend_from_slice(&row[d..2 * d]);
-                cache.values[l].extend_from_slice(&row[2 * d..]);
-            }
-            let seen = &*caches;
-            attention_steps(
-                (&qkv, 3 * d),
-                |beam| (&seen[beam].keys[l][..], &seen[beam].values[l][..]),
-                m,
-                (d, c.heads, c.heads),
-                &mut att,
-            );
-            add_into(&mut x, &layer.self_out.forward(&att, m));
-            let normed = layer.norm_cross.apply(&x, d);
-            let q = layer.cross_q.forward(&normed, m);
-            let att = attention_with((&q, d), &cross[l], m, (d, c.heads), false);
-            add_into(&mut x, &layer.cross_out.forward(&att, m));
-            let normed = layer.norm_mlp.apply(&x, d);
-            let mut wide = layer.fc1.forward(&normed, m);
-            let mut gated = Buf::scratch(m * c.ffn);
-            for (row, out) in wide
-                .chunks_exact_mut(2 * c.ffn)
-                .zip(gated.chunks_exact_mut(c.ffn))
-            {
-                let (value, gate) = row.split_at_mut(c.ffn);
-                activation::silu(gate);
-                for ((o, v), g) in out.iter_mut().zip(value.iter()).zip(gate.iter()) {
-                    *o = v * g;
+        let normed = if self.decoder.is_empty() {
+            self.decoder_norm.apply(&x, d)
+        } else {
+            let mut normed = self.decoder[0].norm_self.apply(&x, d);
+            for (l, layer) in self.decoder.iter().enumerate() {
+                let mut qkv = layer.self_qkv.forward(&normed, m);
+                let mut att = Buf::scratch(m * d);
+                for (row, cache) in qkv.chunks_exact_mut(3 * d).zip(caches.iter_mut()) {
+                    let position = cache.position;
+                    self.rotary
+                        .apply(row, (1, 3 * d), (c.heads, d / c.heads), position);
+                    self.rotary
+                        .apply(&mut row[d..], (1, 3 * d), (c.heads, d / c.heads), position);
+                    cache.keys[l].extend_from_slice(&row[d..2 * d]);
+                    cache.values[l].extend_from_slice(&row[2 * d..]);
                 }
+                let seen = &*caches;
+                attention_steps(
+                    (&qkv, 3 * d),
+                    |beam| (&seen[beam].keys[l][..], &seen[beam].values[l][..]),
+                    m,
+                    (d, c.heads, c.heads),
+                    &mut att,
+                );
+                let normed_cross =
+                    layer
+                        .norm_cross
+                        .residual(&mut x, &layer.self_out.forward(&att, m), 1.0);
+                let q = layer.cross_q.forward(&normed_cross, m);
+                let att = attention_with((&q, d), &cross[l], m, (d, c.heads), false);
+                let normed_mlp =
+                    layer
+                        .norm_mlp
+                        .residual(&mut x, &layer.cross_out.forward(&att, m), 1.0);
+                let mut wide = layer.fc1.forward(&normed_mlp, m);
+                let mut gated = Buf::scratch(m * c.ffn);
+                for (row, out) in wide
+                    .chunks_exact_mut(2 * c.ffn)
+                    .zip(gated.chunks_exact_mut(c.ffn))
+                {
+                    let (value, gate) = row.split_at_mut(c.ffn);
+                    activation::silu(gate);
+                    for ((o, v), g) in out.iter_mut().zip(value.iter()).zip(gate.iter()) {
+                        *o = v * g;
+                    }
+                }
+                let ffn_out = layer.fc2.forward(&gated, m);
+                normed = match self.decoder.get(l + 1) {
+                    Some(next) => next.norm_self.residual(&mut x, &ffn_out, 1.0),
+                    None => self.decoder_norm.residual(&mut x, &ffn_out, 1.0),
+                };
             }
-            add_into(&mut x, &layer.fc2.forward(&gated, m));
-        }
+            normed
+        };
         caches.iter_mut().for_each(|cache| cache.position += 1);
-        let normed = self.decoder_norm.apply(&x, d);
         let logits = self
             .head
             .as_ref()
@@ -352,40 +372,52 @@ impl Moonshine {
         let position = cache.position;
         let mut x = vec![0.0; d];
         self.embed.row(token, &mut x);
-        for (l, layer) in self.decoder.iter().enumerate() {
-            let normed = layer.norm_self.apply(&x, d);
-            let mut qkv = layer.self_qkv.forward(&normed, 1);
-            self.rotary
-                .apply(&mut qkv, (1, 3 * d), (c.heads, d / c.heads), position);
-            self.rotary
-                .apply(&mut qkv[d..], (1, 3 * d), (c.heads, d / c.heads), position);
-            cache.keys[l].extend_from_slice(&qkv[d..2 * d]);
-            cache.values[l].extend_from_slice(&qkv[2 * d..]);
-            let seen = position + 1;
-            let att = attention(
-                (&qkv[..d], d),
-                (&cache.keys[l], d),
-                (&cache.values[l], d),
-                (1, seen),
-                (d, c.heads, c.heads),
-                false,
-            );
-            add_into(&mut x, &layer.self_out.forward(&att, 1));
-            let normed = layer.norm_cross.apply(&x, d);
-            let q = layer.cross_q.forward(&normed, 1);
-            let att = attention_with((&q, d), &cross[l], 1, (d, c.heads), false);
-            add_into(&mut x, &layer.cross_out.forward(&att, 1));
-            let normed = layer.norm_mlp.apply(&x, d);
-            let mut wide = layer.fc1.forward(&normed, 1);
-            let (value, gate) = wide.split_at_mut(c.ffn);
-            activation::silu(gate);
-            for (v, g) in value.iter_mut().zip(gate.iter()) {
-                *v *= g;
+        let normed = if self.decoder.is_empty() {
+            self.decoder_norm.apply(&x, d)
+        } else {
+            let mut normed = self.decoder[0].norm_self.apply(&x, d);
+            for (l, layer) in self.decoder.iter().enumerate() {
+                let mut qkv = layer.self_qkv.forward(&normed, 1);
+                self.rotary
+                    .apply(&mut qkv, (1, 3 * d), (c.heads, d / c.heads), position);
+                self.rotary
+                    .apply(&mut qkv[d..], (1, 3 * d), (c.heads, d / c.heads), position);
+                cache.keys[l].extend_from_slice(&qkv[d..2 * d]);
+                cache.values[l].extend_from_slice(&qkv[2 * d..]);
+                let seen = position + 1;
+                let att = attention(
+                    (&qkv[..d], d),
+                    (&cache.keys[l], d),
+                    (&cache.values[l], d),
+                    (1, seen),
+                    (d, c.heads, c.heads),
+                    false,
+                );
+                let normed_cross =
+                    layer
+                        .norm_cross
+                        .residual(&mut x, &layer.self_out.forward(&att, 1), 1.0);
+                let q = layer.cross_q.forward(&normed_cross, 1);
+                let att = attention_with((&q, d), &cross[l], 1, (d, c.heads), false);
+                let normed_mlp =
+                    layer
+                        .norm_mlp
+                        .residual(&mut x, &layer.cross_out.forward(&att, 1), 1.0);
+                let mut wide = layer.fc1.forward(&normed_mlp, 1);
+                let (value, gate) = wide.split_at_mut(c.ffn);
+                activation::silu(gate);
+                for (v, g) in value.iter_mut().zip(gate.iter()) {
+                    *v *= g;
+                }
+                let ffn_out = layer.fc2.forward(value, 1);
+                normed = match self.decoder.get(l + 1) {
+                    Some(next) => next.norm_self.residual(&mut x, &ffn_out, 1.0),
+                    None => self.decoder_norm.residual(&mut x, &ffn_out, 1.0),
+                };
             }
-            add_into(&mut x, &layer.fc2.forward(value, 1));
-        }
+            normed
+        };
         cache.position += 1;
-        let normed = self.decoder_norm.apply(&x, d);
         self.head
             .as_ref()
             .unwrap_or(&self.embed)

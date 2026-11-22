@@ -3451,3 +3451,38 @@ x86-64 Windows and aarch64-linux-android.
     120 equal; 0 of 40 texts differ.
   - Decision: keep. Release build, Clippy, fmt, `bench/paths.py`, and `trit skill --check`
     clean.
+
+### SI-054 Row-batched norms and fused residual-norm in Whisper and Moonshine
+
+- Profile of `A0` showed Whisper tiny spending 306.5 ms in `layer norm pass` (75,883
+  calls) and 179.7 ms in `residual add pass` (97,469 calls), and Moonshine tiny spending
+  103.3 ms in `layer norm pass` and 39.6 ms in `residual add pass`: `Norm::apply` and
+  `Norm::residual` spawned 1 task per row (waking 8 or 16 threads for 5 decoder rows of
+  288 or 384 floats), and Whisper and Moonshine ran `add_into` + `Norm::apply` as two
+  separate passes over `x`.
+- Change:
+  - `src/layers.rs`: batch `Norm::apply`, `Norm::residual`, `RmsNorm::apply`, and large
+    `Gelu::apply` calls by `ELEMENTWISE_CHUNK = 4096` floats per task (keeping 5-row
+    decoder norms inline and cutting encoder task claims 4x to 10x); add `add_plain`
+    for `scale == 1.0` in `Norm::residual`.
+  - `src/models/parts/audio_encoder.rs`, `src/models/families/whisper/model.rs`,
+    `src/models/families/moonshine.rs`: chain `Norm::residual(&mut x, &out, 1.0)` across
+    sub-layers and inline positional-embedding row additions.
+- Interleaved A/B (`K4_si053.dll` vs `B_si054.dll`, quiet 7950X3D, 3 rounds each,
+  `oploop/results/s1122/ab_si054_*.txt`):
+  - Whisper tiny `clean` (200 clips): forward 32.9 -> 32.2 ms, per-clip B/A 0.972,
+    paired p = 5.2e-21, CPU time 113.6 -> 110.4 s (B/A 0.972), round wall 7.12 -> 6.97 s;
+    reversed (B first) 32.5 vs 33.1 ms, per-clip A/B 1.013 (B/A 0.987), paired p = 2.1e-06,
+    CPU time 110.8 vs 114.8 s (B/A 0.965), round wall 6.99 vs 7.16 s. Errors 231 equal;
+    0 of 200 texts differ.
+  - Moonshine tiny `clean` (200 clips): forward 16.4 -> 16.0 ms, per-clip B/A 0.992,
+    paired p = 2.7e-21, CPU time 34.9 -> 33.8 s (B/A 0.968), round wall 4.33 -> 4.28 s;
+    reversed (B first) 15.9 vs 16.2 ms, per-clip A/B 1.014 (B/A 0.986), paired p = 1.9e-22,
+    round wall 4.27 vs 4.33 s. Errors 133 equal; 0 of 200 texts differ.
+  - Parakeet Redux `clean` (200 clips): 30.1 -> 30.0 ms, per-clip B/A 0.996,
+    paired p = 4.2e-11. Errors 81 equal; 0 of 200 texts differ.
+  - Parakeet Unified English Q8_0 `clean` (200 clips): 44.1 -> 43.9 ms, per-clip B/A 0.996,
+    paired p = 4.6e-06. Errors 56 equal; 0 of 200 texts differ.
+  - `bench/paths.py`: Moonshine tiny and Parakeet Redux identical across default, `scalar`,
+    `avx2`, `avxvnni`, and `TRIT_THREADS=1`.
+  - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.

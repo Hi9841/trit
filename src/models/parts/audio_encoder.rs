@@ -116,9 +116,14 @@ impl Encoder {
         let cols = conv_columns(&h, (frames, d), (3, 2, 1), positions);
         let mut x = self.conv2.forward(&cols, positions);
         GELU.apply(&mut x, d);
-        add_into(&mut x, &self.embed_positions);
-        for layer in &self.layers {
-            let normed = layer.norm_attn.apply(&x, d);
+        if self.layers.is_empty() {
+            add_into(&mut x, &self.embed_positions);
+            return self.norm.apply(&x, d);
+        }
+        let mut normed = self.layers[0]
+            .norm_attn
+            .residual(&mut x, &self.embed_positions, 1.0);
+        for (i, layer) in self.layers.iter().enumerate() {
             let qkv = layer.qkv.forward(&normed, positions);
             let att = attention(
                 (&qkv, 3 * d),
@@ -128,12 +133,18 @@ impl Encoder {
                 (d, self.heads, self.heads),
                 false,
             );
-            add_into(&mut x, &layer.out.forward(&att, positions));
-            let normed = layer.norm_ffn.apply(&x, d);
-            let mut hidden = layer.fc1.forward(&normed, positions);
+            let normed_ffn =
+                layer
+                    .norm_ffn
+                    .residual(&mut x, &layer.out.forward(&att, positions), 1.0);
+            let mut hidden = layer.fc1.forward(&normed_ffn, positions);
             GELU.apply(&mut hidden, self.ffn);
-            add_into(&mut x, &layer.fc2.forward(&hidden, positions));
+            let ffn_out = layer.fc2.forward(&hidden, positions);
+            normed = match self.layers.get(i + 1) {
+                Some(next) => next.norm_attn.residual(&mut x, &ffn_out, 1.0),
+                None => self.norm.residual(&mut x, &ffn_out, 1.0),
+            };
         }
-        self.norm.apply(&x, d)
+        normed
     }
 }

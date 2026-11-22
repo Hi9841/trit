@@ -189,37 +189,54 @@ impl Whisper {
         for ((row, &token), session) in x.chunks_exact_mut(d).zip(tokens).zip(sessions.iter()) {
             let pos = session.position.min(c.max_tokens - 1);
             self.embed.row(token, row);
-            add_into(row, &self.decoder_positions[pos * d..(pos + 1) * d]);
-        }
-        for (l, layer) in self.decoder.iter().enumerate() {
-            let normed = layer.norm_self.apply(&x, d);
-            let qkv = layer.self_qkv.forward(&normed, m);
-            let mut att = Buf::scratch(m * d);
-            for (row, session) in qkv.chunks_exact(3 * d).zip(sessions.iter_mut()) {
-                session.keys[l].extend_from_slice(&row[d..2 * d]);
-                session.values[l].extend_from_slice(&row[2 * d..]);
+            for (a, b) in row
+                .iter_mut()
+                .zip(&self.decoder_positions[pos * d..(pos + 1) * d])
+            {
+                *a += b;
             }
-            let caches = &*sessions;
-            attention_steps(
-                (&qkv, 3 * d),
-                |beam| (&caches[beam].keys[l][..], &caches[beam].values[l][..]),
-                m,
-                (d, c.decoder_heads, c.decoder_heads),
-                &mut att,
-            );
-            add_into(&mut x, &layer.self_out.forward(&att, m));
-            let normed = layer.norm_cross.apply(&x, d);
-            let q = layer.cross_q.forward(&normed, m);
-            // Every query sees the same window, so all beams go as one.
-            let att = attention_with((&q, d), &cross[l], m, (d, c.decoder_heads), false);
-            add_into(&mut x, &layer.cross_out.forward(&att, m));
-            let normed = layer.norm_ffn.apply(&x, d);
-            let mut hidden = layer.fc1.forward(&normed, m);
-            GELU.apply(&mut hidden, c.decoder_ffn);
-            add_into(&mut x, &layer.fc2.forward(&hidden, m));
         }
+        let normed = if self.decoder.is_empty() {
+            self.decoder_norm.apply(&x, d)
+        } else {
+            let mut normed = self.decoder[0].norm_self.apply(&x, d);
+            for (l, layer) in self.decoder.iter().enumerate() {
+                let qkv = layer.self_qkv.forward(&normed, m);
+                let mut att = Buf::scratch(m * d);
+                for (row, session) in qkv.chunks_exact(3 * d).zip(sessions.iter_mut()) {
+                    session.keys[l].extend_from_slice(&row[d..2 * d]);
+                    session.values[l].extend_from_slice(&row[2 * d..]);
+                }
+                let caches = &*sessions;
+                attention_steps(
+                    (&qkv, 3 * d),
+                    |beam| (&caches[beam].keys[l][..], &caches[beam].values[l][..]),
+                    m,
+                    (d, c.decoder_heads, c.decoder_heads),
+                    &mut att,
+                );
+                let normed_cross =
+                    layer
+                        .norm_cross
+                        .residual(&mut x, &layer.self_out.forward(&att, m), 1.0);
+                let q = layer.cross_q.forward(&normed_cross, m);
+                // Every query sees the same window, so all beams go as one.
+                let att = attention_with((&q, d), &cross[l], m, (d, c.decoder_heads), false);
+                let normed_ffn =
+                    layer
+                        .norm_ffn
+                        .residual(&mut x, &layer.cross_out.forward(&att, m), 1.0);
+                let mut hidden = layer.fc1.forward(&normed_ffn, m);
+                GELU.apply(&mut hidden, c.decoder_ffn);
+                let ffn_out = layer.fc2.forward(&hidden, m);
+                normed = match self.decoder.get(l + 1) {
+                    Some(next) => next.norm_self.residual(&mut x, &ffn_out, 1.0),
+                    None => self.decoder_norm.residual(&mut x, &ffn_out, 1.0),
+                };
+            }
+            normed
+        };
         sessions.iter_mut().for_each(|s| s.position += 1);
-        let normed = self.decoder_norm.apply(&x, d);
         let logits = self.embed.forward(&normed, m);
         logits
             .chunks_exact(c.vocab)
@@ -240,33 +257,50 @@ impl Whisper {
         for (r, (row, &token)) in x.chunks_exact_mut(d).zip(tokens).enumerate() {
             let pos = (session.position + r).min(c.max_tokens - 1);
             self.embed.row(token, row);
-            add_into(row, &self.decoder_positions[pos * d..(pos + 1) * d]);
-        }
-        for (l, layer) in self.decoder.iter().enumerate() {
-            let normed = layer.norm_self.apply(&x, d);
-            let qkv = layer.self_qkv.forward(&normed, m);
-            for row in qkv.chunks_exact(3 * d) {
-                session.keys[l].extend_from_slice(&row[d..2 * d]);
-                session.values[l].extend_from_slice(&row[2 * d..]);
+            for (a, b) in row
+                .iter_mut()
+                .zip(&self.decoder_positions[pos * d..(pos + 1) * d])
+            {
+                *a += b;
             }
-            let seen = session.keys[l].len() / d;
-            let att = attention(
-                (&qkv, 3 * d),
-                (&session.keys[l], d),
-                (&session.values[l], d),
-                (m, seen),
-                (d, c.decoder_heads, c.decoder_heads),
-                true,
-            );
-            add_into(&mut x, &layer.self_out.forward(&att, m));
-            let normed = layer.norm_cross.apply(&x, d);
-            let q = layer.cross_q.forward(&normed, m);
-            let att = attention_with((&q, d), &session.cross[l], m, (d, c.decoder_heads), false);
-            add_into(&mut x, &layer.cross_out.forward(&att, m));
-            let normed = layer.norm_ffn.apply(&x, d);
-            let mut hidden = layer.fc1.forward(&normed, m);
-            GELU.apply(&mut hidden, c.decoder_ffn);
-            add_into(&mut x, &layer.fc2.forward(&hidden, m));
+        }
+        if !self.decoder.is_empty() {
+            let mut normed = self.decoder[0].norm_self.apply(&x, d);
+            for (l, layer) in self.decoder.iter().enumerate() {
+                let qkv = layer.self_qkv.forward(&normed, m);
+                for row in qkv.chunks_exact(3 * d) {
+                    session.keys[l].extend_from_slice(&row[d..2 * d]);
+                    session.values[l].extend_from_slice(&row[2 * d..]);
+                }
+                let seen = session.keys[l].len() / d;
+                let att = attention(
+                    (&qkv, 3 * d),
+                    (&session.keys[l], d),
+                    (&session.values[l], d),
+                    (m, seen),
+                    (d, c.decoder_heads, c.decoder_heads),
+                    true,
+                );
+                let normed_cross =
+                    layer
+                        .norm_cross
+                        .residual(&mut x, &layer.self_out.forward(&att, m), 1.0);
+                let q = layer.cross_q.forward(&normed_cross, m);
+                let att =
+                    attention_with((&q, d), &session.cross[l], m, (d, c.decoder_heads), false);
+                let normed_ffn =
+                    layer
+                        .norm_ffn
+                        .residual(&mut x, &layer.cross_out.forward(&att, m), 1.0);
+                let mut hidden = layer.fc1.forward(&normed_ffn, m);
+                GELU.apply(&mut hidden, c.decoder_ffn);
+                let ffn_out = layer.fc2.forward(&hidden, m);
+                if let Some(next) = self.decoder.get(l + 1) {
+                    normed = next.norm_self.residual(&mut x, &ffn_out, 1.0);
+                } else {
+                    add_into(&mut x, &ffn_out);
+                }
+            }
         }
         session.position += m;
         let normed = self.decoder_norm.apply(&x[(m - 1) * d..], d);
