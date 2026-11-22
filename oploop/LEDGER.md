@@ -3408,3 +3408,46 @@ x86-64 Windows and aarch64-linux-android.
   - `bench/paths.py`: Moonshine tiny and Parakeet Unified English Q8_0 identical across
     default, `scalar`, `avx2`, `avxvnni`, and `TRIT_THREADS=1`.
   - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.
+
+### SI-053 Pre-biased VNNI dots, 2D frame split, `m = 1` dual chain, and small-product grouping in `int8`
+
+- Profile of `A0` showed Whisper tiny encoder `int8` layers (`384 x 1536`, `768 x 384`,
+  `1152 x 384`, `384 x 384`) leaving 4 to 8 of 16 threads idle because `Int8::forward_biased`
+  split only over output blocks (12, 24, 36 units), Whisper decoder `m = 1` and `m = 5`
+  layers spawning tiny tasks across 16 threads on 2 CCDs, and `vnni_tile` paying per-group
+  zero-init + post-loop `vpsubd` + bounds checks, plus 2-chain `vpdpbusd` latency on
+  `m = 1` (`2560 x 1280` LSTM in Unified Q8_0).
+- Change in `src/cpu/int8.rs`:
+  - Pre-initialize `dots` to `-128 * sum(x)` and hoist row/scale/sum pointers in `vnni_tile`
+    (100 % bit-exact in wrapping i32).
+  - Add `vnni_tile_m1` with two independent `k4` chains per block (4 `vpdpbusd` chains in
+    flight for single-frame products).
+  - Split frames across `gcd`-balanced multiples of 6 when `units < 6 * threads` does not
+    divide `threads` and `m >= min_spans * 24`.
+  - Fix `grouped()` to run tiny products (`<= 250,000` MACs) inline and cap medium decoder
+    steps at `<= threads` evenly balanced tasks.
+  - Note: a 4-way preloaded weight array (`w0[4]`, `w1[4]`) spilled ZMM registers (33 live)
+    and regressed Whisper `m = 1500` by 10 to 16 %; loading one `w0`/`w1` pair per `k4`
+    eliminated the spill and recovered both Whisper and Q8_0.
+- `kernel_bench` (M0 vs SI-053d): `q8_0 1024x4096 m=128` 1.853 -> 1.889 T/s;
+  `q8_0 4096x1024 m=750` 1.930 -> 1.970 T/s; `q8_0 2560x1280 m=1` 0.697 -> 0.819 T/s
+  (+17.5 %, 0 bits differ vs v2); `int8 384x1536 m=1500` 2.541 -> 3.115 T/s (+22.6 %);
+  `int8 768x384 m=1500` 2.535 -> 3.187 T/s (+25.7 %); `int8 1152x384 m=1500` 2.917 ->
+  3.415 T/s (+17.1 %); `int8 384x384 m=1500` 2.005 -> 2.572 T/s (+28.3 %);
+  `int8 384x384 m=5` 0.273 -> 0.369 T/s (+35.2 %); `int8 1536x384 m=5` 0.556 -> 0.867 T/s
+  (+55.9 %).
+- Interleaved A/B (`K3_si052.dll` vs `B_si053d.dll`, quiet 7950X3D, 3 rounds each,
+  `oploop/results/s1122/ab_si053d_*.txt`):
+  - Whisper tiny `clean` (200 clips): forward 35.2 -> 34.0 ms, per-clip B/A 0.977,
+    paired p = 2.5e-22, CPU time 120.4 -> 118.0 s (B/A 0.980), round wall 7.61 -> 7.37 s;
+    reversed (B first) 34.5 vs 35.1 ms, per-clip A/B 1.020 (B/A 0.980), paired p = 3.5e-15,
+    CPU time 116.7 vs 119.6 s (B/A 0.976), round wall 7.44 vs 7.57 s. Errors 231 equal;
+    0 of 200 texts differ.
+  - Parakeet Unified English Q8_0 `clean` (200 clips): 44.3 -> 44.2 ms, per-clip B/A 0.994,
+    paired p = 2.0e-19, CPU time 0.992, round wall 11.03 -> 10.97 s. Errors 56 equal;
+    0 of 200 texts differ.
+  - Parakeet Unified English Q8_0 `long-clean` (40 clips): 574.0 -> 573.6 ms, per-clip
+    B/A 0.993, paired p = 5.5e-12, CPU time 0.991, round wall 24.20 -> 24.03 s. Errors
+    120 equal; 0 of 40 texts differ.
+  - Decision: keep. Release build, Clippy, fmt, `bench/paths.py`, and `trit skill --check`
+    clean.

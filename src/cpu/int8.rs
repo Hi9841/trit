@@ -439,9 +439,39 @@ impl Int8 {
             Path::Scalar => grouped(self.n, q.m * self.k, |row| self.scalar_row(&q, row, ptr)),
             #[cfg(target_arch = "x86_64")]
             // SAFETY: Path::detect confirmed the CPU features.
-            Path::Vnni512 => grouped(self.n / (2 * rows), 2 * block_work, |task| unsafe {
-                self.vnni_task(&q, task, bias, ptr)
-            }),
+            Path::Vnni512 => {
+                let units = self.n / (2 * rows);
+                let threads = team::threads().max(1);
+                let min_spans = threads / gcd(units, threads);
+                let spans =
+                    if threads > 1 && min_spans > 1 && units < 6 * threads && q.m >= min_spans * 24
+                    {
+                        if units * min_spans < 2 * threads && q.m >= min_spans * 48 {
+                            min_spans * 2
+                        } else {
+                            min_spans
+                        }
+                    } else {
+                        1
+                    };
+                if spans > 1 {
+                    let tile_groups = q.m.div_ceil(6);
+                    team::for_each(units * spans, |task| {
+                        let (unit, span) = (task / spans, task % spans);
+                        let start = (span * tile_groups / spans) * 6;
+                        let end = (((span + 1) * tile_groups / spans) * 6).min(q.m);
+                        // SAFETY: Path::detect confirmed AVX-512 VNNI; each (unit, span)
+                        // writes disjoint output rows and columns.
+                        unsafe { self.vnni_task(&q, unit, start..end, bias, ptr) }
+                    });
+                } else {
+                    // SAFETY: Path::detect confirmed AVX-512 VNNI; each unit writes
+                    // disjoint output columns.
+                    grouped(units, 2 * block_work, |unit| unsafe {
+                        self.vnni_task(&q, unit, 0..q.m, bias, ptr)
+                    });
+                }
+            }
             #[cfg(target_arch = "x86_64")]
             // SAFETY: Path::detect confirmed the CPU features: AVX-VNNI, or
             // AVX-512 VNNI (with VL), which runs the EVEX form.
@@ -502,20 +532,97 @@ impl Int8 {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
-    unsafe fn vnni_task(&self, q: &Quantized, task: usize, bias: Option<&[f32]>, out: OutPtr) {
-        let mut frame = 0;
-        while frame + 6 <= q.m {
+    unsafe fn vnni_task(
+        &self,
+        q: &Quantized,
+        task: usize,
+        frames: std::ops::Range<usize>,
+        bias: Option<&[f32]>,
+        out: OutPtr,
+    ) {
+        let mut frame = frames.start;
+        while frame + 6 <= frames.end {
             self.vnni_tile::<6>(q, task, frame, bias, out);
             frame += 6;
         }
-        match q.m - frame {
-            1 => self.vnni_tile::<1>(q, task, frame, bias, out),
+        match frames.end - frame {
+            1 => self.vnni_tile_m1(q, task, frame, bias, out),
             2 => self.vnni_tile::<2>(q, task, frame, bias, out),
             3 => self.vnni_tile::<3>(q, task, frame, bias, out),
             4 => self.vnni_tile::<4>(q, task, frame, bias, out),
             5 => self.vnni_tile::<5>(q, task, frame, bias, out),
             _ => {}
         }
+    }
+
+    /// Single-frame fast path: 32 outputs with two independent `k4` chains per
+    /// 16-row block so 4 `vpdpbusd` chains overlap across the 4-cycle latency.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
+    unsafe fn vnni_tile_m1(
+        &self,
+        q: &Quantized,
+        task: usize,
+        frame: usize,
+        bias: Option<&[f32]>,
+        out: OutPtr,
+    ) {
+        use std::arch::x86_64::*;
+        let (k, k4s, groups) = (self.k, self.k / 4, self.k / self.group);
+        let quads = self.group / 4;
+        let blocks = [2 * task, 2 * task + 1];
+        debug_assert!(frame < q.m);
+        debug_assert!(q.values.len() >= (frame + 1) * k);
+        debug_assert!(q.scales.len() >= (frame + 1) * groups);
+        debug_assert!(q.sums.len() >= (frame + 1) * groups);
+        let w0_base = self.weights.as_ptr().add(blocks[0] * k4s * 64);
+        let w1_base = self.weights.as_ptr().add(blocks[1] * k4s * 64);
+        let s0_base = self.scales.as_ptr().add(blocks[0] * groups * 16);
+        let s1_base = self.scales.as_ptr().add(blocks[1] * groups * 16);
+        let x_row = q.values.as_ptr().add(frame * k);
+        let x_scales = q.scales.as_ptr().add(frame * groups);
+        let x_sums = q.sums.as_ptr().add(frame * groups);
+        let mut acc0 = _mm512_setzero_ps();
+        let mut acc1 = _mm512_setzero_ps();
+        for g in 0..groups {
+            // (w + 128) . x - 128 * sum(x) = -128 * sum(x) + (w + 128) . x
+            let neg_bias = _mm512_set1_epi32((-128i32).wrapping_mul(*x_sums.add(g)));
+            let (mut d0a, mut d0b) = (neg_bias, _mm512_setzero_si512());
+            let (mut d1a, mut d1b) = (neg_bias, _mm512_setzero_si512());
+            let mut k4 = g * quads;
+            let k4_end = k4 + quads;
+            while k4 + 2 <= k4_end {
+                let w0a = _mm512_loadu_si512(w0_base.add(k4 * 64).cast());
+                let w1a = _mm512_loadu_si512(w1_base.add(k4 * 64).cast());
+                let xa =
+                    _mm512_set1_epi32(std::ptr::read_unaligned(x_row.add(k4 * 4).cast::<i32>()));
+                d0a = _mm512_dpbusd_epi32(d0a, w0a, xa);
+                d1a = _mm512_dpbusd_epi32(d1a, w1a, xa);
+
+                let w0b = _mm512_loadu_si512(w0_base.add((k4 + 1) * 64).cast());
+                let w1b = _mm512_loadu_si512(w1_base.add((k4 + 1) * 64).cast());
+                let xb = _mm512_set1_epi32(std::ptr::read_unaligned(
+                    x_row.add((k4 + 1) * 4).cast::<i32>(),
+                ));
+                d0b = _mm512_dpbusd_epi32(d0b, w0b, xb);
+                d1b = _mm512_dpbusd_epi32(d1b, w1b, xb);
+                k4 += 2;
+            }
+            let d0 = _mm512_add_epi32(d0a, d0b);
+            let d1 = _mm512_add_epi32(d1a, d1b);
+            let xscale = _mm512_set1_ps(*x_scales.add(g));
+            let wscale0 = _mm512_loadu_ps(s0_base.add(g * 16));
+            let wscale1 = _mm512_loadu_ps(s1_base.add(g * 16));
+            acc0 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(d0), _mm512_mul_ps(wscale0, xscale), acc0);
+            acc1 = _mm512_fmadd_ps(_mm512_cvtepi32_ps(d1), _mm512_mul_ps(wscale1, xscale), acc1);
+        }
+        if let Some(bias) = bias {
+            acc0 = _mm512_add_ps(acc0, _mm512_loadu_ps(bias.as_ptr().add(blocks[0] * 16)));
+            acc1 = _mm512_add_ps(acc1, _mm512_loadu_ps(bias.as_ptr().add(blocks[1] * 16)));
+        }
+        let dst = out.0.add(frame * self.n);
+        _mm512_storeu_ps(dst.add(blocks[0] * 16), acc0);
+        _mm512_storeu_ps(dst.add(blocks[1] * 16), acc1);
     }
 
     /// 32 outputs (two 16-row blocks) by F frames, each plus its `bias`.
@@ -534,39 +641,48 @@ impl Int8 {
         let (k, k4s, groups) = (self.k, self.k / 4, self.k / self.group);
         let quads = self.group / 4;
         let blocks = [2 * task, 2 * task + 1];
+        debug_assert!(frame0 + F <= q.m);
+        debug_assert!(q.values.len() >= (frame0 + F) * k);
+        debug_assert!(q.scales.len() >= (frame0 + F) * groups);
+        debug_assert!(q.sums.len() >= (frame0 + F) * groups);
+        let w0_base = self.weights.as_ptr().add(blocks[0] * k4s * 64);
+        let w1_base = self.weights.as_ptr().add(blocks[1] * k4s * 64);
+        let s0_base = self.scales.as_ptr().add(blocks[0] * groups * 16);
+        let s1_base = self.scales.as_ptr().add(blocks[1] * groups * 16);
+        let x_base = q.values.as_ptr().add(frame0 * k);
+        let x_scales = q.scales.as_ptr().add(frame0 * groups);
+        let x_sums = q.sums.as_ptr().add(frame0 * groups);
         let mut acc = [[_mm512_setzero_ps(); F]; 2];
         for g in 0..groups {
+            // Start each dot product at -128 * sum(x) so (w + 128) . x gives w . x
+            // directly without a post-loop subtraction.
             let mut dots = [[_mm512_setzero_si512(); F]; 2];
+            for f in 0..F {
+                let neg_bias =
+                    _mm512_set1_epi32((-128i32).wrapping_mul(*x_sums.add(f * groups + g)));
+                dots[0][f] = neg_bias;
+                dots[1][f] = neg_bias;
+            }
             for k4 in g * quads..(g + 1) * quads {
-                let w0 = _mm512_loadu_si512(
-                    self.weights
-                        .as_ptr()
-                        .add((blocks[0] * k4s + k4) * 64)
-                        .cast(),
-                );
-                let w1 = _mm512_loadu_si512(
-                    self.weights
-                        .as_ptr()
-                        .add((blocks[1] * k4s + k4) * 64)
-                        .cast(),
-                );
+                let w0 = _mm512_loadu_si512(w0_base.add(k4 * 64).cast());
+                let w1 = _mm512_loadu_si512(w1_base.add(k4 * 64).cast());
+                let off = k4 * 4;
                 for f in 0..F {
-                    let src = q.values.as_ptr().add((frame0 + f) * k + k4 * 4);
-                    let x = _mm512_set1_epi32(std::ptr::read_unaligned(src.cast::<i32>()));
+                    let x = _mm512_set1_epi32(std::ptr::read_unaligned(
+                        x_base.add(f * k + off).cast::<i32>(),
+                    ));
                     dots[0][f] = _mm512_dpbusd_epi32(dots[0][f], w0, x);
                     dots[1][f] = _mm512_dpbusd_epi32(dots[1][f], w1, x);
                 }
             }
-            for (b, block) in blocks.iter().enumerate() {
-                let wscale = _mm512_loadu_ps(self.scales.as_ptr().add((block * groups + g) * 16));
-                for f in 0..F {
-                    let index = (frame0 + f) * groups + g;
-                    // (w + 128) . x = w . x + 128 * sum(x)
-                    let corrected =
-                        _mm512_sub_epi32(dots[b][f], _mm512_set1_epi32(128 * q.sums[index]));
-                    let scale = _mm512_mul_ps(wscale, _mm512_set1_ps(q.scales[index]));
-                    acc[b][f] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(corrected), scale, acc[b][f]);
-                }
+            let wscale0 = _mm512_loadu_ps(s0_base.add(g * 16));
+            let wscale1 = _mm512_loadu_ps(s1_base.add(g * 16));
+            for f in 0..F {
+                let xscale = _mm512_set1_ps(*x_scales.add(f * groups + g));
+                let scale0 = _mm512_mul_ps(wscale0, xscale);
+                let scale1 = _mm512_mul_ps(wscale1, xscale);
+                acc[0][f] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(dots[0][f]), scale0, acc[0][f]);
+                acc[1][f] = _mm512_fmadd_ps(_mm512_cvtepi32_ps(dots[1][f]), scale1, acc[1][f]);
             }
         }
         for (b, block) in blocks.iter().enumerate() {
@@ -851,22 +967,44 @@ impl Drop for Paired {
     }
 }
 
-/// Least work of a product task, in multiply-adds of whole tiles. A
-/// decoder step (one frame) had 320 tasks of about 0.1 us each on arm64,
-/// and the claims took longer than the work: grouped, its products ran 3
-/// times faster on the OnePlus 13R. A block of a take's encoder is far above
-/// it, so its tasks stay one block each.
-const MIN_TASK_WORK: usize = 800_000;
+/// Below this total multiply-add count, run inline on the calling thread
+/// rather than paying cross-thread synchronization overhead.
+const INLINE_WORK: usize = 250_000;
+/// Least work per task once parallelized.
+const MIN_TASK_WORK: usize = 180_000;
 
-/// Runs `run` for each of `units` units of `work` multiply-adds, in tasks
-/// of whole units: at least `MIN_TASK_WORK` each, while every thread still
-/// gets two tasks. Each unit is the same work in any task.
+#[cfg(target_arch = "x86_64")]
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Runs `run` for each of `units` units of `work` multiply-adds, running tiny
+/// products inline and spreading larger products evenly across threads.
 fn grouped(units: usize, work: usize, run: impl Fn(usize) + Sync) {
-    let per_task = MIN_TASK_WORK
-        .div_ceil(work.max(1))
-        .clamp(1, (units / (2 * team::threads())).max(1));
-    team::for_each(units.div_ceil(per_task), |task| {
-        for unit in task * per_task..((task + 1) * per_task).min(units) {
+    if units == 0 {
+        return;
+    }
+    let threads = team::threads().max(1);
+    let total = units.saturating_mul(work);
+    let tasks = if threads == 1 || total <= INLINE_WORK {
+        1
+    } else if total < 8_000_000 {
+        // Medium decoder steps: spread across up to one task per thread so
+        // synchronization is paid once without extra atomic claims.
+        total.div_ceil(MIN_TASK_WORK).min(threads).clamp(1, units)
+    } else {
+        let per_task = MIN_TASK_WORK
+            .div_ceil(work.max(1))
+            .clamp(1, (units / (2 * threads)).max(1));
+        units.div_ceil(per_task).clamp(1, units)
+    };
+    team::for_each(tasks, |task| {
+        let start = task * units / tasks;
+        let end = (task + 1) * units / tasks;
+        for unit in start..end {
             run(unit);
         }
     });
