@@ -637,13 +637,51 @@ const ATTENTION_ROWS: usize = 128;
 
 /// Index of the largest value; the first one wins a tie.
 pub fn argmax(values: &[f32]) -> usize {
-    let mut best = 0;
-    for (i, v) in values.iter().enumerate() {
-        if *v > values[best] {
-            best = i;
+    if values.len() <= 32 {
+        let mut best = 0;
+        if let Some(&first) = values.first() {
+            let mut best_val = first;
+            for (i, &v) in values.iter().enumerate().skip(1) {
+                if v > best_val {
+                    best_val = v;
+                    best = i;
+                }
+            }
         }
+        return best;
     }
+    let mut best = 0;
+    argmax_blocks(values, &mut best);
     best
+}
+
+multiversion! {
+    /// Scans in 32-element branchless blocks so long logit rows (e.g. 8,192
+    /// transducer tokens) vectorize while preserving exact first-wins ties.
+    fn argmax_blocks(values: &[f32], out: &mut usize) {
+        let mut best = 0usize;
+        let mut best_val = values[0];
+        let (chunks, tail) = values.as_chunks::<32>();
+        for (block, chunk) in chunks.iter().enumerate() {
+            if chunk.iter().fold(false, |hit, &v| hit | (v > best_val)) {
+                let base = block * 32;
+                for (j, &v) in chunk.iter().enumerate() {
+                    if v > best_val {
+                        best_val = v;
+                        best = base + j;
+                    }
+                }
+            }
+        }
+        let base = chunks.len() * 32;
+        for (j, &v) in tail.iter().enumerate() {
+            if v > best_val {
+                best_val = v;
+                best = base + j;
+            }
+        }
+        *out = best;
+    }
 }
 
 /// Im2col for a 1-D convolution over time-major `x` (`frames x channels`):

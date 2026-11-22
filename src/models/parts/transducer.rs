@@ -169,21 +169,28 @@ impl Transducer {
 }
 
 impl Transducer {
-    fn decoder_step(&self, c: &Config, token: usize, state: &mut DecoderState) -> Buf {
+    fn decoder_step(
+        &self,
+        c: &Config,
+        token: usize,
+        state: &mut DecoderState,
+        input: &mut [f32],
+        joined: &mut [f32],
+    ) -> Buf {
         let dh = c.decoder_hidden;
-        let mut input = vec![0.0f32; dh];
-        if !(c.start_zero && token == c.blank) {
-            self.embedding.row(token, &mut input);
+        if c.start_zero && token == c.blank {
+            input.fill(0.0);
+        } else {
+            self.embedding.row(token, input);
         }
-        let mut joined = vec![0.0f32; 2 * dh];
         for (layer, lstm) in self.lstm.iter().enumerate() {
-            joined[..dh].copy_from_slice(&input);
+            joined[..dh].copy_from_slice(input);
             joined[dh..].copy_from_slice(&state.hidden[layer]);
-            let mut gates = lstm.gates.matvec(&joined);
+            let mut gates = lstm.gates.matvec(joined);
             lstm.cell(&mut gates, &mut state.hidden[layer], &mut state.cell[layer]);
             input.copy_from_slice(&state.hidden[layer]);
         }
-        self.decoder_projector.matvec(&input)
+        self.decoder_projector.matvec(input)
     }
 
     /// `decoder_step` for one token of each state at once: each weight is
@@ -265,7 +272,9 @@ impl Transducer {
             hidden: vec![vec![0.0; dh]; c.decoder_layers],
             cell: vec![vec![0.0; dh]; c.decoder_layers],
         };
-        let mut dec = self.decoder_step(c, c.blank, &mut state);
+        let mut input = vec![0.0f32; dh];
+        let mut joined = vec![0.0f32; 2 * dh];
+        let mut dec = self.decoder_step(c, c.blank, &mut state, &mut input, &mut joined);
         let mut run = Greedy {
             tokens: Vec::new(),
             frames: Vec::new(),
@@ -303,7 +312,7 @@ impl Transducer {
             } else {
                 run.tokens.push(token);
                 run.frames.push(frame);
-                dec = self.decoder_step(c, token, &mut state);
+                dec = self.decoder_step(c, token, &mut state, &mut input, &mut joined);
                 symbols += 1;
                 if duration == 0 && symbols >= c.max_symbols {
                     duration = 1;

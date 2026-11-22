@@ -3549,3 +3549,37 @@ x86-64 Windows and aarch64-linux-android.
   - `bench/paths.py`: Redux and Unified Q8_0 identical across default, `scalar`, `avx2`,
     `avxvnni`, and `TRIT_THREADS=1`.
   - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.
+
+### SI-057 Balanced 8-row AVX-512 `HalfDense::matvec`, zero-alloc transducer steps, and block `argmax`
+
+- Profile of `A0` showed Parakeet Redux spending 798.8 ms (9.8 %) in the decoder on
+  `clean` and 1,308.2 ms on `long-clean`: `HalfDense::matvec` split with fixed
+  `ROWS_PER_TASK = 128` (5 tasks on 8 threads for `640 x 640`, 20 for `2560 x 1280`, 65
+  for `8198 x 640`), ran 4 rows at a time on AVX-512 (half the 8 FMA chains Zen 4 needs),
+  added bias in a second loop, `Transducer::decoder_step` allocated two `Vec<f32>` per
+  emitted token (15,434 allocations per 200 clips), and `layers::argmax` ran a scalar
+  branch loop with a per-element `values[best]` lookup over 8,192 logits.
+- Change:
+  - `src/cpu/half.rs`: tile-aligned (8-row) balanced task partitioning in `HalfDense::matvec`
+    (inline <= 131K MACs, 1 task/thread < 1M MACs, 2 tasks/thread >= 1M MACs), 8-row
+    AVX-512 tile when `!k.is_multiple_of(2048)` (avoiding 4 KB L1 aliasing), and bias
+    folded into tile stores across all ISAs.
+  - `src/models/parts/transducer.rs`: reuse `input` and `joined` scratch buffers across
+    decoder steps in `Transducer::greedy`.
+  - `src/layers.rs`: `multiversion!` 32-element branchless block scan in `argmax` (exact
+    first-wins ties and NaN semantics).
+- Interleaved A/B (`K7_si056.dll` vs `B_si057.dll`, quiet 7950X3D, 3 rounds each,
+  `oploop/results/s1122/ab_si057_*.txt`):
+  - Parakeet Redux `clean,other` (400 clips): forward 28.8 -> 28.4 ms, per-clip B/A 0.989,
+    paired p = 7.7e-44, round wall 14.71 -> 14.49 s; reversed (B first) 28.5 vs 28.9 ms,
+    per-clip A/B 1.007 (B/A 0.993), paired p = 3.6e-30, CPU time B/A 0.971, round wall
+    14.47 vs 14.60 s. Errors 81 / 172 equal; 0 of 400 texts differ.
+  - Parakeet Redux `long-clean` (40 clips): forward 430.6 -> 426.5 ms, per-clip B/A 0.989,
+    paired p = 9.7e-10, CPU time 0.988, round wall 18.31 -> 18.09 s; reversed (B first)
+    426.7 vs 432.0 ms, per-clip A/B 1.011 (B/A 0.989), paired p = 1.6e-09, CPU time B/A
+    0.991, round wall 18.11 vs 18.32 s. Errors 187 equal; 0 of 40 texts differ.
+  - Parakeet Unified English Q8_0 `clean` (200 clips): neutral (B/A 1.000, p = 0.051).
+    Errors 56 equal; 0 of 200 texts differ.
+  - `bench/paths.py`: Redux identical across default, `scalar`, `avx2`, `avxvnni`, and
+    `TRIT_THREADS=1`.
+  - Decision: keep. Release build, Clippy, fmt, and `trit skill --check` clean.
