@@ -3845,7 +3845,9 @@ probes.
 #### Pass 2 cumulative A/B (`B0_0686d8e.dll` vs `FINAL_v4.dll` at `b08b70e`, Ryzen 9 7950X3D)
 
 Only journeys run directly on `FINAL_v4.dll` (note: Parakeet long-clip numbers for `0b60a5e`
-appear under SI-061b above, and all journeys were re-run on `FINAL_v5.dll` below):
+appear under SI-061b above; five journeys were re-run on `FINAL_v5.dll` below: Redux
+`long-clean,long-other`, Unified `long-clean`, Whisper tiny `clean` and `other`, and
+Moonshine tiny `clean`):
 
 | Journey | Per-clip B/A (fwd / rev) | Round wall B/A | Peak WS (A -> B) | Errors (A / B) | Texts differing |
 |---|---:|---:|---:|---:|---:|
