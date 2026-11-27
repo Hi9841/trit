@@ -56,15 +56,24 @@ fn claim_word(job: u32, tasks: usize, next: usize) -> u64 {
     (u64::from(job) << 32) | ((tasks as u64) << 16) | next as u64
 }
 
+/// Isolates hot atomics on their own cache line (128 bytes covers both
+/// 64-byte x86 lines and 128-byte Apple Silicon lines) to prevent false
+/// sharing between task claiming, completion counting, and job dispatch.
+#[repr(align(128))]
+struct CachePadded<T>(T);
+
+impl<T> std::ops::Deref for CachePadded<T> {
+    type Target = T;
+    #[inline(always)]
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
 struct Shared {
-    /// Changes with each job; parked workers wait for it.
+    /// Read-mostly dispatch state (changes once per step or call).
     generation: AtomicUsize,
     job: AtomicPtr<Job>,
-    /// See `claim_word`.
-    claim: AtomicU64,
-    done: AtomicUsize,
-    panicked: AtomicBool,
-    parked: AtomicUsize,
     /// Bumped by `request_collect`; each worker calls `mi_collect(true)` on
     /// its own thread when idle instead of blocking `submit` on a spin barrier.
     collect_gen: AtomicU64,
@@ -80,6 +89,13 @@ struct Shared {
     /// the step's last task, and each step waits for a time slice. The
     /// others sit out (`fit_to`).
     active: AtomicUsize,
+    /// See `claim_word`. Own cache line: contended CAS on every task claim.
+    claim: CachePadded<AtomicU64>,
+    /// Own cache line: contended fetch_add on every task completion.
+    done: CachePadded<AtomicUsize>,
+    /// Cold / sleep-path fields, separated from `done`.
+    parked: CachePadded<AtomicUsize>,
+    panicked: AtomicBool,
     lock: Mutex<()>,
     wake: Condvar,
 }
@@ -148,14 +164,14 @@ impl Team {
         let shared = Arc::new(Shared {
             generation: AtomicUsize::new(0),
             job: AtomicPtr::new(std::ptr::null_mut()),
-            claim: AtomicU64::new(0),
-            done: AtomicUsize::new(0),
-            panicked: AtomicBool::new(false),
-            parked: AtomicUsize::new(0),
             collect_gen: AtomicU64::new(0),
             // No generation has this value, so no worker rests before a call ends.
             rest: AtomicUsize::new(usize::MAX),
             active: AtomicUsize::new(threads),
+            claim: CachePadded(AtomicU64::new(0)),
+            done: CachePadded(AtomicUsize::new(0)),
+            parked: CachePadded(AtomicUsize::new(0)),
+            panicked: AtomicBool::new(false),
             lock: Mutex::new(()),
             wake: Condvar::new(),
         });
@@ -517,7 +533,7 @@ pub struct Entered {
     throttle: Option<Throttle>,
     affinity: usize,
     affinity_cpus: Vec<usize>,
-    priority: Option<i32>,
+    priority: Option<Priority>,
     ideal: Option<u32>,
 }
 
@@ -794,18 +810,23 @@ fn set_ideal(_cpu: Option<u32>) -> Option<u32> {
     None
 }
 
+#[cfg(not(target_os = "macos"))]
+type Priority = i32;
+#[cfg(target_os = "macos")]
+type Priority = (u32, i32);
+
 /// THREAD_PRIORITY_ABOVE_NORMAL. A thread that holds a task delays its step
 /// until it runs again; at normal priority, a build on every core paused
 /// team threads for hundreds of ms per take. The team parks when idle, so
 /// the priority costs other programs nothing then.
 #[cfg(not(target_os = "macos"))]
-const ABOVE_NORMAL: i32 = 1;
+const ABOVE_NORMAL: Priority = 1;
 
-/// macOS: QOS_CLASS_USER_INTERACTIVE, the class macOS keeps on the
-/// performance cores. At the default class a team thread can run on an
-/// efficiency core, and every step then waits for it.
+/// macOS: QOS_CLASS_USER_INTERACTIVE (relative priority 0), the class macOS
+/// keeps on the performance cores. At the default class a team thread can run
+/// on an efficiency core, and every step then waits for it.
 #[cfg(target_os = "macos")]
-const ABOVE_NORMAL: i32 = 0x21;
+const ABOVE_NORMAL: Priority = (0x21, 0);
 
 /// The power throttling of a thread: the control mask and the state mask
 /// of `THREAD_POWER_THROTTLING_STATE`.
@@ -896,35 +917,42 @@ fn set_priority(priority: i32) -> Option<i32> {
     }
 }
 
-/// macOS: the same with the thread's QoS class (`priority` is a
-/// `qos_class_t`). A thread may set its own class without privileges.
+/// macOS: the same with the thread's QoS class (`(qos_class_t, relative)`).
+/// A thread may set its own class without privileges, and restoring keeps
+/// the caller's original relative priority.
 #[cfg(target_os = "macos")]
-fn set_priority(priority: i32) -> Option<i32> {
+fn set_priority((class, relative): Priority) -> Option<Priority> {
     extern "C" {
-        fn pthread_self() -> usize;
-        fn pthread_get_qos_class_np(thread: usize, class: *mut u32, relative: *mut i32) -> i32;
+        fn pthread_get_qos_class_np(
+            thread: libc::pthread_t,
+            class: *mut u32,
+            relative: *mut i32,
+        ) -> i32;
         fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32;
     }
     // QOS_CLASS_DEFAULT: what an unspecified class (0) restores to; macOS
     // refuses to set 0.
     const DEFAULT: u32 = 0x15;
-    let (mut previous, mut relative) = (0u32, 0i32);
+    let (mut previous, mut prev_relative) = (0u32, 0i32);
     // SAFETY: `pthread_self` names the calling thread; both pointers name
     // locals that live through the call.
     unsafe {
-        if pthread_get_qos_class_np(pthread_self(), &mut previous, &mut relative) != 0 {
+        if pthread_get_qos_class_np(libc::pthread_self(), &mut previous, &mut prev_relative) != 0 {
             return None;
         }
-        if previous == priority as u32 || pthread_set_qos_class_self_np(priority as u32, 0) != 0 {
+        if (previous == class && prev_relative == relative)
+            || pthread_set_qos_class_self_np(class, relative) != 0
+        {
             return None;
         }
     }
-    Some(if previous == 0 { DEFAULT } else { previous } as i32)
+    let restored = if previous == 0 { DEFAULT } else { previous };
+    Some((restored, prev_relative))
 }
 
 /// Raising a thread's priority needs privileges on Linux and Android.
 #[cfg(not(any(windows, target_os = "macos")))]
-fn set_priority(_priority: i32) -> Option<i32> {
+fn set_priority(_priority: Priority) -> Option<Priority> {
     None
 }
 

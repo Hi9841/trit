@@ -173,6 +173,47 @@ pub fn search<S: Clone + Send>(
                 ended.truncate(width);
             }
         }
+        let done = match rules {
+            Rules::OpenAi => ended.len() >= width,
+            // No live sequence can beat the worst ended one: the best live
+            // score per token, if no later token cost anything.
+            Rules::Transformers => {
+                ended.len() >= width
+                    && kept.first().is_none_or(|&(b, _, score)| {
+                        score / (live[b].tokens.len() + 1) as f32 <= ended[width - 1].rank
+                    })
+            }
+        };
+        if kept.is_empty() {
+            if ended.is_empty() {
+                live.clear();
+            }
+            break;
+        }
+        if done || last {
+            // The search ends after this iteration: if nothing ended (token
+            // limit reached, or zero-width OpenAI), record the kept selections
+            // without cloning decoder state or running a discarded `step`.
+            if ended.is_empty() {
+                let parents: Vec<Vec<usize>> = std::mem::take(&mut live)
+                    .into_iter()
+                    .map(|beam| beam.tokens)
+                    .collect();
+                ended = kept
+                    .into_iter()
+                    .map(|(b, token, score)| {
+                        let mut tokens = parents[b].clone();
+                        tokens.push(token);
+                        Ended {
+                            rank: score / tokens.len().max(1) as f32,
+                            sum: score,
+                            tokens,
+                        }
+                    })
+                    .collect();
+            }
+            break;
+        }
         // A sequence that goes on in one beam gives its state to that beam.
         // Only a sequence that splits is copied: a copy of every state at
         // every step moved all the self-attention caches of all beams.
@@ -197,9 +238,7 @@ pub fn search<S: Clone + Send>(
             states.extend(state);
         }
         let fed: Vec<usize> = kept.iter().map(|(_, token, _)| *token).collect();
-        logits = if kept.is_empty() {
-            None
-        } else {
+        logits = {
             let _span = crate::prof::span(crate::prof::Stage::BeamStep);
             Some(step(&mut states, &fed))
         };
@@ -217,20 +256,6 @@ pub fn search<S: Clone + Send>(
                 }
             })
             .collect();
-        let done = match rules {
-            Rules::OpenAi => ended.len() >= width,
-            // No live sequence can beat the worst ended one: the best live
-            // score per token, if no later token cost anything.
-            Rules::Transformers => {
-                ended.len() >= width
-                    && live.first().is_none_or(|best| {
-                        best.score / best.tokens.len() as f32 <= ended[width - 1].rank
-                    })
-            }
-        };
-        if done || live.is_empty() {
-            break;
-        }
     }
     // The token limit ended the search: the live sequences count too.
     if ended.is_empty() {

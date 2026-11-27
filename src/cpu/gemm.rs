@@ -731,6 +731,15 @@ impl Dense {
                 bias.take(),
                 std::mem::take(&mut relu),
             ),
+            Weights::F16(w) if rows == 1 && !relu && self.in_features.is_multiple_of(16) => {
+                super::half::matvec_slice(
+                    w,
+                    n,
+                    self.in_features,
+                    &x[..self.in_features],
+                    bias.take(),
+                )
+            }
             Weights::F16(w) => fgemm::matmul_then(
                 x,
                 rows,

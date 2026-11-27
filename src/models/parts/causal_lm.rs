@@ -9,7 +9,8 @@
 use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, gemm::Dense, team, tensors::Tensors};
 use crate::layers::{
-    add_into, add_scaled_into, argmax, attention, linear, scale_all, stacked, RmsNorm, Rotary,
+    add_into, add_scaled_into, argmax, attention, attention_steps, linear, scale_all, stacked,
+    RmsNorm, Rotary,
 };
 use crate::models::files::Files;
 use crate::{Device, Precision};
@@ -205,7 +206,7 @@ impl CausalLm {
         let mut keys = vec![Vec::with_capacity(tokens.len() * kv); c.layers];
         let mut values = vec![Vec::with_capacity(tokens.len() * kv); c.layers];
         if !tokens.is_empty() {
-            self.forward(tokens, 0, &mut keys, &mut values);
+            let _ = self.hidden(self.embed(tokens), 0, (&mut keys, &mut values), true);
         }
         Prefix {
             tokens: tokens.to_vec(),
@@ -214,16 +215,20 @@ impl CausalLm {
         }
     }
 
-    pub fn generate(
+    /// Greedy decoding, optionally drafting short continuations from `lookup`
+    /// (prompt-lookup speculative decoding) and verifying them in one causal
+    /// forward pass so large weight tables are read once for several tokens.
+    pub fn generate_with_lookup(
         &self,
         prompt: &[usize],
         prefix: Option<&Prefix>,
         max_new: usize,
         stop: &[usize],
+        lookup: &[usize],
     ) -> Vec<usize> {
         let c = &self.config;
         let kv = c.kv_heads * c.head_dim;
-        let capacity = (prompt.len() + max_new) * kv;
+        let capacity = (prompt.len() + max_new + MAX_DRAFT) * kv;
         let cache = |from: Option<&Vec<f32>>| {
             let mut cache = Vec::with_capacity(capacity);
             cache.extend_from_slice(from.map_or(&[][..], Vec::as_slice));
@@ -239,13 +244,24 @@ impl CausalLm {
             .map(|l| cache(prefix.map(|p| &p.values[l])))
             .collect();
         let logits = self.forward(&prompt[done..], done, &mut keys, &mut values);
-        self.greedy(
-            logits,
-            prompt.len(),
-            (&mut keys, &mut values),
-            max_new,
-            stop,
-        )
+        if lookup.is_empty() {
+            self.greedy(
+                logits,
+                prompt.len(),
+                (&mut keys, &mut values),
+                max_new,
+                stop,
+            )
+        } else {
+            self.greedy_lookup(
+                logits,
+                prompt.len(),
+                (&mut keys, &mut values),
+                max_new,
+                stop,
+                lookup,
+            )
+        }
     }
 
     /// Greedy tokens after a prompt given as embeddings (`rows x width`,
@@ -296,7 +312,107 @@ impl CausalLm {
                 break;
             }
             out.push(token);
+            if out.len() == max_new {
+                break;
+            }
             logits = self.forward(&[token], position + out.len() - 1, keys, values);
+        }
+        out
+    }
+
+    /// Greedy decoding with prompt-lookup drafting from `lookup`. Each step
+    /// drafts up to `MAX_DRAFT` tokens matching the generated suffix in `lookup`
+    /// and verifies `[last_token, draft...]` in one causal pass.
+    fn greedy_lookup(
+        &self,
+        logits: Buf,
+        mut pos: usize,
+        (keys, values): (&mut [Vec<f32>], &mut [Vec<f32>]),
+        max_new: usize,
+        stop: &[usize],
+        lookup: &[usize],
+    ) -> Vec<usize> {
+        let mut out = Vec::new();
+        if max_new == 0 {
+            return out;
+        }
+        let first = argmax(&logits);
+        drop(logits);
+        if stop.contains(&first) {
+            return out;
+        }
+        out.push(first);
+        let mut last = first;
+        let c = &self.config;
+        let vocab = c.vocab;
+        let kv = c.kv_heads * c.head_dim;
+        let mut batch = Vec::with_capacity(1 + MAX_DRAFT);
+        let mut cursor = 0usize;
+        while out.len() < max_new {
+            let remaining = max_new - out.len();
+            let draft_cap = MAX_DRAFT.min(remaining);
+            batch.clear();
+            batch.push(last);
+            let draft_start = if let Some((start, len)) =
+                draft_from_lookup(&out, lookup, cursor, draft_cap, stop)
+            {
+                batch.extend_from_slice(&lookup[start..start + len]);
+                Some(start)
+            } else {
+                None
+            };
+            let draft_len = batch.len() - 1;
+            if draft_len == 0 {
+                let logits = self.forward(&batch, pos, keys, values);
+                let next = argmax(&logits);
+                if stop.contains(&next) {
+                    break;
+                }
+                out.push(next);
+                last = next;
+                pos += 1;
+                continue;
+            }
+            let all_logits = self.forward_all(&batch, pos, keys, values);
+            let mut accepted = 0usize;
+            let mut next_token = None;
+            for i in 0..draft_len {
+                let predicted = argmax(&all_logits[i * vocab..(i + 1) * vocab]);
+                if predicted == batch[i + 1] {
+                    out.push(predicted);
+                    accepted += 1;
+                    if out.len() == max_new {
+                        return out;
+                    }
+                } else {
+                    next_token = Some(predicted);
+                    break;
+                }
+            }
+            if let Some(start) = draft_start {
+                cursor = start + accepted;
+            }
+            if let Some(predicted) = next_token {
+                let keep = (pos + 1 + accepted) * kv;
+                for cache in keys.iter_mut().chain(values.iter_mut()) {
+                    cache.truncate(keep);
+                }
+                if stop.contains(&predicted) {
+                    break;
+                }
+                out.push(predicted);
+                last = predicted;
+                pos += 1 + accepted;
+            } else {
+                // All draft tokens accepted: also take the bonus token from the final row.
+                let bonus = argmax(&all_logits[draft_len * vocab..(draft_len + 1) * vocab]);
+                if stop.contains(&bonus) {
+                    break;
+                }
+                out.push(bonus);
+                last = bonus;
+                pos += 1 + draft_len;
+            }
         }
         out
     }
@@ -368,6 +484,28 @@ impl CausalLm {
         values: &mut [Vec<f32>],
     ) -> Buf {
         self.forward_rows(self.embed(tokens), first, keys, values)
+    }
+
+    /// `forward` returning logits for every row (`tokens.len() x vocab`).
+    fn forward_all(
+        &self,
+        tokens: &[usize],
+        first: usize,
+        keys: &mut [Vec<f32>],
+        values: &mut [Vec<f32>],
+    ) -> Buf {
+        let c = &self.config;
+        let m = tokens.len();
+        let x = self.hidden(self.embed(tokens), first, (keys, values), true);
+        let normed = self.norm.apply(&x);
+        drop(x);
+        let mut logits = self
+            .head
+            .as_ref()
+            .unwrap_or(&self.embed)
+            .forward(&normed, m);
+        scale_all(&mut logits, 1.0 / c.logits_scaling);
+        logits
     }
 
     /// `forward` from embeddings, `rows x width`.
@@ -445,14 +583,26 @@ impl CausalLm {
                 values[l].extend_from_slice(&row[qd + kv..]);
             }
             let seen = first + m;
-            let att = attention(
-                (&qkv, qd + 2 * kv),
-                (&keys[l], kv),
-                (&values[l], kv),
-                (m, seen),
-                (qd, c.heads, c.kv_heads),
-                causal,
-            );
+            let att = if m == 1 {
+                let mut out = Buf::scratch(qd);
+                attention_steps(
+                    (&qkv, qd + 2 * kv),
+                    |_| (&keys[l], &values[l]),
+                    1,
+                    (qd, c.heads, c.kv_heads),
+                    &mut out,
+                );
+                out
+            } else {
+                attention(
+                    (&qkv, qd + 2 * kv),
+                    (&keys[l], kv),
+                    (&values[l], kv),
+                    (m, seen),
+                    (qd, c.heads, c.kv_heads),
+                    causal,
+                )
+            };
             add_scaled_into(&mut x, &layer.out.forward(&att, m), c.residual_multiplier);
             let mut normed = layer.norm_mlp.apply(&x);
             if let Some(scales) = &self.ffn_scales {
@@ -479,4 +629,54 @@ impl CausalLm {
         }
         x
     }
+}
+
+/// Maximum tokens drafted per speculative step (batch size up to `1 + MAX_DRAFT`,
+/// aligned with 2 AVX-512 `F = 6` and 3 AVX2 `F = 4` tiles).
+const MAX_DRAFT: usize = 11;
+
+/// Finds the longest suffix of `generated` (up to 3 tokens) inside `lookup`,
+/// preferring matches at or after `cursor`, and returns `(start, len)` of the
+/// continuation up to `cap` non-stop tokens.
+fn draft_from_lookup(
+    generated: &[usize],
+    lookup: &[usize],
+    cursor: usize,
+    cap: usize,
+    stop: &[usize],
+) -> Option<(usize, usize)> {
+    if generated.is_empty() || lookup.len() < 2 || cap == 0 {
+        return None;
+    }
+    let max_n = generated.len().min(3).min(lookup.len() - 1);
+    for n in (1..=max_n).rev() {
+        let needle = &generated[generated.len() - n..];
+        let limit = lookup.len() - n;
+        let start_from = cursor.saturating_sub(n).min(limit);
+        let found = (start_from..limit)
+            .chain(0..start_from)
+            .find(|&i| &lookup[i..i + n] == needle);
+        if let Some(at) = found {
+            let cont = at + n;
+            let mut len = 0;
+            while len < cap && cont + len < lookup.len() && !stop.contains(&lookup[cont + len]) {
+                len += 1;
+            }
+            if len > 0 {
+                return Some((cont, len));
+            }
+        }
+    }
+    // When the first output token only changed casing from `lookup[0]`
+    // (e.g. "send" -> "Send"), draft the continuation right after `lookup[0]`.
+    if generated.len() == 1 && lookup.len() >= 2 {
+        let mut len = 0;
+        while len < cap && 1 + len < lookup.len() && !stop.contains(&lookup[1 + len]) {
+            len += 1;
+        }
+        if len > 0 {
+            return Some((1, len));
+        }
+    }
+    None
 }

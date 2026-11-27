@@ -206,6 +206,7 @@ impl Family for Whisper {
         speech_windows(samples, WINDOW_SAMPLES, options, |window| {
             let encoded = self.model.encode(&self.mel.compute(window));
             let mut session = self.model.session(&encoded);
+            drop(encoded);
             let vocab = self.model.config.vocab;
             let (no_speech, prompt_logits, first_offset) = if previous.is_empty()
                 && (self.tokens.languages.is_empty() || language.is_some())

@@ -8,8 +8,6 @@ use parking_lot::Mutex;
 use std::num::NonZeroU64;
 
 const STRIDE: usize = 256;
-/// Output tile of the tiled product. The workgroup is `super::TILE` by `super::TILE`.
-const WIDE: u32 = 32;
 const LANE: u32 = 256;
 /// Timestamp slots for one profiled encode. 24 layers use about 630.
 const STAMPS: u32 = 1024;
@@ -151,10 +149,14 @@ struct Pipes {
     split_qkv: wgpu::ComputePipeline,
     split_heads: wgpu::ComputePipeline,
     gemm_f32: wgpu::ComputePipeline,
+    gemm_f32_vec4: Option<wgpu::ComputePipeline>,
     gemm_f16: wgpu::ComputePipeline,
+    gemm_f16_vec4: Option<wgpu::ComputePipeline>,
     ternary: wgpu::ComputePipeline,
-    f32_tile: u32,
-    ternary_tile: u32,
+    quantize: Option<wgpu::ComputePipeline>,
+    f32_tile: (u32, u32),
+    f16_tile: (u32, u32),
+    ternary_tile: (u32, u32),
     ln_layout: wgpu::BindGroupLayout,
     residual_layout: wgpu::BindGroupLayout,
     scale_layout: wgpu::BindGroupLayout,
@@ -168,6 +170,7 @@ struct Pipes {
     heads_layout: wgpu::BindGroupLayout,
     gemm_layout: wgpu::BindGroupLayout,
     ternary_layout: wgpu::BindGroupLayout,
+    quantize_layout: wgpu::BindGroupLayout,
 }
 
 struct Act {
@@ -176,6 +179,7 @@ struct Act {
     b: wgpu::Buffer,
     branch: wgpu::Buffer,
     hidden: wgpu::Buffer,
+    xq: wgpu::Buffer,
     qkv: wgpu::Buffer,
     q: wgpu::Buffer,
     k: wgpu::Buffer,
@@ -204,11 +208,13 @@ struct LayerW {
 }
 
 struct GemmBind {
-    /// 0 f32, 1 f16, 2 ternary.
+    /// 0 f32, 1 f16, 2 ternary, 3 f32 vec4, 4 f16 vec4.
     pipe: u8,
     group: wgpu::BindGroup,
+    /// Pre-quantize `(bind_group, k / 128)` before a decoupled tiled ternary product.
+    quantize: Option<(wgpu::BindGroup, u32)>,
     n: u32,
-    tile: u32,
+    tile: (u32, u32),
 }
 
 struct LayerBind {
@@ -409,6 +415,7 @@ impl Act {
             b: tiny.clone(),
             branch: tiny.clone(),
             hidden: tiny.clone(),
+            xq: tiny.clone(),
             qkv: tiny.clone(),
             q: tiny.clone(),
             k: tiny.clone(),
@@ -463,6 +470,7 @@ impl Inner {
             b: self.alloc("trit-norm", mul(cap, d)?)?,
             branch: self.alloc("trit-branch", mul(cap, d)?)?,
             hidden: self.alloc("trit-hidden", mul(cap, f)?)?,
+            xq: self.alloc("trit-xq", mul(cap, d.max(f))?)?,
             qkv: self.alloc("trit-qkv", mul(cap, mul(3, d)?)?)?,
             q: self.alloc("trit-q", mul(cap, d)?)?,
             k: self.alloc("trit-k", mul(cap, d)?)?,
@@ -557,6 +565,20 @@ impl Inner {
             );
         }
         self.queue.write_buffer(&self.params, 0, &self.params_cpu);
+        let any_ternary_rel = self
+            .layers
+            .iter()
+            .any(|layer| layer.rel_k.kind == MatKind::Ternary);
+        if any_ternary_rel && self.pipes.quantize.is_some() && rows > self.limit {
+            return Err(format!(
+                "position table for {rows} rows exceeds the GPU workgroup limit"
+            ));
+        }
+        let xq_sine = if any_ternary_rel && self.pipes.quantize.is_some() {
+            Some(self.alloc("trit-xq-sine", mul(rows, self.cfg.d)?)?)
+        } else {
+            None
+        };
         let scopes = super::push_scopes(&self.device);
         let mut encoder = self
             .device
@@ -568,9 +590,37 @@ impl Inner {
                 label: Some("trit-positions"),
                 timestamp_writes: None,
             });
+            if let (Some(q_pipe), Some(xq)) = (&self.pipes.quantize, &xq_sine) {
+                if let Some((first_idx, _)) = self
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .find(|(_, layer)| layer.rel_k.kind == MatKind::Ternary)
+                {
+                    let slot = mat_slot(first_idx, MATS);
+                    let q_group = make_group(
+                        &self.device,
+                        &self.pipes.quantize_layout,
+                        "trit-quantize-sine",
+                        &[
+                            storage(0, &self.act.sine),
+                            storage(1, xq),
+                            uniform(2, &self.params, slot),
+                        ],
+                    );
+                    pass.set_pipeline(q_pipe);
+                    pass.set_bind_group(0, &q_group, &[]);
+                    pass.dispatch_workgroups(self.cfg.d / 128, rows, 1);
+                }
+            }
             let count = self.layers.len();
             for index in 0..count {
                 let slot = mat_slot(index, MATS);
+                let src = if self.layers[index].rel_k.kind == MatKind::Ternary {
+                    xq_sine.as_ref().unwrap_or(&self.act.sine)
+                } else {
+                    &self.act.sine
+                };
                 let group = bind_product(
                     &ProductGpu {
                         device: &self.device,
@@ -579,7 +629,7 @@ impl Inner {
                         pipes: &self.pipes,
                     },
                     &self.layers[index].rel_k,
-                    &self.act.sine,
+                    src,
                     &self.act.projected,
                     slot,
                 );
@@ -895,8 +945,21 @@ impl Inner {
         let mut gemms = Vec::with_capacity(MATS);
         for (which, (x, y)) in pairs.into_iter().enumerate() {
             let mat = &layer.mats[which];
+            let slot = mat_slot(index, which);
+            let (src, quantize) = if mat.kind == MatKind::Ternary && pipes.quantize.is_some() {
+                let q_group = make_group(
+                    device,
+                    &pipes.quantize_layout,
+                    "trit-quantize",
+                    &[storage(0, x), storage(1, &act.xq), uniform(2, params, slot)],
+                );
+                (&act.xq, Some((q_group, mat.k / 128)))
+            } else {
+                (x, None)
+            };
+            let (pipe, tile) = product_pipe(pipes, mat);
             gemms.push(GemmBind {
-                pipe: pipe_id(mat.kind),
+                pipe,
                 group: bind_product(
                     &ProductGpu {
                         device,
@@ -905,12 +968,13 @@ impl Inner {
                         pipes,
                     },
                     mat,
-                    x,
+                    src,
                     y,
-                    mat_slot(index, which),
+                    slot,
                 ),
+                quantize,
                 n: mat.n,
-                tile: tile_of(pipes, mat.kind),
+                tile,
             });
         }
         LayerBind {
@@ -1053,7 +1117,7 @@ impl Inner {
             self.cfg.heads.saturating_mul(t),
             t.div_ceil(super::TILE),
             wide.div_ceil(super::TILE),
-            (t.saturating_mul(self.cfg.f)).div_ceil(LANE),
+            (t.saturating_mul(self.cfg.f.max(self.cfg.d))).div_ceil(LANE),
         ];
         if groups.iter().any(|group| *group > limit) {
             return Err(format!(
@@ -1085,57 +1149,51 @@ impl Inner {
         for layer in &bound.layers {
             marks.at(pass, "ln");
             dispatch_ln(pass, &pipes.ln, &layer.lns[0], t);
-            marks.at(pass, "gemm");
-            dispatch_gemm(pass, pipes, &layer.gemms[0], t);
+            dispatch_gemm_marked(pass, pipes, &layer.gemms[0], t, marks);
             marks.at(pass, "silu");
             dispatch_elem(pass, &pipes.silu, &bound.silu_f, t.saturating_mul(f));
-            marks.at(pass, "gemm");
-            dispatch_gemm(pass, pipes, &layer.gemms[1], t);
+            dispatch_gemm_marked(pass, pipes, &layer.gemms[1], t, marks);
             marks.at(pass, "res");
             dispatch_elem(pass, &pipes.residual, &layer.res_half, t.saturating_mul(d));
             marks.at(pass, "ln");
             dispatch_ln(pass, &pipes.ln, &layer.lns[1], t);
-            marks.at(pass, "gemm");
-            dispatch_gemm(pass, pipes, &layer.gemms[2], t);
+            dispatch_gemm_marked(pass, pipes, &layer.gemms[2], t, marks);
             marks.at(pass, "split");
             dispatch_elem(pass, &pipes.split_qkv, &bound.split, t.saturating_mul(d));
             marks.at(pass, "rel");
             pass.set_pipeline(&pipes.rel);
             pass.set_bind_group(0, &layer.rel, &[]);
-            pass.dispatch_workgroups(t.div_ceil(64), t.div_ceil(16), heads);
+            pass.dispatch_workgroups(t.div_ceil(64), t.div_ceil(32), heads);
             marks.at(pass, "softmax");
             pass.set_pipeline(&pipes.softmax);
             pass.set_bind_group(0, &bound.softmax, &[]);
             pass.dispatch_workgroups(heads.saturating_mul(t), 1, 1);
             marks.at(pass, "attn");
-            dispatch_elem(pass, &pipes.attn, &bound.attn, t.saturating_mul(d));
-            marks.at(pass, "gemm");
-            dispatch_gemm(pass, pipes, &layer.gemms[3], t);
+            pass.set_pipeline(&pipes.attn);
+            pass.set_bind_group(0, &bound.attn, &[]);
+            pass.dispatch_workgroups((d / heads).div_ceil(64), t.div_ceil(32), heads);
+            dispatch_gemm_marked(pass, pipes, &layer.gemms[3], t, marks);
             marks.at(pass, "res");
             dispatch_elem(pass, &pipes.residual, &layer.res_one, t.saturating_mul(d));
             marks.at(pass, "ln");
             dispatch_ln(pass, &pipes.ln, &layer.lns[2], t);
-            marks.at(pass, "gemm");
-            dispatch_gemm(pass, pipes, &layer.gemms[4], t);
+            dispatch_gemm_marked(pass, pipes, &layer.gemms[4], t, marks);
             marks.at(pass, "glu");
             dispatch_elem(pass, &pipes.glu, &bound.glu, t.saturating_mul(d));
             marks.at(pass, "dw");
             dispatch_elem(pass, &pipes.dw, &layer.dw, t.saturating_mul(d));
             marks.at(pass, "silu");
             dispatch_elem(pass, &pipes.silu, &bound.silu_d, t.saturating_mul(d));
-            marks.at(pass, "gemm");
-            dispatch_gemm(pass, pipes, &layer.gemms[5], t);
+            dispatch_gemm_marked(pass, pipes, &layer.gemms[5], t, marks);
             // Pointwise 2 wrote the norm buffer. Add that, not the depthwise row.
             marks.at(pass, "res");
             dispatch_elem(pass, &pipes.residual, &layer.res_conv, t.saturating_mul(d));
             marks.at(pass, "ln");
             dispatch_ln(pass, &pipes.ln, &layer.lns[3], t);
-            marks.at(pass, "gemm");
-            dispatch_gemm(pass, pipes, &layer.gemms[6], t);
+            dispatch_gemm_marked(pass, pipes, &layer.gemms[6], t, marks);
             marks.at(pass, "silu");
             dispatch_elem(pass, &pipes.silu, &bound.silu_f, t.saturating_mul(f));
-            marks.at(pass, "gemm");
-            dispatch_gemm(pass, pipes, &layer.gemms[7], t);
+            dispatch_gemm_marked(pass, pipes, &layer.gemms[7], t, marks);
             marks.at(pass, "res");
             dispatch_elem(pass, &pipes.residual, &layer.res_half, t.saturating_mul(d));
             marks.at(pass, "ln");
@@ -1226,11 +1284,14 @@ fn bind_product(
     }
 }
 
-fn tile_of(pipes: &Pipes, kind: MatKind) -> u32 {
-    match kind {
-        MatKind::F32 => pipes.f32_tile,
-        MatKind::F16 => super::TILE,
-        MatKind::Ternary => pipes.ternary_tile,
+fn product_pipe(pipes: &Pipes, mat: &Mat) -> (u8, (u32, u32)) {
+    let k_vec4 = mat.k.is_multiple_of(4);
+    match mat.kind {
+        MatKind::F32 if k_vec4 && pipes.gemm_f32_vec4.is_some() => (3, super::VEC4_TILE),
+        MatKind::F32 => (0, pipes.f32_tile),
+        MatKind::F16 if k_vec4 && pipes.gemm_f16_vec4.is_some() => (4, super::VEC4_TILE),
+        MatKind::F16 => (1, pipes.f16_tile),
+        MatKind::Ternary => (2, pipes.ternary_tile),
     }
 }
 
@@ -1256,15 +1317,31 @@ fn dispatch_ln(
     pass.dispatch_workgroups(t, 1, 1);
 }
 
-fn dispatch_gemm(pass: &mut wgpu::ComputePass<'_>, pipes: &Pipes, gemm: &GemmBind, t: u32) {
-    let (pipe, tile) = match gemm.pipe {
-        0 => (&pipes.gemm_f32, gemm.tile),
-        1 => (&pipes.gemm_f16, super::TILE),
-        _ => (&pipes.ternary, gemm.tile),
+fn dispatch_gemm_marked(
+    pass: &mut wgpu::ComputePass<'_>,
+    pipes: &Pipes,
+    gemm: &GemmBind,
+    t: u32,
+    marks: &mut Marks<'_>,
+) {
+    if let (Some(q_pipe), Some((q_group, groups))) = (&pipes.quantize, &gemm.quantize) {
+        marks.at(pass, "quant");
+        pass.set_pipeline(q_pipe);
+        pass.set_bind_group(0, q_group, &[]);
+        pass.dispatch_workgroups(*groups, t, 1);
+    }
+    marks.at(pass, "gemm");
+    let pipe = match gemm.pipe {
+        0 => &pipes.gemm_f32,
+        1 => &pipes.gemm_f16,
+        2 => &pipes.ternary,
+        3 => pipes.gemm_f32_vec4.as_ref().unwrap_or(&pipes.gemm_f32),
+        _ => pipes.gemm_f16_vec4.as_ref().unwrap_or(&pipes.gemm_f16),
     };
+    let (tile_m, tile_n) = gemm.tile;
     pass.set_pipeline(pipe);
     pass.set_bind_group(0, &gemm.group, &[]);
-    pass.dispatch_workgroups(gemm.n.div_ceil(tile), t.div_ceil(tile), 1);
+    pass.dispatch_workgroups(gemm.n.div_ceil(tile_n), t.div_ceil(tile_m), 1);
 }
 
 fn dispatch_product(
@@ -1274,23 +1351,17 @@ fn dispatch_product(
     group: &wgpu::BindGroup,
     rows: u32,
 ) {
-    let pipe = match mat.kind {
-        MatKind::F32 => &pipes.gemm_f32,
-        MatKind::F16 => &pipes.gemm_f16,
-        MatKind::Ternary => &pipes.ternary,
+    let (id, (tile_m, tile_n)) = product_pipe(pipes, mat);
+    let pipe = match id {
+        0 => &pipes.gemm_f32,
+        1 => &pipes.gemm_f16,
+        2 => &pipes.ternary,
+        3 => pipes.gemm_f32_vec4.as_ref().unwrap_or(&pipes.gemm_f32),
+        _ => pipes.gemm_f16_vec4.as_ref().unwrap_or(&pipes.gemm_f16),
     };
-    let tile = tile_of(pipes, mat.kind);
     pass.set_pipeline(pipe);
     pass.set_bind_group(0, group, &[]);
-    pass.dispatch_workgroups(mat.n.div_ceil(tile), rows.div_ceil(tile), 1);
-}
-
-fn pipe_id(kind: MatKind) -> u8 {
-    match kind {
-        MatKind::F32 => 0,
-        MatKind::F16 => 1,
-        MatKind::Ternary => 2,
-    }
+    pass.dispatch_workgroups(mat.n.div_ceil(tile_n), rows.div_ceil(tile_m), 1);
 }
 
 fn mat_slot(layer: usize, which: usize) -> usize {
@@ -1410,36 +1481,18 @@ fn build_pipes(gpu: &Gpu) -> Result<Pipes, String> {
     let shader = |layout: &wgpu::BindGroupLayout, source: &str, entry: &str, label: &str| {
         pipeline(device, layout, source, entry, label)
     };
-    let gemm_f32_small = gpu.gemm_f32_pipeline().clone();
-    let ternary_small = gpu.ternary_pipeline().clone();
-    let (gemm_f32, f32_tile) = match shader(
-        gpu.gemm_layout(),
-        include_str!("tiled_f32.wgsl"),
-        "gemm",
-        "tiled-f32",
-    ) {
-        Ok(pipe) => (pipe, WIDE),
-        Err(error) => {
-            crate::log(&format!(
-                "tiled f32 shader failed ({error}). The 16-wide product is used."
-            ));
-            (gemm_f32_small.clone(), super::TILE)
-        }
+    let gemm_f32 = gpu.gemm_f32_pipeline().clone();
+    let gemm_f32_vec4 = gpu.gemm_f32_vec4_pipeline().cloned();
+    let f32_tile = gpu.gemm_f32_tile();
+    let gemm_f16 = gpu.gemm_f16_pipeline().clone();
+    let gemm_f16_vec4 = gpu.gemm_f16_vec4_pipeline().cloned();
+    let f16_tile = gpu.gemm_f16_tile();
+    let (ternary, ternary_tile) = if let Some(tiled) = gpu.ternary_tiled_pipeline() {
+        (tiled.clone(), super::VEC4_TILE)
+    } else {
+        (gpu.ternary_pipeline().clone(), (super::TILE, super::TILE))
     };
-    let (ternary, ternary_tile) = match shader(
-        gpu.ternary_layout(),
-        include_str!("tiled_ternary.wgsl"),
-        "gemm",
-        "tiled-ternary",
-    ) {
-        Ok(pipe) => (pipe, WIDE),
-        Err(error) => {
-            crate::log(&format!(
-                "tiled ternary shader failed ({error}). The 16-wide product is used."
-            ));
-            (ternary_small.clone(), super::TILE)
-        }
-    };
+    let quantize = gpu.quantize_pipeline().cloned();
     Ok(Pipes {
         ln: shader(
             &ln_layout,
@@ -1508,9 +1561,13 @@ fn build_pipes(gpu: &Gpu) -> Result<Pipes, String> {
             "split-heads",
         )?,
         gemm_f32,
-        gemm_f16: gpu.gemm_f16_pipeline().clone(),
+        gemm_f32_vec4,
+        gemm_f16,
+        gemm_f16_vec4,
         ternary,
+        quantize,
         f32_tile,
+        f16_tile,
         ternary_tile,
         ln_layout,
         residual_layout,
@@ -1525,6 +1582,7 @@ fn build_pipes(gpu: &Gpu) -> Result<Pipes, String> {
         heads_layout,
         gemm_layout: gpu.gemm_layout().clone(),
         ternary_layout: gpu.ternary_layout().clone(),
+        quantize_layout: gpu.quantize_layout().clone(),
     })
 }
 

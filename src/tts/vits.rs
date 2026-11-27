@@ -7,7 +7,7 @@
 
 use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, team, tensors::Tensors};
-use crate::layers::{Gelu, Norm};
+use crate::layers::{add_into, scale_all, Gelu, Norm};
 use crate::tts::characters::Characters;
 use crate::tts::conv::{Conv1d, Depthwise, Upsample};
 use crate::tts::noise::Noise;
@@ -529,6 +529,12 @@ impl Coupling {
         let layers = c.num("prior_encoder_num_wavenet_layers")?;
         let kernel = c.num("wavenet_kernel_size")?;
         let rate = c.num("wavenet_dilation_rate")?;
+        if kernel == 0 || kernel.is_multiple_of(2) || rate == 0 {
+            return Err(
+                "config.json: Trit runs VITS WaveNet with an odd wavenet_kernel_size and positive dilation rate"
+                    .into(),
+            );
+        }
         let wavenet = (0..layers)
             .map(|i| {
                 let skip = if i + 1 < layers { 2 * hidden } else { hidden };
@@ -560,26 +566,36 @@ impl Coupling {
     /// `second -= mean(first)` on every row of `z` (`frames x 2 * half`).
     fn reverse(&self, z: &mut [f32], frames: usize) {
         let (hidden, half) = (self.hidden, self.half);
-        let first: Vec<f32> = z
-            .chunks_exact(2 * half)
-            .flat_map(|row| row[..half].to_vec())
-            .collect();
+        assert_eq!(Some(z.len()), frames.checked_mul(2 * half));
+        if frames == 0 || half == 0 {
+            return;
+        }
+        let mut first = Buf::scratch(frames * half);
+        for (dst, row) in first.chunks_exact_mut(half).zip(z.chunks_exact(2 * half)) {
+            dst.copy_from_slice(&row[..half]);
+        }
         let mut h = self.pre.forward(&first, frames, None);
+        drop(first);
         let mut skip = Buf::zeroed(frames * hidden);
+        let mut acts = Buf::scratch(frames * hidden);
         for (i, (input, res_skip)) in self.wavenet.iter().enumerate() {
             let mut gate = input.forward(&h, frames, None);
-            team::chunks_mut(&mut gate, 2 * hidden * 16, |_, rows| {
-                for row in rows.chunks_exact_mut(2 * hidden) {
+            assert_eq!(gate.len(), frames * 2 * hidden);
+            let acts_ptr = team::SendPtr::new(&mut acts);
+            team::chunks_mut(&mut gate, 2 * hidden * 16, |block, rows| {
+                let first_row = block * 16;
+                for (r, row) in rows.chunks_exact_mut(2 * hidden).enumerate() {
                     let (a, b) = row.split_at_mut(hidden);
                     activation::tanh(a);
                     activation::sigmoid(b);
-                    a.iter_mut().zip(b.iter()).for_each(|(x, y)| *x *= y);
+                    // SAFETY: each row belongs to this task; `acts` outlives the step.
+                    let dst = unsafe { acts_ptr.slice_mut((first_row + r) * hidden, hidden) };
+                    for ((o, &x), &y) in dst.iter_mut().zip(a.iter()).zip(b.iter()) {
+                        *o = x * y;
+                    }
                 }
             });
-            let acts: Vec<f32> = gate
-                .chunks_exact(2 * hidden)
-                .flat_map(|row| row[..hidden].to_vec())
-                .collect();
+            drop(gate);
             let out = res_skip.forward(&acts, frames, None);
             if i + 1 < self.wavenet.len() {
                 for ((hr, sr), or) in h
@@ -594,6 +610,8 @@ impl Coupling {
                 skip.iter_mut().zip(out.iter()).for_each(|(x, y)| *x += y);
             }
         }
+        drop(acts);
+        drop(h);
         let mean = self.post.forward(&skip, frames, None);
         for (row, m) in z.chunks_exact_mut(2 * half).zip(mean.chunks_exact(half)) {
             row[half..].iter_mut().zip(m).for_each(|(x, y)| *x -= y);
@@ -701,20 +719,37 @@ impl HifiGan {
         let mut frames = frames;
         for Stage { up, blocks } in &self.stages {
             let upsampled = up.forward(&x, frames, self.slope);
+            drop(x);
             frames *= up.stride;
-            let mut sum = Buf::zeroed(frames * up.outputs);
+            let mut sum: Option<Buf> = None;
             for block in blocks {
-                let mut y = Buf::scratch(upsampled.len());
-                y.copy_from_slice(&upsampled);
-                for (dilated, plain) in block {
-                    let a = dilated.forward(&y, frames, Some(self.slope));
-                    let b = plain.forward(&a, frames, Some(self.slope));
-                    y.iter_mut().zip(b.iter()).for_each(|(v, r)| *v += r);
+                let y = match block.split_first() {
+                    Some(((dilated, plain), rest)) => {
+                        let a = dilated.forward(&upsampled, frames, Some(self.slope));
+                        let mut y = plain.forward(&a, frames, Some(self.slope));
+                        drop(a);
+                        add_into(&mut y, &upsampled);
+                        for (dilated, plain) in rest {
+                            let a = dilated.forward(&y, frames, Some(self.slope));
+                            let b = plain.forward(&a, frames, Some(self.slope));
+                            drop(a);
+                            add_into(&mut y, &b);
+                        }
+                        y
+                    }
+                    None => {
+                        let mut copy = Buf::scratch(upsampled.len());
+                        copy.copy_from_slice(&upsampled);
+                        copy
+                    }
+                };
+                match &mut sum {
+                    None => sum = Some(y),
+                    Some(acc) => add_into(acc, &y),
                 }
-                sum.iter_mut().zip(y.iter()).for_each(|(s, v)| *s += v);
             }
-            let inv = 1.0 / blocks.len() as f32;
-            sum.iter_mut().for_each(|v| *v *= inv);
+            let mut sum = sum.unwrap_or_else(|| Buf::zeroed(frames * up.outputs));
+            scale_all(&mut sum, 1.0 / blocks.len() as f32);
             x = sum;
         }
         let mut wave = self.post.forward(&x, frames, Some(FINAL_SLOPE));

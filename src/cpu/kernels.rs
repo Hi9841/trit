@@ -23,14 +23,23 @@ pub enum Isa {
     Scalar,
     #[cfg(target_arch = "x86_64")]
     Avx2,
+    /// 256-bit `vpdpbusd` (VEX form, AVX-VNNI on Intel 12th+ gen / Arrow Lake).
+    #[cfg(target_arch = "x86_64")]
+    AvxVnniVex,
+    /// 256-bit `vpdpbusd` (EVEX form, AVX-512 VNNI + VL).
+    #[cfg(target_arch = "x86_64")]
+    AvxVnniEvex,
     #[cfg(target_arch = "x86_64")]
     Avx512Vnni,
     /// Armv8.0 NEON: every arm64 CPU.
     #[cfg(target_arch = "aarch64")]
     Neon,
-    /// Armv8.2 dot product (`sdot`): most phones since 2018.
+    /// Armv8.2 dot product (`sdot`): Apple M1 and most phones since 2018.
     #[cfg(target_arch = "aarch64")]
     NeonDot,
+    /// Armv8.6 int8 matrix multiply (`smmla`): Apple M2 and later, Neoverse N2/V1/V2.
+    #[cfg(target_arch = "aarch64")]
+    NeonMmla,
 }
 
 impl Isa {
@@ -40,11 +49,15 @@ impl Isa {
             #[cfg(target_arch = "x86_64")]
             Isa::Avx2 => "avx2",
             #[cfg(target_arch = "x86_64")]
+            Isa::AvxVnniVex | Isa::AvxVnniEvex => "avx-vnni",
+            #[cfg(target_arch = "x86_64")]
             Isa::Avx512Vnni => "avx512-vnni",
             #[cfg(target_arch = "aarch64")]
             Isa::Neon => "neon",
             #[cfg(target_arch = "aarch64")]
             Isa::NeonDot => "neon-dotprod",
+            #[cfg(target_arch = "aarch64")]
+            Isa::NeonMmla => "neon-i8mm",
         }
     }
 
@@ -52,15 +65,20 @@ impl Isa {
         match self {
             Isa::Scalar => 1,
             #[cfg(target_arch = "x86_64")]
-            Isa::Avx2 => 8,
+            Isa::Avx2 | Isa::AvxVnniVex | Isa::AvxVnniEvex => 8,
             #[cfg(target_arch = "x86_64")]
             Isa::Avx512Vnni => 16,
             #[cfg(target_arch = "aarch64")]
-            Isa::Neon | Isa::NeonDot => 8,
+            Isa::Neon | Isa::NeonDot | Isa::NeonMmla => 8,
         }
     }
 
-    /// The fastest path this CPU runs. `TRIT_ISA=scalar|avx2|neon` forces a slower one.
+    #[cfg(target_arch = "aarch64")]
+    fn is_mmla(self) -> bool {
+        self == Isa::NeonMmla
+    }
+
+    /// The fastest path this CPU runs. `TRIT_ISA=scalar|avx2|avxvnni|neon|dotprod` forces a slower one.
     pub fn detect() -> Self {
         super::isa::isa_choice().ternary
     }
@@ -212,11 +230,34 @@ impl Ternary {
             if scalar {
                 packed[block * k..(block + 1) * k].copy_from_slice(&codes);
             } else {
-                for k16 in 0..k / 16 {
-                    for r in 0..rows {
-                        let src = &codes[r * k + k16 * 16..][..16];
-                        let dst = ((block * (k / 16) + k16) * rows + r) * 4;
-                        packed[dst..dst + 4].copy_from_slice(&pack_span(src));
+                #[cfg(target_arch = "aarch64")]
+                let mmla = isa.is_mmla();
+                #[cfg(not(target_arch = "aarch64"))]
+                let mmla = false;
+                if mmla {
+                    // `[n / 8][k / 32][4 row-pairs][16 bytes]`: one 16-byte vector holds
+                    // 4 consecutive 2x8 `smmla` weight tiles packed 4 codes per byte.
+                    for k32 in 0..k / 32 {
+                        for rp in 0..4 {
+                            let dst = ((block * (k / 32) + k32) * 4 + rp) * 16;
+                            for rr in 0..2 {
+                                let row_codes = &codes[(rp * 2 + rr) * k + k32 * 32..][..32];
+                                for j in 0..8 {
+                                    packed[dst + rr * 8 + j] = row_codes[j]
+                                        | (row_codes[j + 8] << 2)
+                                        | (row_codes[j + 16] << 4)
+                                        | (row_codes[j + 24] << 6);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for k16 in 0..k / 16 {
+                        for r in 0..rows {
+                            let src = &codes[r * k + k16 * 16..][..16];
+                            let dst = ((block * (k / 16) + k16) * rows + r) * 4;
+                            packed[dst..dst + 4].copy_from_slice(&pack_span(src));
+                        }
                     }
                 }
             }
@@ -304,6 +345,17 @@ impl Ternary {
         if self.isa == Isa::Scalar {
             return self.codes[block * self.k + kk];
         }
+        #[cfg(target_arch = "aarch64")]
+        if self.isa.is_mmla() {
+            let k32 = kk / 32;
+            let rem = kk % 32;
+            let s = rem / 8;
+            let j = rem % 8;
+            let rp = r / 2;
+            let rr = r % 2;
+            let byte = ((block * (self.k / 32) + k32) * 4 + rp) * 16 + rr * 8 + j;
+            return (self.codes[byte] >> (s * 2)) & 3;
+        }
         let k16 = kk / 16;
         let lane = kk % 16;
         let byte = ((block * (self.k / 16) + k16) * rows + r) * 4 + lane % 4;
@@ -327,27 +379,67 @@ impl Ternary {
         let q = Quantized::new(self.isa, x, m, self.k);
         let ptr = OutPtr(out.as_mut_ptr());
         let rows = self.isa.rows();
-        let tasks = self.n / (2 * rows).max(1);
-        let tasks = if self.isa == Isa::Scalar {
-            self.n
-        } else {
-            tasks
-        };
-        team::for_each(tasks, |task| match self.isa {
-            Isa::Scalar => self.scalar_rows(&q, task, ptr),
+        let unit_work = q.m * self.k * (2 * rows);
+        match self.isa {
+            Isa::Scalar => team::for_each(self.n, |row| self.scalar_rows(&q, row, ptr)),
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: Isa::detect confirmed the CPU features.
-            Isa::Avx2 => unsafe { self.avx2_task(&q, task, ptr) },
+            Isa::Avx2 => {
+                super::int8::dispatch_2d(self.n / (2 * rows), unit_work, q.m, 4, |unit, frames| {
+                    // SAFETY: Isa::detect confirmed AVX2 + FMA; each (unit, frames) writes disjoint outputs.
+                    unsafe { self.avx2_task(&q, unit, frames, ptr) }
+                })
+            }
             #[cfg(target_arch = "x86_64")]
-            // SAFETY: Isa::detect confirmed the CPU features.
-            Isa::Avx512Vnni => unsafe { self.vnni_task(&q, task, ptr) },
+            Isa::AvxVnniVex => {
+                super::int8::dispatch_2d(self.n / (2 * rows), unit_work, q.m, 4, |unit, frames| {
+                    // SAFETY: Isa::detect confirmed AVX2 + FMA + AVX-VNNI.
+                    unsafe { self.vnni256_vex_task(&q, unit, frames, ptr) }
+                })
+            }
+            #[cfg(target_arch = "x86_64")]
+            Isa::AvxVnniEvex => {
+                super::int8::dispatch_2d(self.n / (2 * rows), unit_work, q.m, 4, |unit, frames| {
+                    // SAFETY: Isa::detect confirmed AVX-512F/BW/VL/VNNI.
+                    unsafe { self.vnni256_evex_task(&q, unit, frames, ptr) }
+                })
+            }
+            #[cfg(target_arch = "x86_64")]
+            Isa::Avx512Vnni => {
+                super::int8::dispatch_2d(self.n / (2 * rows), unit_work, q.m, 6, |unit, frames| {
+                    // SAFETY: Isa::detect confirmed AVX-512 VNNI.
+                    unsafe { self.vnni_task(&q, unit, frames, ptr) }
+                })
+            }
             #[cfg(target_arch = "aarch64")]
-            // SAFETY: NEON is part of every arm64 CPU.
-            Isa::Neon => unsafe { self.neon_task::<neon::Smull>(&q, task, ptr) },
+            Isa::Neon => {
+                super::int8::dispatch_2d(self.n / (2 * rows), unit_work, q.m, 8, |unit, frames| {
+                    // SAFETY: NEON is part of every arm64 CPU.
+                    unsafe { self.neon_task::<neon::Smull>(&q, unit, frames, ptr) }
+                })
+            }
             #[cfg(target_arch = "aarch64")]
-            // SAFETY: Isa::detect confirmed the dot product feature.
-            Isa::NeonDot => unsafe { self.sdot_task(&q, task, ptr) },
-        });
+            Isa::NeonDot => {
+                super::int8::dispatch_2d(self.n / (2 * rows), unit_work, q.m, 8, |unit, frames| {
+                    // SAFETY: Isa::detect confirmed the dot product feature.
+                    unsafe { self.sdot_task(&q, unit, frames, ptr) }
+                })
+            }
+            #[cfg(target_arch = "aarch64")]
+            Isa::NeonMmla => {
+                let paired = super::int8::paired(&q, self.k, self.k / GROUP);
+                let block_work = paired.pairs * 2 * self.k * rows;
+                super::int8::dispatch_2d(
+                    self.n / rows,
+                    block_work,
+                    paired.pairs,
+                    4,
+                    |block, pairs| {
+                        // SAFETY: Isa::detect confirmed arm64 i8mm; each (block, pairs) writes disjoint outputs.
+                        unsafe { self.mmla_task(&paired, &q, block, pairs, ptr) }
+                    },
+                );
+            }
+        }
         out
     }
 
@@ -375,13 +467,19 @@ impl Ternary {
 
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
-    unsafe fn vnni_task(&self, q: &Quantized, task: usize, out: OutPtr) {
-        let mut frame = 0;
-        while frame + 6 <= q.m {
+    unsafe fn vnni_task(
+        &self,
+        q: &Quantized,
+        task: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        let mut frame = frames.start;
+        while frame + 6 <= frames.end {
             self.vnni_tile::<6>(q, task, frame, out);
             frame += 6;
         }
-        match q.m - frame {
+        match frames.end - frame {
             1 => self.vnni_tile::<1>(q, task, frame, out),
             2 => self.vnni_tile::<2>(q, task, frame, out),
             3 => self.vnni_tile::<3>(q, task, frame, out),
@@ -392,6 +490,8 @@ impl Ternary {
     }
 
     /// 32 outputs (two 16-row blocks) by F frames.
+    /// With F = 6, `acc` (12) + `dots` (12) + `z0, z1, w0, w1, low, x` (6) = 30 <= 32 ZMMs,
+    /// keeping both accumulators and integer dots completely spill-free.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
     #[allow(clippy::needless_range_loop)]
@@ -432,8 +532,6 @@ impl Ternary {
                 let k16 = g * (GROUP / 16) + quad;
                 let z0 = _mm512_loadu_si512(c0_base.add(k16 * 64).cast());
                 let z1 = _mm512_loadu_si512(c1_base.add(k16 * 64).cast());
-                // Unpack one k4 step at a time (2 weight regs live instead of 8) so
-                // 12 acc + 12 dots + 2 packed + 2 unpacked + low + x = 30 <= 32 ZMMs.
                 // A 16-bit shift is safe: the mask keeps the low two bits of each byte.
                 for s in 0..4 {
                     let (w0, w1) = match s {
@@ -479,97 +577,353 @@ impl Ternary {
     }
 
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2,fma")]
-    unsafe fn avx2_task(&self, q: &Quantized, task: usize, out: OutPtr) {
-        for block in [2 * task, 2 * task + 1] {
-            let mut frame = 0;
-            while frame + 4 <= q.m {
-                self.avx2_tile::<4>(q, block, frame, out);
-                frame += 4;
-            }
-            match q.m - frame {
-                1 => self.avx2_tile::<1>(q, block, frame, out),
-                2 => self.avx2_tile::<2>(q, block, frame, out),
-                3 => self.avx2_tile::<3>(q, block, frame, out),
-                _ => {}
-            }
+    #[target_feature(enable = "avx2,fma,avxvnni")]
+    unsafe fn vnni256_vex_task(
+        &self,
+        q: &Quantized,
+        task: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        let mut frame = frames.start;
+        while frame + 4 <= frames.end {
+            self.vnni256_tile_vex::<4>(q, task, frame, out);
+            frame += 4;
+        }
+        match frames.end - frame {
+            1 => self.vnni256_tile_vex::<1>(q, task, frame, out),
+            2 => self.vnni256_tile_vex::<2>(q, task, frame, out),
+            3 => self.vnni256_tile_vex::<3>(q, task, frame, out),
+            _ => {}
         }
     }
 
-    /// 8 outputs by F frames.
     #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx2,fma")]
-    #[allow(clippy::needless_range_loop)]
-    unsafe fn avx2_tile<const F: usize>(
+    #[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512vl,avx512vnni")]
+    unsafe fn vnni256_evex_task(
         &self,
         q: &Quantized,
-        block: usize,
+        task: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        let mut frame = frames.start;
+        while frame + 4 <= frames.end {
+            self.vnni256_tile_evex::<4>(q, task, frame, out);
+            frame += 4;
+        }
+        match frames.end - frame {
+            1 => self.vnni256_tile_evex::<1>(q, task, frame, out),
+            2 => self.vnni256_tile_evex::<2>(q, task, frame, out),
+            3 => self.vnni256_tile_evex::<3>(q, task, frame, out),
+            _ => {}
+        }
+    }
+
+    /// 16 outputs (two 8-row blocks) by F frames using 256-bit VEX `vpdpbusd`.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma,avxvnni")]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn vnni256_tile_vex<const F: usize>(
+        &self,
+        q: &Quantized,
+        task: usize,
         frame0: usize,
         out: OutPtr,
     ) {
         use std::arch::x86_64::*;
         let (k, k4s, groups) = (self.k, self.k / 4, self.k / GROUP);
         let k16s = k4s / 4;
-        let ones = _mm256_set1_epi16(1);
+        let blocks = [2 * task, 2 * task + 1];
+        let c0_base = self.codes.as_ptr().add(blocks[0] * k16s * 32);
+        let c1_base = self.codes.as_ptr().add(blocks[1] * k16s * 32);
+        let s0_base = self.scales.as_ptr().add(blocks[0] * groups * 8);
+        let s1_base = self.scales.as_ptr().add(blocks[1] * groups * 8);
+        let x_base = q.values.as_ptr().add(frame0 * k);
+        let x_scales = q.scales.as_ptr().add(frame0 * groups);
+        let x_sums = q.sums.as_ptr().add(frame0 * groups);
         let low = _mm256_set1_epi8(3);
-        let mut acc = [_mm256_setzero_ps(); F];
+        let mut acc = [[_mm256_setzero_ps(); F]; 2];
         for g in 0..groups {
-            let mut dots = [_mm256_setzero_si256(); F];
+            let mut dots = [[_mm256_setzero_si256(); F]; 2];
+            for f in 0..F {
+                let neg_sum = _mm256_set1_epi32((*x_sums.add(f * groups + g)).wrapping_neg());
+                dots[0][f] = neg_sum;
+                dots[1][f] = neg_sum;
+            }
             for quad in 0..GROUP / 16 {
                 let k16 = g * (GROUP / 16) + quad;
-                let z =
-                    _mm256_loadu_si256(self.codes.as_ptr().add((block * k16s + k16) * 32).cast());
-                // A 16-bit shift is safe: the mask keeps the low two bits of each byte.
-                let ws = [
-                    _mm256_and_si256(z, low),
-                    _mm256_and_si256(_mm256_srli_epi16::<2>(z), low),
-                    _mm256_and_si256(_mm256_srli_epi16::<4>(z), low),
-                    _mm256_and_si256(_mm256_srli_epi16::<6>(z), low),
-                ];
-                for (s, w) in ws.iter().enumerate() {
-                    let k4 = 4 * k16 + s;
+                let z0 = _mm256_loadu_si256(c0_base.add(k16 * 32).cast());
+                let z1 = _mm256_loadu_si256(c1_base.add(k16 * 32).cast());
+                for s in 0..4 {
+                    let (w0, w1) = match s {
+                        0 => (_mm256_and_si256(z0, low), _mm256_and_si256(z1, low)),
+                        1 => (
+                            _mm256_and_si256(_mm256_srli_epi16::<2>(z0), low),
+                            _mm256_and_si256(_mm256_srli_epi16::<2>(z1), low),
+                        ),
+                        2 => (
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(z0), low),
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(z1), low),
+                        ),
+                        _ => (
+                            _mm256_and_si256(_mm256_srli_epi16::<6>(z0), low),
+                            _mm256_and_si256(_mm256_srli_epi16::<6>(z1), low),
+                        ),
+                    };
+                    let off = (4 * k16 + s) * 4;
                     for f in 0..F {
-                        let src = q.values.as_ptr().add((frame0 + f) * k + k4 * 4);
-                        let x = _mm256_set1_epi32(std::ptr::read_unaligned(src.cast::<i32>()));
-                        // Codes are at most 2 and |q| at most 127: pair sums fit in i16.
-                        let pairs = _mm256_maddubs_epi16(*w, x);
-                        dots[f] = _mm256_add_epi32(dots[f], _mm256_madd_epi16(pairs, ones));
+                        let x = _mm256_set1_epi32(std::ptr::read_unaligned(
+                            x_base.add(f * k + off).cast::<i32>(),
+                        ));
+                        dots[0][f] = _mm256_dpbusd_avx_epi32(dots[0][f], w0, x);
+                        dots[1][f] = _mm256_dpbusd_avx_epi32(dots[1][f], w1, x);
                     }
                 }
             }
-            let wscale = _mm256_loadu_ps(self.scales.as_ptr().add((block * groups + g) * 8));
+            let wscale0 = _mm256_loadu_ps(s0_base.add(g * 8));
+            let wscale1 = _mm256_loadu_ps(s1_base.add(g * 8));
             for f in 0..F {
-                let index = (frame0 + f) * groups + g;
-                let corrected = _mm256_sub_epi32(dots[f], _mm256_set1_epi32(q.sums[index]));
-                let scale = _mm256_mul_ps(wscale, _mm256_set1_ps(q.scales[index]));
-                acc[f] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(corrected), scale, acc[f]);
+                let xscale = _mm256_set1_ps(*x_scales.add(f * groups + g));
+                let scale0 = _mm256_mul_ps(wscale0, xscale);
+                let scale1 = _mm256_mul_ps(wscale1, xscale);
+                acc[0][f] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dots[0][f]), scale0, acc[0][f]);
+                acc[1][f] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dots[1][f]), scale1, acc[1][f]);
             }
         }
-        for f in 0..F {
-            _mm256_storeu_ps(out.0.add((frame0 + f) * self.n + block * 8), acc[f]);
+        for (b, block) in blocks.iter().enumerate() {
+            for f in 0..F {
+                _mm256_storeu_ps(out.0.add((frame0 + f) * self.n + block * 8), acc[b][f]);
+            }
+        }
+    }
+
+    /// 16 outputs (two 8-row blocks) by F frames using 256-bit EVEX `vpdpbusd`.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512vl,avx512vnni")]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn vnni256_tile_evex<const F: usize>(
+        &self,
+        q: &Quantized,
+        task: usize,
+        frame0: usize,
+        out: OutPtr,
+    ) {
+        use std::arch::x86_64::*;
+        let (k, k4s, groups) = (self.k, self.k / 4, self.k / GROUP);
+        let k16s = k4s / 4;
+        let blocks = [2 * task, 2 * task + 1];
+        let c0_base = self.codes.as_ptr().add(blocks[0] * k16s * 32);
+        let c1_base = self.codes.as_ptr().add(blocks[1] * k16s * 32);
+        let s0_base = self.scales.as_ptr().add(blocks[0] * groups * 8);
+        let s1_base = self.scales.as_ptr().add(blocks[1] * groups * 8);
+        let x_base = q.values.as_ptr().add(frame0 * k);
+        let x_scales = q.scales.as_ptr().add(frame0 * groups);
+        let x_sums = q.sums.as_ptr().add(frame0 * groups);
+        let low = _mm256_set1_epi8(3);
+        let mut acc = [[_mm256_setzero_ps(); F]; 2];
+        for g in 0..groups {
+            let mut dots = [[_mm256_setzero_si256(); F]; 2];
+            for f in 0..F {
+                let neg_sum = _mm256_set1_epi32((*x_sums.add(f * groups + g)).wrapping_neg());
+                dots[0][f] = neg_sum;
+                dots[1][f] = neg_sum;
+            }
+            for quad in 0..GROUP / 16 {
+                let k16 = g * (GROUP / 16) + quad;
+                let z0 = _mm256_loadu_si256(c0_base.add(k16 * 32).cast());
+                let z1 = _mm256_loadu_si256(c1_base.add(k16 * 32).cast());
+                for s in 0..4 {
+                    let (w0, w1) = match s {
+                        0 => (_mm256_and_si256(z0, low), _mm256_and_si256(z1, low)),
+                        1 => (
+                            _mm256_and_si256(_mm256_srli_epi16::<2>(z0), low),
+                            _mm256_and_si256(_mm256_srli_epi16::<2>(z1), low),
+                        ),
+                        2 => (
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(z0), low),
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(z1), low),
+                        ),
+                        _ => (
+                            _mm256_and_si256(_mm256_srli_epi16::<6>(z0), low),
+                            _mm256_and_si256(_mm256_srli_epi16::<6>(z1), low),
+                        ),
+                    };
+                    let off = (4 * k16 + s) * 4;
+                    for f in 0..F {
+                        let x = _mm256_set1_epi32(std::ptr::read_unaligned(
+                            x_base.add(f * k + off).cast::<i32>(),
+                        ));
+                        dots[0][f] = _mm256_dpbusd_epi32(dots[0][f], w0, x);
+                        dots[1][f] = _mm256_dpbusd_epi32(dots[1][f], w1, x);
+                    }
+                }
+            }
+            let wscale0 = _mm256_loadu_ps(s0_base.add(g * 8));
+            let wscale1 = _mm256_loadu_ps(s1_base.add(g * 8));
+            for f in 0..F {
+                let xscale = _mm256_set1_ps(*x_scales.add(f * groups + g));
+                let scale0 = _mm256_mul_ps(wscale0, xscale);
+                let scale1 = _mm256_mul_ps(wscale1, xscale);
+                acc[0][f] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dots[0][f]), scale0, acc[0][f]);
+                acc[1][f] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(dots[1][f]), scale1, acc[1][f]);
+            }
+        }
+        for (b, block) in blocks.iter().enumerate() {
+            for f in 0..F {
+                _mm256_storeu_ps(out.0.add((frame0 + f) * self.n + block * 8), acc[b][f]);
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn avx2_task(
+        &self,
+        q: &Quantized,
+        task: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        let mut frame = frames.start;
+        while frame + 4 <= frames.end {
+            self.avx2_tile::<4>(q, task, frame, out);
+            frame += 4;
+        }
+        match frames.end - frame {
+            1 => self.avx2_tile::<1>(q, task, frame, out),
+            2 => self.avx2_tile::<2>(q, task, frame, out),
+            3 => self.avx2_tile::<3>(q, task, frame, out),
+            _ => {}
+        }
+    }
+
+    /// 16 outputs (two 8-row blocks) by F frames.
+    /// Codes are 0..=2 and |q| <= 127, so each `vpmaddubsw` pair sum lies in
+    /// [-508, +508]. Across all 32 `k4` steps of a 128-value group, the i16
+    /// sum stays within [-16256, +16256] (never overflows i16), so we widen
+    /// to i32 with a single `vpmaddwd` once per group instead of 32 times.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn avx2_tile<const F: usize>(
+        &self,
+        q: &Quantized,
+        task: usize,
+        frame0: usize,
+        out: OutPtr,
+    ) {
+        use std::arch::x86_64::*;
+        let (k, k4s, groups) = (self.k, self.k / 4, self.k / GROUP);
+        let k16s = k4s / 4;
+        let blocks = [2 * task, 2 * task + 1];
+        let c0_base = self.codes.as_ptr().add(blocks[0] * k16s * 32);
+        let c1_base = self.codes.as_ptr().add(blocks[1] * k16s * 32);
+        let s0_base = self.scales.as_ptr().add(blocks[0] * groups * 8);
+        let s1_base = self.scales.as_ptr().add(blocks[1] * groups * 8);
+        let x_base = q.values.as_ptr().add(frame0 * k);
+        let x_scales = q.scales.as_ptr().add(frame0 * groups);
+        let x_sums = q.sums.as_ptr().add(frame0 * groups);
+        let ones = _mm256_set1_epi16(1);
+        let low = _mm256_set1_epi8(3);
+        let mut acc = [[_mm256_setzero_ps(); F]; 2];
+        for g in 0..groups {
+            let mut dots16 = [[_mm256_setzero_si256(); F]; 2];
+            for quad in 0..GROUP / 16 {
+                let k16 = g * (GROUP / 16) + quad;
+                let z0 = _mm256_loadu_si256(c0_base.add(k16 * 32).cast());
+                let z1 = _mm256_loadu_si256(c1_base.add(k16 * 32).cast());
+                // A 16-bit shift is safe: the mask keeps the low two bits of each byte.
+                for s in 0..4 {
+                    let (w0, w1) = match s {
+                        0 => (_mm256_and_si256(z0, low), _mm256_and_si256(z1, low)),
+                        1 => (
+                            _mm256_and_si256(_mm256_srli_epi16::<2>(z0), low),
+                            _mm256_and_si256(_mm256_srli_epi16::<2>(z1), low),
+                        ),
+                        2 => (
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(z0), low),
+                            _mm256_and_si256(_mm256_srli_epi16::<4>(z1), low),
+                        ),
+                        _ => (
+                            _mm256_and_si256(_mm256_srli_epi16::<6>(z0), low),
+                            _mm256_and_si256(_mm256_srli_epi16::<6>(z1), low),
+                        ),
+                    };
+                    let off = (4 * k16 + s) * 4;
+                    for f in 0..F {
+                        let x = _mm256_set1_epi32(std::ptr::read_unaligned(
+                            x_base.add(f * k + off).cast::<i32>(),
+                        ));
+                        dots16[0][f] = _mm256_add_epi16(dots16[0][f], _mm256_maddubs_epi16(w0, x));
+                        dots16[1][f] = _mm256_add_epi16(dots16[1][f], _mm256_maddubs_epi16(w1, x));
+                    }
+                }
+            }
+            let wscale0 = _mm256_loadu_ps(s0_base.add(g * 8));
+            let wscale1 = _mm256_loadu_ps(s1_base.add(g * 8));
+            for f in 0..F {
+                let sum = _mm256_set1_epi32(*x_sums.add(f * groups + g));
+                let xscale = _mm256_set1_ps(*x_scales.add(f * groups + g));
+                let d0 = _mm256_sub_epi32(_mm256_madd_epi16(dots16[0][f], ones), sum);
+                let d1 = _mm256_sub_epi32(_mm256_madd_epi16(dots16[1][f], ones), sum);
+                acc[0][f] = _mm256_fmadd_ps(
+                    _mm256_cvtepi32_ps(d0),
+                    _mm256_mul_ps(wscale0, xscale),
+                    acc[0][f],
+                );
+                acc[1][f] = _mm256_fmadd_ps(
+                    _mm256_cvtepi32_ps(d1),
+                    _mm256_mul_ps(wscale1, xscale),
+                    acc[1][f],
+                );
+            }
+        }
+        for (b, block) in blocks.iter().enumerate() {
+            for f in 0..F {
+                _mm256_storeu_ps(out.0.add((frame0 + f) * self.n + block * 8), acc[b][f]);
+            }
         }
     }
 
     #[cfg(target_arch = "aarch64")]
     #[target_feature(enable = "dotprod")]
-    unsafe fn sdot_task(&self, q: &Quantized, task: usize, out: OutPtr) {
-        self.neon_task::<neon::Sdot>(q, task, out);
+    unsafe fn sdot_task(
+        &self,
+        q: &Quantized,
+        task: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        self.neon_task::<neon::Sdot>(q, task, frames, out);
     }
 
-    /// Two 8-row blocks, 4 frames at a time, as on AVX2.
+    /// Two 8-row blocks, 8 frames at a time (`acc` sits in L1 stack across
+    /// 128-K groups so 16 `dots` + 8 `x` + `z` + `w` + `low` = 27 <= 32 NEON
+    /// registers, halving weight loads and 2-bit unpacks vs 4 frames).
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
-    unsafe fn neon_task<D: neon::Dot>(&self, q: &Quantized, task: usize, out: OutPtr) {
+    unsafe fn neon_task<D: neon::Dot>(
+        &self,
+        q: &Quantized,
+        task: usize,
+        frames: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
         for block in [2 * task, 2 * task + 1] {
-            let mut frame = 0;
-            while frame + 4 <= q.m {
-                self.neon_tile::<4, D>(q, block, frame, out);
-                frame += 4;
+            let mut frame = frames.start;
+            while frame + 8 <= frames.end {
+                self.neon_tile::<8, D>(q, block, frame, out);
+                frame += 8;
             }
-            match q.m - frame {
+            match frames.end - frame {
                 1 => self.neon_tile::<1, D>(q, block, frame, out),
                 2 => self.neon_tile::<2, D>(q, block, frame, out),
                 3 => self.neon_tile::<3, D>(q, block, frame, out),
+                4 => self.neon_tile::<4, D>(q, block, frame, out),
+                5 => self.neon_tile::<5, D>(q, block, frame, out),
+                6 => self.neon_tile::<6, D>(q, block, frame, out),
+                7 => self.neon_tile::<7, D>(q, block, frame, out),
                 _ => {}
             }
         }
@@ -593,6 +947,11 @@ impl Ternary {
         let mut acc = [[vdupq_n_f32(0.0); 2]; F];
         for g in 0..groups {
             let mut dots = [[vdupq_n_s32(0); 2]; F];
+            for f in 0..F {
+                let neg_sum = vdupq_n_s32(q.sums[(frame0 + f) * groups + g].wrapping_neg());
+                dots[f][0] = neg_sum;
+                dots[f][1] = neg_sum;
+            }
             for quad in 0..GROUP / 16 {
                 let k16 = g * (GROUP / 16) + quad;
                 let mut x = [vdupq_n_s8(0); F];
@@ -602,31 +961,31 @@ impl Ternary {
                 let codes = self.codes.as_ptr().add((block * k16s + k16) * 32);
                 for half in 0..2 {
                     let z = vld1q_u8(codes.add(half * 16));
-                    let w = [
-                        vreinterpretq_s8_u8(vandq_u8(z, low)),
-                        vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<2>(z), low)),
-                        vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<4>(z), low)),
-                        vreinterpretq_s8_u8(vshrq_n_u8::<6>(z)),
-                    ];
+                    let w0 = vreinterpretq_s8_u8(vandq_u8(z, low));
                     for f in 0..F {
-                        let mut d = dots[f][half];
-                        d = D::dot::<0>(d, w[0], x[f]);
-                        d = D::dot::<1>(d, w[1], x[f]);
-                        d = D::dot::<2>(d, w[2], x[f]);
-                        d = D::dot::<3>(d, w[3], x[f]);
-                        dots[f][half] = d;
+                        dots[f][half] = D::dot::<0>(dots[f][half], w0, x[f]);
+                    }
+                    let w1 = vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<2>(z), low));
+                    for f in 0..F {
+                        dots[f][half] = D::dot::<1>(dots[f][half], w1, x[f]);
+                    }
+                    let w2 = vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<4>(z), low));
+                    for f in 0..F {
+                        dots[f][half] = D::dot::<2>(dots[f][half], w2, x[f]);
+                    }
+                    let w3 = vreinterpretq_s8_u8(vshrq_n_u8::<6>(z));
+                    for f in 0..F {
+                        dots[f][half] = D::dot::<3>(dots[f][half], w3, x[f]);
                     }
                 }
             }
             let scales = self.scales.as_ptr().add((block * groups + g) * 8);
             let wscale = [vld1q_f32(scales), vld1q_f32(scales.add(4))];
             for f in 0..F {
-                let index = (frame0 + f) * groups + g;
-                let sum = vdupq_n_s32(q.sums[index]);
+                let xscale = q.scales[(frame0 + f) * groups + g];
                 for half in 0..2 {
-                    let corrected = vcvtq_f32_s32(vsubq_s32(dots[f][half], sum));
-                    let scale = vmulq_n_f32(wscale[half], q.scales[index]);
-                    acc[f][half] = vfmaq_f32(acc[f][half], corrected, scale);
+                    let scale = vmulq_n_f32(wscale[half], xscale);
+                    acc[f][half] = vfmaq_f32(acc[f][half], vcvtq_f32_s32(dots[f][half]), scale);
                 }
             }
         }
@@ -634,6 +993,143 @@ impl Ternary {
             let dst = out.0.add((frame0 + f) * self.n + block * 8);
             vst1q_f32(dst, acc[f][0]);
             vst1q_f32(dst.add(4), acc[f][1]);
+        }
+    }
+
+    /// Armv8.6 `smmla` ternary kernel (Apple M2 and later, Neoverse N2/V1/V2):
+    /// one 8-output block over `pairs`, up to 4 frame pairs (8 frames) per tile.
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "i8mm")]
+    unsafe fn mmla_task(
+        &self,
+        x: &super::int8::Paired,
+        q: &Quantized,
+        block: usize,
+        pairs: std::ops::Range<usize>,
+        out: OutPtr,
+    ) {
+        let mut pair = pairs.start;
+        while pair + 4 <= pairs.end {
+            self.mmla_tile::<4>(x, q, block, pair, out);
+            pair += 4;
+        }
+        match pairs.end - pair {
+            1 => self.mmla_tile::<1>(x, q, block, pair, out),
+            2 => self.mmla_tile::<2>(x, q, block, pair, out),
+            3 => self.mmla_tile::<3>(x, q, block, pair, out),
+            _ => {}
+        }
+    }
+
+    /// 8 outputs (four row pairs) by `P` frame pairs (`2 * P` frames).
+    /// Each packed 16-byte vector holds four 2x8 ternary weight tiles (`0..=2`),
+    /// decoded directly into `int8x16_t` for `smmla` (32 MACs/instruction, twice
+    /// the throughput of `sdot`).
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn mmla_tile<const P: usize>(
+        &self,
+        x: &super::int8::Paired,
+        q: &Quantized,
+        block: usize,
+        pair0: usize,
+        out: OutPtr,
+    ) {
+        use std::arch::aarch64::*;
+        let (k, k32s, groups) = (self.k, self.k / 32, self.k / GROUP);
+        let codes = x.values.as_ptr().add(pair0 * 2 * k);
+        let weights = self.codes.as_ptr().add(block * k32s * 64);
+        let low = vdupq_n_u8(3);
+        let mut acc = [[vdupq_n_f32(0.0); 4]; P];
+        for g in 0..groups {
+            let mut dots = [[vdupq_n_s32(0); 4]; P];
+            for p in 0..P {
+                let f0 = 2 * (pair0 + p);
+                let f1 = f0 + 1;
+                let s0 = q.sums[f0 * groups + g].wrapping_neg();
+                let s1 = if f1 < q.m {
+                    q.sums[f1 * groups + g].wrapping_neg()
+                } else {
+                    0
+                };
+                let neg_sums = vcombine_s32(vdup_n_s32(s0), vdup_n_s32(s1));
+                for r in 0..4 {
+                    dots[p][r] = neg_sums;
+                }
+            }
+            for span in 0..GROUP / 32 {
+                let k32 = g * (GROUP / 32) + span;
+                let wp = weights.add(k32 * 64);
+                let z = [
+                    vld1q_u8(wp),
+                    vld1q_u8(wp.add(16)),
+                    vld1q_u8(wp.add(32)),
+                    vld1q_u8(wp.add(48)),
+                ];
+                for s in 0..4 {
+                    let w = match s {
+                        0 => [
+                            vreinterpretq_s8_u8(vandq_u8(z[0], low)),
+                            vreinterpretq_s8_u8(vandq_u8(z[1], low)),
+                            vreinterpretq_s8_u8(vandq_u8(z[2], low)),
+                            vreinterpretq_s8_u8(vandq_u8(z[3], low)),
+                        ],
+                        1 => [
+                            vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<2>(z[0]), low)),
+                            vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<2>(z[1]), low)),
+                            vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<2>(z[2]), low)),
+                            vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<2>(z[3]), low)),
+                        ],
+                        2 => [
+                            vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<4>(z[0]), low)),
+                            vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<4>(z[1]), low)),
+                            vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<4>(z[2]), low)),
+                            vreinterpretq_s8_u8(vandq_u8(vshrq_n_u8::<4>(z[3]), low)),
+                        ],
+                        _ => [
+                            vreinterpretq_s8_u8(vshrq_n_u8::<6>(z[0])),
+                            vreinterpretq_s8_u8(vshrq_n_u8::<6>(z[1])),
+                            vreinterpretq_s8_u8(vshrq_n_u8::<6>(z[2])),
+                            vreinterpretq_s8_u8(vshrq_n_u8::<6>(z[3])),
+                        ],
+                    };
+                    let x_off = (k32 * 4 + s) * 16;
+                    for p in 0..P {
+                        let pair = vld1q_s8(codes.add(p * 2 * k + x_off));
+                        for r in 0..4 {
+                            dots[p][r] = super::int8::smmla(dots[p][r], pair, w[r]);
+                        }
+                    }
+                }
+            }
+            let scales = self.scales.as_ptr().add((block * groups + g) * 8);
+            let mut xs = [vdupq_n_f32(0.0); P];
+            for p in 0..P {
+                xs[p] = vld1q_f32(x.scales.as_ptr().add(((pair0 + p) * groups + g) * 4));
+            }
+            for r in 0..4 {
+                let ws = vreinterpretq_f32_u64(vdupq_n_u64(std::ptr::read_unaligned(
+                    scales.add(2 * r).cast::<u64>(),
+                )));
+                for p in 0..P {
+                    let scale = vmulq_f32(ws, xs[p]);
+                    acc[p][r] = vfmaq_f32(acc[p][r], vcvtq_f32_s32(dots[p][r]), scale);
+                }
+            }
+        }
+        for p in 0..P {
+            let first = 2 * (pair0 + p);
+            for r in 0..4 {
+                let column = block * 8 + 2 * r;
+                vst1_f32(out.0.add(first * self.n + column), vget_low_f32(acc[p][r]));
+                if first + 1 < q.m {
+                    vst1_f32(
+                        out.0.add((first + 1) * self.n + column),
+                        vget_high_f32(acc[p][r]),
+                    );
+                }
+            }
         }
     }
 }
@@ -743,15 +1239,29 @@ impl Quantized {
         if sums.len() < m * groups {
             sums.resize(m * groups, 0);
         }
-        #[cfg(target_arch = "x86_64")]
-        let f16c = half_scales && super::fgemm::level() != super::fgemm::Level::Scalar;
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        let hw_f16 = half_scales && super::fgemm::level() != super::fgemm::Level::Scalar;
         let (all_values, all_scales, all_sums) = (
             team::SendPtr::new(&mut values),
             team::SendPtr::new(&mut scales),
             team::SendPtr::new(&mut sums),
         );
-        team::for_each(m.div_ceil(QUANTIZE_ROWS), |block| {
-            for row in block * QUANTIZE_ROWS..((block + 1) * QUANTIZE_ROWS).min(m) {
+        let threads = team::threads().max(1);
+        let work = m.saturating_mul(k);
+        let tasks = if threads <= 1 || work <= 32_768 {
+            1
+        } else {
+            let target = if team::is_heterogeneous() {
+                4 * threads
+            } else {
+                threads
+            };
+            target.min(m).min((work / 8_192).max(1))
+        };
+        team::for_each(tasks, |task| {
+            let start = task * m / tasks;
+            let end = (task + 1) * m / tasks;
+            for row in start..end {
                 // SAFETY: each row belongs to one task; the buffers outlive the step.
                 let (values, scales, sums) = unsafe {
                     (
@@ -771,25 +1281,32 @@ impl Quantized {
                         },
                         #[cfg(target_arch = "x86_64")]
                         // SAFETY: Isa::detect confirmed the CPU features.
-                        Isa::Avx2 => unsafe {
+                        Isa::Avx2 | Isa::AvxVnniVex | Isa::AvxVnniEvex => unsafe {
                             quantize_avx2(&src[span.clone()], &mut values[span])
                         },
                         #[cfg(target_arch = "aarch64")]
                         // SAFETY: NEON is part of every arm64 CPU.
-                        Isa::Neon | Isa::NeonDot => unsafe {
+                        Isa::Neon | Isa::NeonDot | Isa::NeonMmla => unsafe {
                             quantize_neon(&src[span.clone()], &mut values[span])
                         },
                         Isa::Scalar => quantize_scalar(&src[span.clone()], &mut values[span]),
                     };
                     scales[g] = if half_scales {
                         #[cfg(target_arch = "x86_64")]
-                        if f16c {
+                        if hw_f16 {
                             // SAFETY: `fgemm::level() != Scalar` implies F16C.
                             unsafe { round_f16_f16c(scale) }
                         } else {
                             super::tensors::f16_to_f32(super::tensors::f32_to_f16(scale))
                         }
-                        #[cfg(not(target_arch = "x86_64"))]
+                        #[cfg(target_arch = "aarch64")]
+                        if hw_f16 {
+                            // SAFETY: scalar `fcvt h, s` / `fcvt s, h` are part of base arm64.
+                            unsafe { round_f16_neon(scale) }
+                        } else {
+                            super::tensors::f16_to_f32(super::tensors::f32_to_f16(scale))
+                        }
+                        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
                         super::tensors::f16_to_f32(super::tensors::f32_to_f16(scale))
                     } else {
                         scale
@@ -806,9 +1323,6 @@ impl Quantized {
         }
     }
 }
-
-/// Rows per quantization task: a short take still splits, a row is never shared.
-const QUANTIZE_ROWS: usize = 8;
 
 /// The values, scales, and sums of the last `Quantized` of this thread.
 type Reused = (Vec<i8>, Vec<f32>, Vec<i32>);
@@ -857,6 +1371,21 @@ unsafe fn round_f16_f16c(value: f32) -> f32 {
     _mm_cvtss_f32(_mm_cvtph_ps(half))
 }
 
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn round_f16_neon(value: f32) -> f32 {
+    let out: f32;
+    std::arch::asm!(
+        "fcvt {h:h}, {v:s}",
+        "fcvt {out:s}, {h:h}",
+        v = in(vreg) value,
+        h = out(vreg) _,
+        out = lateout(vreg) out,
+        options(pure, nomem, nostack, preserves_flags),
+    );
+    out
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
@@ -875,6 +1404,48 @@ unsafe fn quantize_avx512(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
             let clamped = _mm512_min_ps(_mm512_max_ps(v, f_low), f_high);
             _mm512_maskz_cvtps_epi32(ord, clamped)
         }};
+    }
+    if src.len() == 128 {
+        // Standard 128-value group: hold all 8 vectors in ZMM registers so pass 2 never reloads.
+        let x0 = _mm512_loadu_ps(p);
+        let x1 = _mm512_loadu_ps(p.add(16));
+        let x2 = _mm512_loadu_ps(p.add(32));
+        let x3 = _mm512_loadu_ps(p.add(48));
+        let x4 = _mm512_loadu_ps(p.add(64));
+        let x5 = _mm512_loadu_ps(p.add(80));
+        let x6 = _mm512_loadu_ps(p.add(96));
+        let x7 = _mm512_loadu_ps(p.add(112));
+        let zero = _mm512_setzero_ps();
+        let m0 = _mm512_max_ps(_mm512_abs_ps(x0), zero);
+        let m1 = _mm512_max_ps(_mm512_abs_ps(x1), zero);
+        let m2 = _mm512_max_ps(_mm512_abs_ps(x2), zero);
+        let m3 = _mm512_max_ps(_mm512_abs_ps(x3), zero);
+        let m0 = _mm512_max_ps(_mm512_abs_ps(x4), m0);
+        let m1 = _mm512_max_ps(_mm512_abs_ps(x5), m1);
+        let m2 = _mm512_max_ps(_mm512_abs_ps(x6), m2);
+        let m3 = _mm512_max_ps(_mm512_abs_ps(x7), m3);
+        let vmax = _mm512_max_ps(_mm512_max_ps(m0, m1), _mm512_max_ps(m2, m3));
+        let scale = group_scale(_mm512_reduce_max_ps(vmax));
+        let inv = _mm512_set1_ps(1.0 / scale);
+        let q0 = quant16!(x0, inv);
+        let q1 = quant16!(x1, inv);
+        let q2 = quant16!(x2, inv);
+        let q3 = quant16!(x3, inv);
+        let q4 = quant16!(x4, inv);
+        let q5 = quant16!(x5, inv);
+        let q6 = quant16!(x6, inv);
+        let q7 = quant16!(x7, inv);
+        _mm_storeu_si128(d.cast(), _mm512_cvtepi32_epi8(q0));
+        _mm_storeu_si128(d.add(16).cast(), _mm512_cvtepi32_epi8(q1));
+        _mm_storeu_si128(d.add(32).cast(), _mm512_cvtepi32_epi8(q2));
+        _mm_storeu_si128(d.add(48).cast(), _mm512_cvtepi32_epi8(q3));
+        _mm_storeu_si128(d.add(64).cast(), _mm512_cvtepi32_epi8(q4));
+        _mm_storeu_si128(d.add(80).cast(), _mm512_cvtepi32_epi8(q5));
+        _mm_storeu_si128(d.add(96).cast(), _mm512_cvtepi32_epi8(q6));
+        _mm_storeu_si128(d.add(112).cast(), _mm512_cvtepi32_epi8(q7));
+        let s0 = _mm512_add_epi32(_mm512_add_epi32(q0, q1), _mm512_add_epi32(q2, q3));
+        let s1 = _mm512_add_epi32(_mm512_add_epi32(q4, q5), _mm512_add_epi32(q6, q7));
+        return (scale, _mm512_reduce_add_epi32(_mm512_add_epi32(s0, s1)));
     }
     if src.len() == 32 {
         // ggml Q8_0 block: keep both 16-lane vectors in registers so pass 2 never reloads.
@@ -933,13 +1504,26 @@ unsafe fn quantize_avx2(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     assert!(src.len() == dst.len() && src.len().is_multiple_of(32));
     let p = src.as_ptr();
     let sign = _mm256_set1_ps(-0.0);
-    let mut vmax = _mm256_setzero_ps();
-    for i in 0..src.len() / 8 {
-        vmax = _mm256_max_ps(_mm256_andnot_ps(sign, _mm256_loadu_ps(p.add(i * 8))), vmax);
+    let mut vmax0 = _mm256_setzero_ps();
+    let mut vmax1 = _mm256_setzero_ps();
+    for i in 0..src.len() / 16 {
+        vmax0 = _mm256_max_ps(
+            _mm256_andnot_ps(sign, _mm256_loadu_ps(p.add(i * 16))),
+            vmax0,
+        );
+        vmax1 = _mm256_max_ps(
+            _mm256_andnot_ps(sign, _mm256_loadu_ps(p.add(i * 16 + 8))),
+            vmax1,
+        );
     }
-    let mut lanes = [0.0f32; 8];
-    _mm256_storeu_ps(lanes.as_mut_ptr(), vmax);
-    let scale = group_scale(lanes.iter().fold(0.0f32, |m, v| m.max(*v)));
+    let vmax = _mm256_max_ps(vmax0, vmax1);
+    let m4 = _mm_max_ps(
+        _mm256_extractf128_ps::<1>(vmax),
+        _mm256_castps256_ps128(vmax),
+    );
+    let m2 = _mm_max_ps(_mm_movehl_ps(m4, m4), m4);
+    let m1 = _mm_max_ss(_mm_shuffle_ps::<1>(m2, m2), m2);
+    let scale = group_scale(_mm_cvtss_f32(m1));
     let inv = _mm256_set1_ps(1.0 / scale);
     let f_high = _mm256_set1_ps(127.0);
     let f_low = _mm256_set1_ps(-127.0);
@@ -963,9 +1547,13 @@ unsafe fn quantize_avx2(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
             _mm256_permutevar8x32_epi32(words, order),
         );
     }
-    let mut sums = [0i32; 8];
-    _mm256_storeu_si256(sums.as_mut_ptr().cast(), vsum);
-    (scale, sums.iter().sum())
+    let s128 = _mm_add_epi32(
+        _mm256_castsi256_si128(vsum),
+        _mm256_extracti128_si256::<1>(vsum),
+    );
+    let s64 = _mm_add_epi32(s128, _mm_srli_si128::<8>(s128));
+    let s32 = _mm_add_epi32(s64, _mm_srli_si128::<4>(s64));
+    (scale, _mm_cvtsi128_si32(s32))
 }
 
 /// As `quantize_scalar` (a multiple of 32 values: 128 for ternary and int8
@@ -975,23 +1563,37 @@ unsafe fn quantize_neon(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
     use std::arch::aarch64::*;
     assert!(src.len() == dst.len() && src.len().is_multiple_of(32));
     let p = src.as_ptr();
-    let mut vmax = vdupq_n_f32(0.0);
-    for i in 0..src.len() / 4 {
-        let abs = vabsq_f32(vld1q_f32(p.add(i * 4)));
-        // `abs > vmax` is false for both qNaN and sNaN (`vmaxnm` propagates sNaN).
-        vmax = vbslq_f32(vcgtq_f32(abs, vmax), abs, vmax);
+    let mut vmax0 = vdupq_n_f32(0.0);
+    let mut vmax1 = vdupq_n_f32(0.0);
+    let mut vmax2 = vdupq_n_f32(0.0);
+    let mut vmax3 = vdupq_n_f32(0.0);
+    for i in 0..src.len() / 16 {
+        let a0 = vabsq_f32(vld1q_f32(p.add(i * 16)));
+        let a1 = vabsq_f32(vld1q_f32(p.add(i * 16 + 4)));
+        let a2 = vabsq_f32(vld1q_f32(p.add(i * 16 + 8)));
+        let a3 = vabsq_f32(vld1q_f32(p.add(i * 16 + 12)));
+        // `a > vmax` is false for both qNaN and sNaN (`vmaxnm` propagates sNaN).
+        vmax0 = vbslq_f32(vcgtq_f32(a0, vmax0), a0, vmax0);
+        vmax1 = vbslq_f32(vcgtq_f32(a1, vmax1), a1, vmax1);
+        vmax2 = vbslq_f32(vcgtq_f32(a2, vmax2), a2, vmax2);
+        vmax3 = vbslq_f32(vcgtq_f32(a3, vmax3), a3, vmax3);
     }
+    let vmax01 = vbslq_f32(vcgtq_f32(vmax0, vmax1), vmax0, vmax1);
+    let vmax23 = vbslq_f32(vcgtq_f32(vmax2, vmax3), vmax2, vmax3);
+    let vmax = vbslq_f32(vcgtq_f32(vmax01, vmax23), vmax01, vmax23);
     let scale = group_scale(vmaxvq_f32(vmax));
     let inv = vdupq_n_f32(1.0 / scale);
     let (limit, low) = (vdupq_n_s32(127), vdupq_n_s32(-127));
-    let mut vsum = vdupq_n_s32(0);
+    let mut vsum0 = vdupq_n_s32(0);
+    let mut vsum1 = vdupq_n_s32(0);
     for i in 0..src.len() / 16 {
         let mut q = [vdupq_n_s32(0); 4];
         for (j, lane) in q.iter_mut().enumerate() {
             let v = vmulq_f32(vld1q_f32(p.add(i * 16 + j * 4)), inv);
             *lane = vmaxq_s32(vminq_s32(vcvtnq_s32_f32(v), limit), low);
-            vsum = vaddq_s32(vsum, *lane);
         }
+        vsum0 = vaddq_s32(vsum0, vaddq_s32(q[0], q[1]));
+        vsum1 = vaddq_s32(vsum1, vaddq_s32(q[2], q[3]));
         let first = vcombine_s16(vmovn_s32(q[0]), vmovn_s32(q[1]));
         let second = vcombine_s16(vmovn_s32(q[2]), vmovn_s32(q[3]));
         vst1q_s8(
@@ -999,7 +1601,7 @@ unsafe fn quantize_neon(src: &[f32], dst: &mut [i8]) -> (f32, i32) {
             vcombine_s8(vmovn_s16(first), vmovn_s16(second)),
         );
     }
-    (scale, vaddvq_s32(vsum))
+    (scale, vaddvq_s32(vaddq_s32(vsum0, vsum1)))
 }
 
 #[derive(Clone, Copy)]
@@ -1008,3 +1610,148 @@ struct OutPtr(*mut f32);
 unsafe impl Send for OutPtr {}
 // SAFETY: as for `Send`: tasks write disjoint output elements.
 unsafe impl Sync for OutPtr {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lcg(state: &mut u64) -> f32 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let bits = ((*state >> 40) as u32) as f32 / ((1u32 << 24) as f32);
+        bits * 2.0 - 1.0
+    }
+
+    #[test]
+    fn quantized_matches_scalar_and_clamps_special_floats() {
+        let mut seed = 0x51a7_0001_beef_c0deu64;
+        let isa = Isa::detect();
+        let k = 256;
+        let m = 6;
+        let mut x = vec![0.0f32; m * k];
+        // Row 0: normal finite range.
+        for v in &mut x[..k] {
+            *v = lcg(&mut seed) * 5.0;
+        }
+        // Row 1: zeros and -0.0.
+        for (i, v) in x[k..2 * k].iter_mut().enumerate() {
+            *v = if i % 2 == 0 { 0.0 } else { -0.0 };
+        }
+        // Row 2: NaNs interspersed with finite values.
+        for (i, v) in x[2 * k..3 * k].iter_mut().enumerate() {
+            *v = if i % 11 == 0 {
+                f32::NAN
+            } else {
+                lcg(&mut seed) * 3.0
+            };
+        }
+        // Row 3: +Inf and -Inf mixed with finite values.
+        for (i, v) in x[3 * k..4 * k].iter_mut().enumerate() {
+            *v = match i % 17 {
+                0 => f32::INFINITY,
+                1 => f32::NEG_INFINITY,
+                _ => lcg(&mut seed),
+            };
+        }
+        // Row 4: subnormals and zeros.
+        for (i, v) in x[4 * k..5 * k].iter_mut().enumerate() {
+            *v = match i % 3 {
+                0 => 1e-40,
+                1 => -1e-40,
+                _ => 0.0,
+            };
+        }
+        // Row 5: huge finite values near f32::MAX.
+        for (i, v) in x[5 * k..6 * k].iter_mut().enumerate() {
+            *v = if i % 2 == 0 { 1e38 } else { -1e38 };
+        }
+
+        for group in [32usize, 128] {
+            let groups = k / group;
+            for half_scales in [false, true] {
+                let got = Quantized::grouped(isa, &x, m, k, group, half_scales);
+                let want = Quantized::grouped(Isa::Scalar, &x, m, k, group, half_scales);
+                assert_eq!(got.m, m);
+                assert_eq!(
+                    &got.values[..m * k],
+                    &want.values[..m * k],
+                    "values mismatch group={group} half={half_scales}"
+                );
+                assert_eq!(
+                    &got.sums[..m * groups],
+                    &want.sums[..m * groups],
+                    "sums mismatch group={group} half={half_scales}"
+                );
+                for (i, (&gs, &ws)) in got.scales[..m * groups]
+                    .iter()
+                    .zip(&want.scales[..m * groups])
+                    .enumerate()
+                {
+                    assert_eq!(
+                        gs.to_bits(),
+                        ws.to_bits(),
+                        "scale mismatch at {i} group={group} half={half_scales}: got={gs} want={ws}"
+                    );
+                }
+                for row in 0..m {
+                    for g in 0..groups {
+                        let span = &got.values[row * k + g * group..][..group];
+                        for &c in span {
+                            assert!(
+                                (-127..=127).contains(&c),
+                                "code {c} out of [-127, 127] at row={row} g={g}"
+                            );
+                        }
+                        let sum: i32 = span.iter().map(|&c| i32::from(c)).sum();
+                        assert_eq!(got.sums[row * groups + g], sum);
+                    }
+                }
+                // NaN lanes in row 2 must quantize to 0.
+                for i in (0..k).step_by(11) {
+                    assert_eq!(got.values[2 * k + i], 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ternary_forward_matches_scalar() {
+        let mut seed = 0xabcd_ef01_2345_6789u64;
+        let isa = Isa::detect();
+        for (n, k) in [(32usize, 128usize), (64, 256), (64, 1024), (64, 4096)] {
+            let groups = k / GROUP;
+            let codes: Vec<u8> = (0..n * k)
+                .map(|_| ((lcg(&mut seed) + 1.0) * 1.5).clamp(0.0, 2.0) as u8)
+                .collect();
+            let scales: Vec<f32> = (0..n * groups)
+                .map(|_| lcg(&mut seed).abs() + 0.05)
+                .collect();
+            let simd = Ternary::from_rows(isa, &scales, n, k, |r, dst| {
+                dst.copy_from_slice(&codes[r * k..(r + 1) * k]);
+            });
+            let scalar = Ternary::from_rows(Isa::Scalar, &scales, n, k, |r, dst| {
+                dst.copy_from_slice(&codes[r * k..(r + 1) * k]);
+            });
+            let ms: &[usize] = if k >= 2048 {
+                &[1, 6, 7, 49]
+            } else {
+                &[1, 2, 3, 4, 5, 6, 7, 13]
+            };
+            let tol = (k as f32).sqrt() * 2e-4 + 1e-3;
+            for &m in ms {
+                let x: Vec<f32> = (0..m * k).map(|_| lcg(&mut seed) * 2.0).collect();
+                let got = simd.forward(&x, m);
+                let want = scalar.forward(&x, m);
+                assert_eq!(got.len(), want.len());
+                for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+                    let diff = (g - w).abs();
+                    assert!(
+                        diff <= tol,
+                        "ternary n={n} k={k} m={m} at {i}: got={g} want={w} diff={diff}"
+                    );
+                }
+            }
+        }
+    }
+}

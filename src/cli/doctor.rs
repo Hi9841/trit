@@ -137,11 +137,14 @@ fn doctor(_: &Parsed) -> Outcome {
     if let Some(problem) = trit::isa_problem() {
         problems.push(problem);
     }
-    if trit::cpu_path() == "scalar" {
-        problems.push(
-            "This CPU has no AVX2; Trit runs on the slow scalar path (expect about 10x slower)"
-                .into(),
-        );
+    if trit::cpu_path().contains("float scalar") {
+        #[cfg(target_arch = "x86_64")]
+        let message =
+            "This CPU is running on the slow scalar path (no AVX2 or forced via TRIT_ISA=scalar; expect about 10x slower)";
+        #[cfg(not(target_arch = "x86_64"))]
+        let message =
+            "Trit is running on the slow scalar path (check TRIT_ISA; expect about 10x slower)";
+        problems.push(message.into());
     }
     if problems.is_empty() {
         println!("problems: 0, ready");

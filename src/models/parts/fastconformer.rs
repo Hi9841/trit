@@ -13,7 +13,10 @@ use crate::cpu::kernels::Ternary;
 use crate::cpu::store::Store;
 use crate::cpu::team;
 use crate::cpu::tensors::Tensors;
-use crate::layers::{conv_columns, folded_batch_norm, relu, scale_all, softmax_rows, Norm, Rotary};
+use crate::layers::{
+    balanced_chunk, balanced_rows, conv_columns, folded_batch_norm, relu, scale_all, softmax_rows,
+    Norm, Rotary,
+};
 use crate::Cancel;
 use parking_lot::{Mutex, RwLock};
 use std::sync::{Arc, Weak};
@@ -25,9 +28,9 @@ thread_local! {
     static SCRATCH: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Queries per attention task: a short take still makes several tasks per
-/// head, and a block reads t+31 positions instead of 2t-1 per query.
-const ATTENTION_ROWS: usize = 32;
+/// Queries per attention task: aligns cleanly with AVX-512 6-row tiles (4x6 = 24),
+/// trims the relative-position band to `t + 23`, and keeps task scratch L2-resident.
+const ATTENTION_ROWS: usize = 24;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -801,9 +804,10 @@ impl Subsampling {
                 );
                 self.pw2.forward_relu_into(dw2_row, w3, pw2_row);
                 let dst = &mut out_rows[local_h3 * ch * w3..][..ch * w3];
-                for w in 0..w3 {
-                    for c in 0..ch {
-                        dst[c * w3 + w] = pw2_row[w * ch + c];
+                for c in 0..ch {
+                    let out_c = &mut dst[c * w3..(c + 1) * w3];
+                    for (w, slot) in out_c.iter_mut().enumerate() {
+                        *slot = pw2_row[w * ch + c];
                     }
                 }
             }
@@ -1142,7 +1146,8 @@ impl Block {
 
     fn feed_forward((up, down): &(Linear, Linear), x: &[f32], frames: usize) -> Buf {
         let mut hidden = up.forward(x, frames);
-        team::chunks_mut(&mut hidden, 4096, |_, values| activation::silu(values));
+        let chunk = balanced_chunk(hidden.len(), 4096);
+        team::chunks_mut(&mut hidden, chunk, |_, values| activation::silu(values));
         down.forward(&hidden, frames)
     }
 
@@ -1150,15 +1155,27 @@ impl Block {
     fn forward(&self, x: &mut Buf, frames: usize, c: &Config) {
         let (ff_w0, ff_w1) = c.ff_residual;
         let (conv_w0, conv_w1) = c.conv_residual;
-        let ff = Self::feed_forward(&self.ff1, &self.norm_ff1.apply(x, c.hidden), frames);
-        scale_all(x, ff_w0);
-        let normed = self.norm_att.residual(x, &ff, ff_w1);
-        let att = self.attention(&normed, frames, c);
-        let normed = self.norm_conv.residual(x, &att, 1.0);
-        let conv = self.convolution(&normed, frames, c);
-        scale_all(x, conv_w0);
-        let normed = self.norm_ff2.residual(x, &conv, conv_w1);
+        let normed = {
+            let ff = {
+                let normed = self.norm_ff1.apply(x, c.hidden);
+                Self::feed_forward(&self.ff1, &normed, frames)
+            };
+            scale_all(x, ff_w0);
+            self.norm_att.residual(x, &ff, ff_w1)
+        };
+        let normed = {
+            let att = self.attention(&normed, frames, c);
+            drop(normed);
+            self.norm_conv.residual(x, &att, 1.0)
+        };
+        let normed = {
+            let conv = self.convolution(&normed, frames, c);
+            drop(normed);
+            scale_all(x, conv_w0);
+            self.norm_ff2.residual(x, &conv, conv_w1)
+        };
         let ff = Self::feed_forward(&self.ff2, &normed, frames);
+        drop(normed);
         scale_all(x, ff_w0);
         *x = self.norm_out.residual(x, &ff, ff_w1);
     }
@@ -1188,10 +1205,39 @@ impl Block {
         let mut keys = Buf::scratch(heads * 2 * t * hd);
         team::chunks_mut(&mut keys, 2 * t * hd, |h, head| {
             let (k, v_t) = head.split_at_mut(t * hd);
-            for j in 0..t {
-                let row = &qkv[j * 3 * d + h * hd..];
-                k[j * hd..(j + 1) * hd].copy_from_slice(&row[d..][..hd]);
-                for (e, value) in row[2 * d..][..hd].iter().enumerate() {
+            let stride = 3 * d;
+            let k_off = h * hd + d;
+            let v_off = h * hd + 2 * d;
+            let mut j0 = 0;
+            while j0 + 8 <= t {
+                for dj in 0..8 {
+                    let j = j0 + dj;
+                    k[j * hd..(j + 1) * hd].copy_from_slice(&qkv[j * stride + k_off..][..hd]);
+                }
+                let r0 = &qkv[j0 * stride + v_off..][..hd];
+                let r1 = &qkv[(j0 + 1) * stride + v_off..][..hd];
+                let r2 = &qkv[(j0 + 2) * stride + v_off..][..hd];
+                let r3 = &qkv[(j0 + 3) * stride + v_off..][..hd];
+                let r4 = &qkv[(j0 + 4) * stride + v_off..][..hd];
+                let r5 = &qkv[(j0 + 5) * stride + v_off..][..hd];
+                let r6 = &qkv[(j0 + 6) * stride + v_off..][..hd];
+                let r7 = &qkv[(j0 + 7) * stride + v_off..][..hd];
+                for e in 0..hd {
+                    let dst = &mut v_t[e * t + j0..][..8];
+                    dst[0] = r0[e];
+                    dst[1] = r1[e];
+                    dst[2] = r2[e];
+                    dst[3] = r3[e];
+                    dst[4] = r4[e];
+                    dst[5] = r5[e];
+                    dst[6] = r6[e];
+                    dst[7] = r7[e];
+                }
+                j0 += 8;
+            }
+            for j in j0..t {
+                k[j * hd..(j + 1) * hd].copy_from_slice(&qkv[j * stride + k_off..][..hd]);
+                for (e, value) in qkv[j * stride + v_off..][..hd].iter().enumerate() {
                     v_t[e * t + j] = *value;
                 }
             }
@@ -1233,19 +1279,14 @@ impl Block {
                     .zip(rows.clone())
                 {
                     let q = &qkv[i * 3 * d + h * hd..][..hd];
-                    for e in 0..hd {
-                        u[e] = q[e] + bias_u[e];
-                        v[e] = q[e] + bias_v[e];
-                    }
+                    add_bias_uv(q, bias_u, bias_v, u, v);
                 }
                 fgemm::matmul_into(qu, m, hd, k, t, scores);
                 fgemm::matmul_into(qv, m, hd, band, width, shifted);
                 for (row, i) in scores.chunks_exact_mut(t).zip(rows.clone()) {
                     let local = i - rows.start;
                     let position = &shifted[local * width + (rows.end - 1 - i)..][..t];
-                    for (value, p) in row.iter_mut().zip(position) {
-                        *value = (*value + p) * scale;
-                    }
+                    add_pos_scale(row, position, scale);
                     let keys = c.attention.keys(i, t);
                     row[..keys.start].fill(f32::NEG_INFINITY);
                     row[keys.end..].fill(f32::NEG_INFINITY);
@@ -1258,6 +1299,8 @@ impl Block {
                 }
             });
         });
+        drop(qkv);
+        drop(keys);
         self.o.forward(&context, t)
     }
 
@@ -1313,22 +1356,62 @@ impl Block {
         let d = c.hidden;
         let kernel = c.conv_kernel;
         let wide = self.pw1.forward(x, t);
+        let rows_per_task = balanced_rows(t, d);
         let mut gated = Buf::scratch(t * d);
-        team::chunks_mut(&mut gated, d, |index, out| {
-            let row = &wide[index * 2 * d..(index + 1) * 2 * d];
-            out.copy_from_slice(&row[d..]);
-            activation::sigmoid(out);
-            for (o, value) in out.iter_mut().zip(&row[..d]) {
-                *o *= value;
+        team::chunks_mut(&mut gated, rows_per_task * d, |block, chunk| {
+            let first = block * rows_per_task;
+            for (r, out) in chunk.chunks_exact_mut(d).enumerate() {
+                let row = &wide[(first + r) * 2 * d..(first + r + 1) * 2 * d];
+                out.copy_from_slice(&row[d..]);
+                activation::sigmoid(out);
+                mul_slice(out, &row[..d]);
             }
         });
-        // Accumulated with +=: the one buffer here that must start at zero.
-        let mut mixed = Buf::zeroed(t * d);
-        team::chunks_mut(&mut mixed, d, |i, out| {
-            time_conv_row(self, &gated, (t, kernel, c.conv_context.0), i, out);
-            activation::silu(out);
+        drop(wide);
+        // Zero each row inside its worker task (L1d hot) instead of a single-threaded
+        // full-buffer `Buf::zeroed`, while keeping adjacent `gated` frames and `dw_by_tap` warm.
+        let mut mixed = Buf::scratch(t * d);
+        team::chunks_mut(&mut mixed, rows_per_task * d, |block, chunk| {
+            let first = block * rows_per_task;
+            for (r, out) in chunk.chunks_exact_mut(d).enumerate() {
+                out.fill(0.0);
+                time_conv_row(self, &gated, (t, kernel, c.conv_context.0), first + r, out);
+                activation::silu(out);
+            }
         });
+        drop(gated);
         self.pw2.forward(&mixed, t)
+    }
+}
+
+multiversion! {
+    fn add_bias_uv(q: &[f32], bias_u: &[f32], bias_v: &[f32], u: &mut [f32], v: &mut [f32]) {
+        for ((((u, v), q), bu), bv) in u
+            .iter_mut()
+            .zip(v.iter_mut())
+            .zip(q)
+            .zip(bias_u)
+            .zip(bias_v)
+        {
+            *u = q + bu;
+            *v = q + bv;
+        }
+    }
+}
+
+multiversion! {
+    fn add_pos_scale(row: &mut [f32], position: &[f32], scale: f32) {
+        for (value, p) in row.iter_mut().zip(position) {
+            *value = (*value + p) * scale;
+        }
+    }
+}
+
+multiversion! {
+    fn mul_slice(out: &mut [f32], rhs: &[f32]) {
+        for (o, value) in out.iter_mut().zip(rhs) {
+            *o *= value;
+        }
     }
 }
 

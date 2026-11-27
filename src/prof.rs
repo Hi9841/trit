@@ -32,6 +32,7 @@ pub enum Stage {
     BeamStep,
     BeamClone,
     Jobs,
+    ConvColumnsTasks,
     Moves,
     BusyHere,
     BusyAway,
@@ -82,6 +83,7 @@ impl Stage {
         "beam search: decoder step, wall",
         "beam search: copy of a state that splits, wall",
         "jobs of the team (count)",
+        "conv_columns tasks (count)",
         "moves of the team to another L3 domain (count)",
         "last look: other load on the team's domain, percent",
         "last look: load on the quietest other domain, percent",
@@ -99,6 +101,32 @@ mod on {
     /// Allocations of the process and their bytes; the CLI's allocator counts them.
     pub static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
     pub static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
+    /// Live logical `Buf` bytes and their high-water mark.
+    static LIVE_BUF_BYTES: AtomicU64 = AtomicU64::new(0);
+    static PEAK_BUF_BYTES: AtomicU64 = AtomicU64::new(0);
+
+    pub fn buf_live_add(bytes: usize) {
+        let now = LIVE_BUF_BYTES.fetch_add(bytes as u64, Ordering::Relaxed) + bytes as u64;
+        PEAK_BUF_BYTES.fetch_max(now, Ordering::Relaxed);
+    }
+
+    pub fn buf_live_sub(bytes: usize) {
+        LIVE_BUF_BYTES.fetch_sub(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn peak_buf_bytes() -> u64 {
+        PEAK_BUF_BYTES.load(Ordering::Relaxed)
+    }
+
+    pub fn reset_peak_buf_bytes() {
+        let live = LIVE_BUF_BYTES.load(Ordering::Relaxed);
+        PEAK_BUF_BYTES.store(live, Ordering::Relaxed);
+    }
+
+    pub fn reset_stage(stage: Stage) {
+        COUNTS[stage as usize].store(0, Ordering::Relaxed);
+        NANOS[stage as usize].store(0, Ordering::Relaxed);
+    }
     /// Allocations and bytes by size: class `c` holds sizes below `2^c` bytes.
     static BY_SIZE: [[AtomicU64; 2]; 40] = [const { [AtomicU64::new(0), AtomicU64::new(0)] }; 40];
 
@@ -349,8 +377,9 @@ mod on {
 
 #[cfg(feature = "profile")]
 pub use on::{
-    allocated, count, counted, product, products, report, set, span, ProductSpan, Span,
-    ALLOCATED_BYTES, ALLOCATIONS,
+    allocated, buf_live_add, buf_live_sub, count, counted, peak_buf_bytes, product, products,
+    report, reset_peak_buf_bytes, reset_stage, set, span, ProductSpan, Span, ALLOCATED_BYTES,
+    ALLOCATIONS,
 };
 
 /// Nothing: this build has no profile.

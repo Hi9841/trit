@@ -134,6 +134,8 @@ impl Buf {
             let _span = crate::prof::span(crate::prof::Stage::BufFill);
             data.resize(len, 0.0);
         }
+        #[cfg(feature = "profile")]
+        crate::prof::buf_live_add(len * 4);
         Buf { data, len }
     }
 }
@@ -159,8 +161,16 @@ fn stepped(len: usize) -> usize {
 
 impl Buf {
     pub fn into_vec(mut self) -> Vec<f32> {
+        #[cfg(feature = "profile")]
+        let len = {
+            let len = std::mem::replace(&mut self.len, 0);
+            crate::prof::buf_live_sub(len * 4);
+            len
+        };
+        #[cfg(not(feature = "profile"))]
+        let len = self.len;
         let mut values = std::mem::take(&mut self.data);
-        values.truncate(self.len);
+        values.truncate(len);
         values
     }
 }
@@ -173,6 +183,11 @@ pub fn clear_pool() {
 
 impl Drop for Buf {
     fn drop(&mut self) {
+        #[cfg(feature = "profile")]
+        if self.len > 0 {
+            crate::prof::buf_live_sub(self.len * 4);
+            self.len = 0;
+        }
         let vec = std::mem::take(&mut self.data);
         if vec.capacity() == 0 {
             return;

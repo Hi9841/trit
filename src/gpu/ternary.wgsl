@@ -1,4 +1,4 @@
-// Ternary product with f32 activations.
+// Ternary product with group-128 quantized activations stored as f32.
 // Codes are 0, 1, 2. The weight is scale * (code - 1).
 // Sixteen codes sit in one u32, low bits first. Scales are f32,
 // one per 128 inputs, row-major [out][k / 128].

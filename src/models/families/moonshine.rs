@@ -173,51 +173,69 @@ impl Moonshine {
         let c = &self.config;
         let d = c.d;
         let l1 = (samples.len() - 127) / 64 + 1;
-        let cols = conv_columns(samples, (samples.len(), 1), (127, 64, 0), l1);
-        let mut h = conv1.forward(&cols, l1);
-        activation::tanh(&mut h);
-        // Group norm with one group: statistics over every channel and frame.
-        let n = h.len() as f32;
-        let mean = h.iter().sum::<f32>() / n;
-        let var = h.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
-        let inv = 1.0 / (var + 1e-5).sqrt();
-        let (weight, bias) = group_norm;
-        team::chunks_mut(&mut h, d, |_, row| {
-            for ((v, w), b) in row.iter_mut().zip(weight).zip(bias) {
-                *v = (*v - mean) * inv * w + b;
-            }
-        });
         let l2 = (l1 - 7) / 3 + 1;
-        let mut h = conv2.forward(&conv_columns(&h, (l1, d), (7, 3, 0), l2), l2);
-        // The conv stem always uses the exact form (`F.gelu`).
-        Gelu::Exact.apply(&mut h, 2 * d);
         let frames = (l2 - 3) / 2 + 1;
-        let mut x = conv3.forward(&conv_columns(&h, (l2, 2 * d), (3, 2, 0), frames), frames);
+        let mut x = {
+            let mut h = {
+                let mut h1 = {
+                    let cols = conv_columns(samples, (samples.len(), 1), (127, 64, 0), l1);
+                    conv1.forward(&cols, l1)
+                };
+                activation::tanh(&mut h1);
+                // Group norm with one group: statistics over every channel and frame.
+                let n = h1.len() as f32;
+                let mean = h1.iter().sum::<f32>() / n;
+                let var = h1.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
+                let inv = 1.0 / (var + 1e-5).sqrt();
+                let (weight, bias) = group_norm;
+                team::chunks_mut(&mut h1, d, |_, row| {
+                    for ((v, w), b) in row.iter_mut().zip(weight).zip(bias) {
+                        *v = (*v - mean) * inv * w + b;
+                    }
+                });
+                let cols = conv_columns(&h1, (l1, d), (7, 3, 0), l2);
+                drop(h1);
+                conv2.forward(&cols, l2)
+            };
+            // The conv stem always uses the exact form (`F.gelu`).
+            Gelu::Exact.apply(&mut h, 2 * d);
+            let cols = conv_columns(&h, (l2, 2 * d), (3, 2, 0), frames);
+            drop(h);
+            conv3.forward(&cols, frames)
+        };
         Gelu::Exact.apply(&mut x, d);
         if layers.is_empty() {
             return (norm.apply(&x, d), frames);
         }
         let mut normed = layers[0].norm_attn.apply(&x, d);
         for (i, layer) in layers.iter().enumerate() {
-            let mut qkv = layer.qkv.forward(&normed, frames);
-            self.rotary
-                .apply(&mut qkv, (frames, 3 * d), (c.heads, d / c.heads), 0);
-            self.rotary
-                .apply(&mut qkv[d..], (frames, 3 * d), (c.heads, d / c.heads), 0);
-            let att = attention(
-                (&qkv, 3 * d),
-                (&qkv[d..], 3 * d),
-                (&qkv[2 * d..], 3 * d),
-                (frames, frames),
-                (d, c.heads, c.heads),
-                false,
-            );
-            let normed_mlp = layer
-                .norm_mlp
-                .residual(&mut x, &layer.out.forward(&att, frames), 1.0);
-            let mut hidden = layer.fc1.forward(&normed_mlp, frames);
-            c.gelu.apply(&mut hidden, c.ffn);
-            let ffn_out = layer.fc2.forward(&hidden, frames);
+            let att_out = {
+                let att = {
+                    let mut qkv = layer.qkv.forward(&normed, frames);
+                    drop(normed);
+                    self.rotary
+                        .apply(&mut qkv, (frames, 3 * d), (c.heads, d / c.heads), 0);
+                    self.rotary
+                        .apply(&mut qkv[d..], (frames, 3 * d), (c.heads, d / c.heads), 0);
+                    attention(
+                        (&qkv, 3 * d),
+                        (&qkv[d..], 3 * d),
+                        (&qkv[2 * d..], 3 * d),
+                        (frames, frames),
+                        (d, c.heads, c.heads),
+                        false,
+                    )
+                };
+                layer.out.forward(&att, frames)
+            };
+            let normed_mlp = layer.norm_mlp.residual(&mut x, &att_out, 1.0);
+            drop(att_out);
+            let ffn_out = {
+                let mut hidden = layer.fc1.forward(&normed_mlp, frames);
+                drop(normed_mlp);
+                c.gelu.apply(&mut hidden, c.ffn);
+                layer.fc2.forward(&hidden, frames)
+            };
             normed = match layers.get(i + 1) {
                 Some(next) => next.norm_attn.residual(&mut x, &ffn_out, 1.0),
                 None => norm.residual(&mut x, &ffn_out, 1.0),
@@ -375,14 +393,13 @@ impl Moonshine {
                     .apply(&mut qkv[d..], (1, 3 * d), (c.heads, d / c.heads), position);
                 cache.keys[l].extend_from_slice(&qkv[d..2 * d]);
                 cache.values[l].extend_from_slice(&qkv[2 * d..]);
-                let seen = position + 1;
-                let att = attention(
+                let mut att = Buf::scratch(d);
+                attention_steps(
                     (&qkv[..d], d),
-                    (&cache.keys[l], d),
-                    (&cache.values[l], d),
-                    (1, seen),
+                    |_| (&cache.keys[l], &cache.values[l]),
+                    1,
                     (d, c.heads, c.heads),
-                    false,
+                    &mut att,
                 );
                 let normed_cross =
                     layer

@@ -5,8 +5,43 @@ use crate::cpu::{activation, buf::Buf, fgemm, gemm::Dense, team, tensors::Tensor
 
 const LAYER_NORM_EPS: f32 = 1e-5;
 /// Floats per task for element-wise and row-norm passes: keeps small decoder
-/// batches (e.g. 5 x 384) inline while reducing task claims on large encoders.
+/// batches (e.g. 5 x 384) inline while capping task counts on large encoders.
 const ELEMENTWISE_CHUNK: usize = 4096;
+
+/// Rows per parallel task: keeps small batches (`<= ELEMENTWISE_CHUNK` floats)
+/// inline while capping large encoders to `2 * threads` (`4 * threads` on
+/// heterogeneous CPUs) instead of hundreds of fine-grained tasks.
+pub(crate) fn balanced_rows(rows: usize, row_len: usize) -> usize {
+    let total = rows.saturating_mul(row_len);
+    if total <= ELEMENTWISE_CHUNK {
+        return rows.max(1);
+    }
+    let threads = team::threads().max(1);
+    let target = if team::is_heterogeneous() {
+        4 * threads
+    } else {
+        2 * threads
+    };
+    let min_rows = (ELEMENTWISE_CHUNK / row_len.max(1)).max(1);
+    rows.div_ceil(target).max(min_rows)
+}
+
+/// Chunk size (a multiple of `align`) that caps elementwise passes to `2 * threads`
+/// (`4 * threads` on heterogeneous CPUs) while keeping small buffers inline.
+pub(crate) fn balanced_chunk(len: usize, align: usize) -> usize {
+    let align = align.max(1);
+    if len <= ELEMENTWISE_CHUNK.max(align) {
+        return len.max(align);
+    }
+    let threads = team::threads().max(1);
+    let target = if team::is_heterogeneous() {
+        4 * threads
+    } else {
+        2 * threads
+    };
+    let blocks = len.div_ceil(align);
+    blocks.div_ceil(target).max(1) * align
+}
 
 /// Layers with the same input and `out` rows each, stacked by output rows
 /// (`Dense::load`: int8 where the shape allows). A missing bias is zero.
@@ -55,7 +90,7 @@ impl Norm {
         assert!(d > 0 && d == self.weight.len() && x.len().is_multiple_of(d));
         let _span = crate::prof::span(crate::prof::Stage::Norm);
         let mut out = Buf::scratch(x.len());
-        let rows_per_task = (ELEMENTWISE_CHUNK / d).max(1);
+        let rows_per_task = balanced_rows(x.len() / d, d);
         team::chunks_mut(&mut out, rows_per_task * d, |block, chunk| {
             let first = block * rows_per_task;
             for (r, o) in chunk.chunks_exact_mut(d).enumerate() {
@@ -77,7 +112,7 @@ impl Norm {
         assert!(size > 0 && x.len() == y.len() && x.len().is_multiple_of(size));
         let _span = crate::prof::span(crate::prof::Stage::Norm);
         let mut out = Buf::scratch(x.len());
-        let rows_per_task = (ELEMENTWISE_CHUNK / size).max(1);
+        let rows_per_task = balanced_rows(x.len() / size, size);
         let rows = team::SendPtr::new(x);
         team::chunks_mut(&mut out, rows_per_task * size, |block, chunk| {
             let first = block * rows_per_task;
@@ -207,12 +242,9 @@ impl Gelu {
     pub fn apply(self, values: &mut [f32], d: usize) {
         const C: f32 = 0.797_884_6; // sqrt(2 / pi)
         let _span = crate::prof::span(crate::prof::Stage::Gelu);
-        let rows = values.len() / d.max(1);
-        let rows_per_task = if rows > 2 * team::threads() {
-            (ELEMENTWISE_CHUNK / d.max(1)).max(1)
-        } else {
-            1
-        };
+        let d = d.max(1);
+        let rows = values.len() / d;
+        let rows_per_task = balanced_rows(rows, d);
         team::chunks_mut(values, rows_per_task * d, |_, chunk| match self {
             Self::Exact => activation::gelu(chunk),
             Self::Tanh => {
@@ -251,11 +283,28 @@ pub fn folded_batch_norm(
     (scale, shift)
 }
 
+multiversion! {
+    fn scale_slice(values: &mut [f32], w: f32) {
+        for v in values.iter_mut() {
+            *v *= w;
+        }
+    }
+}
+
+multiversion! {
+    fn relu_slice(values: &mut [f32]) {
+        for v in values.iter_mut() {
+            *v = v.max(0.0);
+        }
+    }
+}
+
 /// `x *= w`, spread over the team. Nothing for 1, so a model without a
 /// multiplier keeps its sums.
 pub fn scale_all(x: &mut [f32], w: f32) {
     if w != 1.0 {
-        team::chunks_mut(x, 4096, |_, values| values.iter_mut().for_each(|v| *v *= w));
+        let chunk = balanced_chunk(x.len(), 4096);
+        team::chunks_mut(x, chunk, |_, values| scale_slice(values, w));
     }
 }
 
@@ -265,26 +314,23 @@ pub fn add_scaled_into(x: &mut [f32], y: &[f32], w: f32) {
         add_into(x, y);
         return;
     }
-    team::chunks_mut(x, 4096, |i, row| {
-        for (o, v) in row.iter_mut().zip(&y[i * 4096..]) {
-            *o += w * v;
-        }
+    let chunk = balanced_chunk(x.len(), 4096);
+    team::chunks_mut(x, chunk, |i, row| {
+        add_scaled(row, &y[i * chunk..i * chunk + row.len()], w);
     });
 }
 
 /// `max(x, 0)`, spread over the team.
 pub fn relu(x: &mut [f32]) {
-    team::chunks_mut(x, 4096, |_, values| {
-        values.iter_mut().for_each(|v| *v = v.max(0.0))
-    });
+    let chunk = balanced_chunk(x.len(), 4096);
+    team::chunks_mut(x, chunk, |_, values| relu_slice(values));
 }
 
 pub fn add_into(x: &mut [f32], y: &[f32]) {
     let _span = crate::prof::span(crate::prof::Stage::Add);
-    team::chunks_mut(x, 4096, |chunk, xs| {
-        for (a, b) in xs.iter_mut().zip(&y[chunk * 4096..]) {
-            *a += b;
-        }
+    let chunk = balanced_chunk(x.len(), 4096);
+    team::chunks_mut(x, chunk, |i, xs| {
+        add_plain(xs, &y[i * chunk..i * chunk + xs.len()]);
     });
 }
 
@@ -391,9 +437,10 @@ pub fn attention(
 
 /// Keys and values per key/value head, laid out for `attention_with`: K
 /// transposed (hd x tk) and V as it is (tk x hd), so both products are
-/// `matmul_nn`, whose tiles need no horizontal sums. Where the CPU has the
-/// kernel for it (`fgemm::nn_strips`), the transposed K is in strips of 32
-/// keys (`[strip][hd][32]`): a tile of the scores then reads one run of
+/// `matmul_nn`, whose tiles need no horizontal sums. Where the CPU has a
+/// strip kernel (`fgemm::nn_strip_cols() > 0`), the transposed K is packed in
+/// strips matching the tile width (`[strip][hd][S]`, 32 on AVX-512, 16 on
+/// AVX2 and NEON): a tile of the scores then reads one contiguous run of
 /// bytes. Build it once for keys that do not change (Whisper's
 /// cross-attention over one window).
 pub struct HeadMajor {
@@ -416,10 +463,11 @@ impl HeadMajor {
         (hd, kv_heads): (usize, usize),
     ) -> Self {
         let _span = crate::prof::span(crate::prof::Stage::HeadMajor);
-        let strips = fgemm::nn_strips();
-        let keys = match strips {
-            true => tk.div_ceil(fgemm::NN_STRIP) * hd * fgemm::NN_STRIP,
-            false => hd * tk,
+        let strip_cols = fgemm::nn_strip_cols();
+        let strips = strip_cols > 0;
+        let keys = match strip_cols {
+            0 => hd * tk,
+            s => tk.div_ceil(s) * hd * s,
         };
         // From the pool, on the calling thread: the workers allocate nothing,
         // so their allocator heaps do not grow with every clip.
@@ -428,33 +476,116 @@ impl HeadMajor {
             Buf::scratch(kv_heads * tk * hd),
         );
         let (kt_ptr, vh_ptr) = (team::SendPtr::new(&mut kt), team::SendPtr::new(&mut vh));
-        team::for_each(kv_heads, |g| {
-            // SAFETY: head g owns its range of both buffers, which outlive the step.
-            let (kt, vh) = unsafe {
-                (
-                    kt_ptr.slice_mut(g * keys, keys),
-                    vh_ptr.slice_mut(g * tk * hd, tk * hd),
-                )
-            };
-            for j in 0..tk {
-                let key = &k[j * ks + g * hd..][..hd];
-                if strips {
-                    // The places of a last strip that no key takes keep what
-                    // the buffer held: the kernel does not read them.
-                    let (strip, column) = (j / fgemm::NN_STRIP, j % fgemm::NN_STRIP);
-                    let rows = &mut kt[strip * hd * fgemm::NN_STRIP..][..hd * fgemm::NN_STRIP];
-                    let (rows, _) = rows.as_chunks_mut::<{ fgemm::NN_STRIP }>();
-                    for (row, value) in rows.iter_mut().zip(key) {
-                        row[column] = *value;
-                    }
+        match strip_cols {
+            32 | 16 => {
+                let total_strips = tk.div_ceil(strip_cols);
+                let threads = team::threads().max(1);
+                let chunks_per_head = if kv_heads == 0
+                    || tk == 0
+                    || kv_heads * tk * hd <= ELEMENTWISE_CHUNK
+                    || (kv_heads >= threads && !team::is_heterogeneous())
+                {
+                    1
                 } else {
-                    for (e, value) in key.iter().enumerate() {
-                        kt[e * tk + j] = *value;
+                    let target = if team::is_heterogeneous() {
+                        4 * threads
+                    } else {
+                        2 * threads
+                    };
+                    target.div_ceil(kv_heads).min(total_strips.max(1)).max(1)
+                };
+                let strips_per_chunk = total_strips.div_ceil(chunks_per_head).max(1);
+                let chunks_per_head = total_strips.div_ceil(strips_per_chunk).max(1);
+                team::for_each(kv_heads * chunks_per_head, |task| {
+                    let g = task / chunks_per_head;
+                    let chunk = task % chunks_per_head;
+                    let s_start = chunk * strips_per_chunk;
+                    let s_end = ((chunk + 1) * strips_per_chunk).min(total_strips);
+                    if s_start >= s_end {
+                        return;
                     }
-                }
-                vh[j * hd..(j + 1) * hd].copy_from_slice(&v[j * vs + g * hd..][..hd]);
+                    let j_start = s_start * strip_cols;
+                    let j_end = (s_end * strip_cols).min(tk);
+                    // SAFETY: `(g, s_start..s_end)` owns a disjoint slice of `kt` and `vh`, which outlive the step.
+                    let (kt_chunk, vh_chunk) = unsafe {
+                        (
+                            kt_ptr.slice_mut(
+                                g * keys + s_start * hd * strip_cols,
+                                (s_end - s_start) * hd * strip_cols,
+                            ),
+                            vh_ptr.slice_mut(g * tk * hd + j_start * hd, (j_end - j_start) * hd),
+                        )
+                    };
+                    for s_local in 0..(s_end - s_start) {
+                        let s = s_start + s_local;
+                        let strip_j0 = s * strip_cols;
+                        let strip_j1 = (strip_j0 + strip_cols).min(tk);
+                        let strip_buf =
+                            &mut kt_chunk[s_local * hd * strip_cols..][..hd * strip_cols];
+                        let mut j = strip_j0;
+                        while j + 8 <= strip_j1 {
+                            let col = j - strip_j0;
+                            let r0 = &k[j * ks + g * hd..][..hd];
+                            let r1 = &k[(j + 1) * ks + g * hd..][..hd];
+                            let r2 = &k[(j + 2) * ks + g * hd..][..hd];
+                            let r3 = &k[(j + 3) * ks + g * hd..][..hd];
+                            let r4 = &k[(j + 4) * ks + g * hd..][..hd];
+                            let r5 = &k[(j + 5) * ks + g * hd..][..hd];
+                            let r6 = &k[(j + 6) * ks + g * hd..][..hd];
+                            let r7 = &k[(j + 7) * ks + g * hd..][..hd];
+                            for e in 0..hd {
+                                let dst = &mut strip_buf[e * strip_cols + col..][..8];
+                                dst[0] = r0[e];
+                                dst[1] = r1[e];
+                                dst[2] = r2[e];
+                                dst[3] = r3[e];
+                                dst[4] = r4[e];
+                                dst[5] = r5[e];
+                                dst[6] = r6[e];
+                                dst[7] = r7[e];
+                            }
+                            for dj in 0..8 {
+                                let jj = j + dj;
+                                let vh_off = (jj - j_start) * hd;
+                                vh_chunk[vh_off..vh_off + hd]
+                                    .copy_from_slice(&v[jj * vs + g * hd..][..hd]);
+                            }
+                            j += 8;
+                        }
+                        while j < strip_j1 {
+                            let col = j - strip_j0;
+                            let key = &k[j * ks + g * hd..][..hd];
+                            for (e, &value) in key.iter().enumerate() {
+                                strip_buf[e * strip_cols + col] = value;
+                            }
+                            let vh_off = (j - j_start) * hd;
+                            vh_chunk[vh_off..vh_off + hd]
+                                .copy_from_slice(&v[j * vs + g * hd..][..hd]);
+                            j += 1;
+                        }
+                    }
+                });
             }
-        });
+            0 => {
+                team::for_each(kv_heads, |g| {
+                    // SAFETY: head g owns its range of both buffers, which outlive the step.
+                    let (kt, vh) = unsafe {
+                        (
+                            kt_ptr.slice_mut(g * keys, keys),
+                            vh_ptr.slice_mut(g * tk * hd, tk * hd),
+                        )
+                    };
+                    for j in 0..tk {
+                        let key = &k[j * ks + g * hd..][..hd];
+                        for (e, value) in key.iter().enumerate() {
+                            kt[e * tk + j] = *value;
+                        }
+                        vh[j * hd..(j + 1) * hd].copy_from_slice(&v[j * vs + g * hd..][..hd]);
+                    }
+                });
+            }
+            _ => unreachable!("unsupported strip_cols {strip_cols}"),
+        }
         Self {
             kt,
             vh,
@@ -490,6 +621,7 @@ pub fn attention_with(
     if tq == 0 {
         return Buf::scratch(0);
     }
+    assert!(kv.kv_heads > 0 && heads > 0 && heads.is_multiple_of(kv.kv_heads) && hd > 0 && tk > 0);
     let group = heads / kv.kv_heads;
     let scale = 1.0 / (hd as f32).sqrt();
     // One task per head and block of queries: 20 heads alone would leave
@@ -617,8 +749,7 @@ pub(crate) fn softmax_rows(scores: &mut [f32], width: usize, visible: impl Fn(us
         let mut sum = [0.0f32; activation::SIDE];
         activation::exp_sums(group, width, &max[..rows], &mut sum[..rows]);
         for (row, sum) in group.chunks_exact_mut(width).zip(sum) {
-            let inv = 1.0 / sum;
-            row.iter_mut().for_each(|x| *x *= inv);
+            scale_slice(row, 1.0 / sum);
         }
     }
 }
@@ -635,7 +766,7 @@ thread_local! {
     static SCRATCH: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-const ATTENTION_ROWS: usize = 128;
+const ATTENTION_ROWS: usize = 48;
 
 /// Index of the largest value; the first one wins a tie.
 pub fn argmax(values: &[f32]) -> usize {
@@ -695,12 +826,31 @@ pub fn conv_columns(
     (kernel, stride, pad): (usize, usize, usize),
     out_frames: usize,
 ) -> Buf {
-    let mut cols = Buf::scratch(out_frames * channels * kernel);
-    team::chunks_mut(&mut cols, channels * kernel, |t, row| {
-        for tap in 0..kernel {
-            let src = (t * stride + tap).checked_sub(pad).filter(|s| *s < frames);
-            for c in 0..channels {
-                row[c * kernel + tap] = src.map_or(0.0, |s| x[s * channels + c]);
+    let row_len = channels * kernel;
+    let mut cols = Buf::scratch(out_frames * row_len);
+    if out_frames == 0 || row_len == 0 {
+        return cols;
+    }
+    let rows_per_task = balanced_rows(out_frames, row_len);
+    team::chunks_mut(&mut cols, rows_per_task * row_len, |block, chunk| {
+        crate::prof::count(crate::prof::Stage::ConvColumnsTasks, 1);
+        let first = block * rows_per_task;
+        for (r, row) in chunk.chunks_exact_mut(row_len).enumerate() {
+            let t = first + r;
+            for tap in 0..kernel {
+                match (t * stride + tap).checked_sub(pad).filter(|s| *s < frames) {
+                    Some(s) => {
+                        let input = &x[s * channels..][..channels];
+                        for (c, &v) in input.iter().enumerate() {
+                            row[c * kernel + tap] = v;
+                        }
+                    }
+                    None => {
+                        for c in 0..channels {
+                            row[c * kernel + tap] = 0.0;
+                        }
+                    }
+                }
             }
         }
     });

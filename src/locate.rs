@@ -164,6 +164,10 @@ pub fn candidates(repo: &str) -> Vec<PathBuf> {
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         roots.push(PathBuf::from(local).join("TDT").join("models"));
     }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join("Library/Application Support/TDT/models"));
+    }
     let mut dirs: Vec<PathBuf> = roots
         .iter()
         .flat_map(|root| names.iter().map(move |name| root.join(name)))

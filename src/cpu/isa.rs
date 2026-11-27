@@ -1,6 +1,7 @@
 //! One read of `TRIT_ISA` for the float level, the ternary ISA, and the int8 path.
-//! Float `avx2` needs F16C. Ternary `avx2` does not. `avxvnni` and `dotprod`
-//! change only the int8 path.
+//! Float `avx2` needs F16C. Ternary `avx2` does not. `avxvnni` selects 256-bit
+//! VNNI for both int8 and ternary; `dotprod` selects `sdot` instead of `smmla`
+//! on arm64 i8mm CPUs for both int8 and ternary.
 
 use super::fgemm::Level;
 use super::int8::Path;
@@ -62,17 +63,25 @@ fn float_of(forced: &str) -> Level {
 fn ternary_of(forced: &str) -> Isa {
     #[cfg(target_arch = "x86_64")]
     {
-        let vnni = is_x86_feature_detected!("avx512f")
+        let avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        let vnni512 = is_x86_feature_detected!("avx512f")
             && is_x86_feature_detected!("avx512bw")
             && is_x86_feature_detected!("avx512vnni");
-        let avx2 = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        let vnni256_vex = avx2 && is_x86_feature_detected!("avxvnni");
+        let vnni256_evex = avx2 && vnni512 && is_x86_feature_detected!("avx512vl");
         match forced {
             "scalar" => return Isa::Scalar,
             "avx2" if avx2 => return Isa::Avx2,
+            "avxvnni" if vnni256_vex => return Isa::AvxVnniVex,
+            "avxvnni" if vnni256_evex => return Isa::AvxVnniEvex,
+            "avxvnni" if avx2 => return Isa::Avx2,
             _ => {}
         }
-        if vnni {
+        if vnni512 {
             return Isa::Avx512Vnni;
+        }
+        if vnni256_vex {
+            return Isa::AvxVnniVex;
         }
         if avx2 {
             return Isa::Avx2;
@@ -82,6 +91,8 @@ fn ternary_of(forced: &str) -> Isa {
     return match forced {
         "scalar" => Isa::Scalar,
         "neon" => Isa::Neon,
+        "dotprod" if std::arch::is_aarch64_feature_detected!("dotprod") => Isa::NeonDot,
+        _ if std::arch::is_aarch64_feature_detected!("i8mm") => Isa::NeonMmla,
         _ if std::arch::is_aarch64_feature_detected!("dotprod") => Isa::NeonDot,
         _ => Isa::Neon,
     };
@@ -111,7 +122,8 @@ fn int8_of(forced: &str, isa: Isa) -> Path {
             _ => match isa {
                 Isa::Scalar => Path::Scalar,
                 Isa::Avx512Vnni if vnni512 => Path::Vnni512,
-                Isa::Avx2 if vnni256_vex => Path::Vnni256Vex,
+                Isa::AvxVnniVex if vnni256_vex => Path::Vnni256Vex,
+                Isa::AvxVnniEvex if vnni256_evex => Path::Vnni256Evex,
                 Isa::Avx2 if avx2 => Path::Avx2,
                 _ => Path::Scalar,
             },
@@ -119,14 +131,11 @@ fn int8_of(forced: &str, isa: Isa) -> Path {
     }
     #[cfg(target_arch = "aarch64")]
     {
+        let _ = forced;
         match isa {
             Isa::Scalar => Path::Scalar,
             Isa::Neon => Path::Neon,
-            Isa::NeonDot
-                if std::arch::is_aarch64_feature_detected!("i8mm") && forced != "dotprod" =>
-            {
-                Path::NeonMmla
-            }
+            Isa::NeonMmla => Path::NeonMmla,
             Isa::NeonDot => Path::NeonDot,
         }
     }

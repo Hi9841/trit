@@ -33,8 +33,12 @@ impl Plain for u8 {}
 
 /// Smaller unnamed buffers stay on the heap: they are a few MB in all.
 const MIN_MAPPED_BYTES: usize = 64 << 10;
-/// Each buffer starts on a cache line in the file, so mapped values are aligned.
+/// Minimum alignment accepted when reading a cache file (backwards-compatible
+/// with existing `TRITW004` caches).
 const ALIGN: u64 = 64;
+/// Alignment used when writing new cache buffers: 128 bytes matches Apple
+/// Silicon's cache line size and stays a multiple of x86's 64-byte lines.
+const WRITE_ALIGN: u64 = 128;
 const MAGIC: &[u8; 8] = b"TRITW004";
 /// Magic (8), index offset (8), and source fingerprint (32).
 const HEADER: u64 = 48;
@@ -425,9 +429,9 @@ impl Writer {
         if self.failed.is_some() {
             return;
         }
-        let start = self.at.next_multiple_of(ALIGN);
+        let start = self.at.next_multiple_of(WRITE_ALIGN);
         let pad_len = (start - self.at) as usize;
-        let padding = [0u8; ALIGN as usize];
+        let padding = [0u8; WRITE_ALIGN as usize];
         let result = self
             .file
             .write_all(&padding[..pad_len])
@@ -1130,7 +1134,23 @@ fn local_disk(dir: &Path) -> bool {
     !GOES_AWAY.contains(&kind)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn local_disk(dir: &Path) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = CString::new(dir.as_os_str().as_bytes()) else {
+        return true;
+    };
+    // SAFETY: `libc::statfs` is a plain C struct; zero-initialization is valid.
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is NUL-terminated and `stat` is writable for the call.
+    if unsafe { libc::statfs(path.as_ptr(), &mut stat) } != 0 {
+        return true;
+    }
+    (stat.f_flags & libc::MNT_LOCAL as u32) != 0
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn local_disk(_dir: &Path) -> bool {
     true
 }
@@ -1194,10 +1214,33 @@ fn kernels_part() -> String {
     format!("-{path}.bin")
 }
 
+/// Hardware page size for working-set probing and sequential prefetching:
+/// 16 KB on Apple Silicon, 4 KB on x86 and most other hosts.
+fn os_page_size() -> usize {
+    #[cfg(unix)]
+    {
+        use std::sync::OnceLock;
+        static PAGE: OnceLock<usize> = OnceLock::new();
+        *PAGE.get_or_init(|| {
+            // SAFETY: `sysconf(_SC_PAGESIZE)` has no preconditions.
+            let raw = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            usize::try_from(raw)
+                .ok()
+                .filter(|&n| n >= 4096 && n.is_power_of_two())
+                .unwrap_or(4096)
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        4096
+    }
+}
+
 pub(crate) struct Mapping {
     ptr: *const u8,
     len: usize,
     prefetching: AtomicBool,
+    prefetched: AtomicBool,
     #[cfg(windows)]
     handle: windows::Win32::Foundation::HANDLE,
 }
@@ -1222,9 +1265,8 @@ impl Mapping {
     /// their page-table entries into the process working set so the next
     /// inference pass does not stall on demand page faults.
     ///
-    /// On Windows, probes 16 evenly-spaced pages with `QueryWorkingSetEx`
-    /// first so repeated back-to-back takes skip redundant 700 MB scans when
-    /// the weights are already resident in the working set.
+    /// After the first touch, probes 16 pages on supported systems. This
+    /// skips repeated scans while the sampled pages are still resident.
     pub(crate) fn prefetch(&self) {
         if self.len == 0 || self.prefetching.swap(true, Ordering::AcqRel) {
             return;
@@ -1237,7 +1279,8 @@ impl Mapping {
         }
         let _reset = Reset(&self.prefetching);
 
-        if self.is_sample_resident() {
+        // File-cache residency does not prove that this mapping has page-table entries.
+        if self.prefetched.load(Ordering::Relaxed) && self.is_sample_resident() {
             return;
         }
 
@@ -1261,17 +1304,19 @@ impl Mapping {
         }
         // `PrefetchVirtualMemory` / `madvise` brings file pages into the OS
         // cache, but does not install PTEs into this process's working set.
-        // Touching one byte per 4 KB page moves ~150k soft faults off the
-        // inference critical path while keeping the pages shared file memory.
-        const PAGE: usize = 4096;
+        // Touching one byte per OS page (16 KB on Apple Silicon, 4 KB on x86)
+        // moves soft faults off the inference critical path while keeping the
+        // pages shared file memory.
+        let page = os_page_size();
         let mut acc = 0u8;
         let mut offset = 0usize;
         while offset < self.len {
             // SAFETY: `offset < self.len` and `[ptr .. ptr + len)` is valid read-only memory.
             acc = acc.wrapping_add(unsafe { std::ptr::read_volatile(self.ptr.add(offset)) });
-            offset += PAGE;
+            offset += page;
         }
         std::hint::black_box(acc);
+        self.prefetched.store(true, Ordering::Relaxed);
     }
 
     /// Returns true if a 16-page sample spanning the mapping is already valid
@@ -1309,7 +1354,41 @@ impl Mapping {
         })
     }
 
-    #[cfg(not(windows))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+    fn is_sample_resident(&self) -> bool {
+        const SAMPLES: usize = 16;
+        let page = os_page_size();
+        let last_page = (self.len.saturating_sub(1)) & !(page - 1);
+        for i in 0..SAMPLES {
+            let offset = if SAMPLES > 1 {
+                ((last_page as u128 * i as u128) / (SAMPLES - 1) as u128) as usize & !(page - 1)
+            } else {
+                0
+            };
+            let mut vec = 0u8;
+            // SAFETY: `self.ptr` is page-aligned (`mmap`), `offset` is a
+            // page-aligned offset `< self.len`, and `vec` holds one byte for
+            // the single probed page (`MINCORE_INCORE` is bit 0 on macOS/Linux).
+            let rc = unsafe {
+                libc::mincore(
+                    self.ptr.add(offset).cast_mut().cast(),
+                    page,
+                    std::ptr::from_mut(&mut vec).cast(),
+                )
+            };
+            if rc != 0 || (vec & 1) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(not(any(
+        windows,
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "android"
+    )))]
     fn is_sample_resident(&self) -> bool {
         false
     }
@@ -1352,6 +1431,7 @@ impl Mapping {
             ptr: view.Value.cast::<u8>().cast_const(),
             len,
             prefetching: AtomicBool::new(false),
+            prefetched: AtomicBool::new(false),
             handle,
         })
     }
@@ -1384,6 +1464,7 @@ impl Mapping {
             ptr: ptr.cast::<u8>().cast_const(),
             len,
             prefetching: AtomicBool::new(false),
+            prefetched: AtomicBool::new(false),
         })
     }
 

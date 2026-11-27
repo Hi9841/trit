@@ -189,7 +189,7 @@ impl Cleaner {
     }
 
     fn load_now(dir: &Path, options: &crate::LoadOptions) -> Result<Self, String> {
-        let _team = crate::cpu::enter(crate::Spread::OneCache);
+        let _team = crate::cpu::enter(crate::Spread::AllCores);
         let bpe = Bpe::open(&dir.join("tokenizer.json"))?;
         let stop = ["<|im_end|>", "<|endoftext|>"]
             .iter()
@@ -277,7 +277,7 @@ impl Cleaner {
     }
 
     fn clean_part(&self, transcript: &str, style: &Style) -> String {
-        let _team = crate::cpu::enter(crate::Spread::OneCache);
+        let _team = crate::cpu::enter(crate::Spread::AllCores);
         let control = format!(
             "[Styling: {}] [Structure: {}] [Context: {}]",
             style.styling.name(),
@@ -287,7 +287,8 @@ impl Cleaner {
         // The Qwen3 chat template with thinking off, as the model was trained.
         // The transcript is plain text: a spoken "<|im_end|>" cannot end the turn.
         let mut ids = self.bpe.encode(&format!("{}{control}\n", system_prefix()));
-        ids.extend(self.bpe.encode_plain(transcript));
+        let transcript_ids = self.bpe.encode_plain(transcript);
+        ids.extend_from_slice(&transcript_ids);
         ids.extend(
             self.bpe
                 .encode("<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"),
@@ -295,9 +296,13 @@ impl Cleaner {
         // Clean text is about as long as the transcript; lists and email
         // layout add a little.
         let budget = (transcript.len() / 2 + 64).min(1024);
-        let out = self
-            .model
-            .generate(&ids, Some(&self.system), budget, &self.stop);
+        let out = self.model.generate_with_lookup(
+            &ids,
+            Some(&self.system),
+            budget,
+            &self.stop,
+            &transcript_ids,
+        );
         self.bpe.decode(&out).trim().to_string()
     }
 }

@@ -10,6 +10,7 @@ use super::Noise;
 use crate::audio::stft::Stft;
 use crate::config::Json;
 use crate::cpu::{activation, buf::Buf, team, tensors::Tensors};
+use crate::layers::{add_into, balanced_chunk, scale_all};
 use crate::tts::conv::{Conv1d, Upsample};
 
 /// The source: the harmonics of F0 (the fundamental and 8 overtones).
@@ -274,27 +275,49 @@ impl Generator {
         }
         let (weights, bias) = (&self.merge.0, self.merge.1);
         let mut out = vec![0.0f32; samples];
-        let mut draws = vec![0.0f32; samples * HARMONICS];
-        if noise > 0.0 {
-            draws.iter_mut().for_each(|v| *v = rng.normal() * noise);
-        }
+        let draws = if noise > 0.0 {
+            let mut d = vec![0.0f32; samples * HARMONICS];
+            d.iter_mut().for_each(|v| *v = rng.normal() * noise);
+            d
+        } else {
+            Vec::new()
+        };
+        let has_noise = !draws.is_empty();
         let draws = &draws;
-        team::chunks_mut(&mut out, 4096, |chunk, block| {
+        let chunk = balanced_chunk(samples, 4096);
+        team::chunks_mut(&mut out, chunk, |block_idx, block| {
+            let base = block_idx * chunk;
             for (j, o) in block.iter_mut().enumerate() {
-                let i = chunk * 4096 + j;
-                let real = (step * (i as f32 + 0.5) - 0.5).max(0.0);
-                let i0 = real as usize;
-                let i1 = if i0 < frames - 1 { i0 + 1 } else { i0 };
-                let l1 = real - i0 as f32;
-                let l0 = 1.0 - l1;
+                let i = base + j;
                 let voiced = at(i) > VOICED;
-                let amp = if voiced { NOISE_STD } else { SINE_AMP / 3.0 };
                 let mut mixed = bias;
-                for h in 0..HARMONICS {
-                    let p = l0 * phase[i0 * HARMONICS + h] + l1 * phase[i1 * HARMONICS + h];
-                    let sine = p.sin() * SINE_AMP;
-                    let value = if voiced { sine } else { 0.0 } + amp * draws[i * HARMONICS + h];
-                    mixed += weights[h] * value;
+                if voiced {
+                    let real = (step * (i as f32 + 0.5) - 0.5).max(0.0);
+                    let i0 = real as usize;
+                    let i1 = if i0 < frames - 1 { i0 + 1 } else { i0 };
+                    let l1 = real - i0 as f32;
+                    let l0 = 1.0 - l1;
+                    let p0 = &phase[i0 * HARMONICS..][..HARMONICS];
+                    let p1 = &phase[i1 * HARMONICS..][..HARMONICS];
+                    if has_noise {
+                        let dr = &draws[i * HARMONICS..][..HARMONICS];
+                        for h in 0..HARMONICS {
+                            let p = l0 * p0[h] + l1 * p1[h];
+                            let value = p.sin() * SINE_AMP + NOISE_STD * dr[h];
+                            mixed += weights[h] * value;
+                        }
+                    } else {
+                        for h in 0..HARMONICS {
+                            let p = l0 * p0[h] + l1 * p1[h];
+                            mixed += weights[h] * (p.sin() * SINE_AMP);
+                        }
+                    }
+                } else if has_noise {
+                    let amp = SINE_AMP / 3.0;
+                    let dr = &draws[i * HARMONICS..][..HARMONICS];
+                    for h in 0..HARMONICS {
+                        mixed += weights[h] * (amp * dr[h]);
+                    }
                 }
                 *o = mixed;
             }
@@ -337,18 +360,18 @@ impl Generator {
                 length += 1;
             }
             debug_assert_eq!(length, harmonic_frames);
-            team::chunks_mut(&mut up, 8192, |index, part| {
-                for (v, h) in part.iter_mut().zip(&harmonic[index * 8192..]) {
-                    *v += h;
-                }
-            });
-            let mut sum = Buf::zeroed(up.len());
+            add_into(&mut up, &harmonic);
+            drop(harmonic);
+            let mut sum: Option<Buf> = None;
             for block in &stage.blocks {
                 let y = block.forward(&up, length, style);
-                sum.iter_mut().zip(y.iter()).for_each(|(s, v)| *s += v);
+                match &mut sum {
+                    None => sum = Some(y),
+                    Some(acc) => add_into(acc, &y),
+                }
             }
-            let inv = 1.0 / stage.blocks.len() as f32;
-            sum.iter_mut().for_each(|v| *v *= inv);
+            let mut sum = sum.unwrap_or_else(|| Buf::zeroed(up.len()));
+            scale_all(&mut sum, 1.0 / stage.blocks.len() as f32);
             x = sum;
         }
         let post = self.post.forward(&x, length, Some(FINAL_SLOPE));

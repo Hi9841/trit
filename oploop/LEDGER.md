@@ -3876,3 +3876,330 @@ Gates verified: `cargo fmt --all --check`, `cargo clippy --workspace --all-targe
 ARM64/x64 macOS, `trit doctor`, `trit skill --check skill/SKILL.md --check-docs docs/reference.md --check-catalog site/catalog.json`,
 `bench/paths.py` (Redux, Unified Q8_0, Moonshine tiny, Whisper tiny), `TRIT_KERNELS=v2` parity across all four models,
 Whisper auto-language and `--dictionary` parity, and Parakeet Redux `f16`/`int8`/`f32` precision parity.
+
+### Memory-latency and macOS / Mac CPU pass (`ac71cef`+)
+
+Motivated by cache-locality / memory-latency principles (eliminating strided cold-key reads,
+second full-buffer passes, per-token KV re-allocation, false sharing on contended pool atomics,
+and macOS/Apple Silicon page/cache mismatches):
+
+- **Tile-width contiguous attention strips (`src/cpu/fgemm.rs`, `src/layers.rs`)**:
+  replaced fixed 32-column AVX-512-only `nn_strips()` with `nn_strip_cols()` returning `32` on
+  AVX-512 and `16` on AVX2 and ARM64 NEON (matching each level's tile width so every strip row is
+  read sequentially with zero skipped bytes; 32-col strips on AVX2 caused a +7.5 % Whisper regression
+  by skipping every other 64-byte line, while 16-col strips cut AVX2 cold cross-attention
+  `kernel_bench attention all 5 1500 384 6 4 cold` median from `77.20 us` to `32.60 us`, 2.37x).
+- **Fused Int8 bias epilogue across all first-set paths (`src/cpu/int8.rs`)**:
+  `Int8::adds_bias()` now covers `Vnni256Vex`, `Vnni256Evex`, `Avx2`, `NeonMmla`, `NeonDot`,
+  `Neon`, and `Scalar` in addition to `Vnni512`, eliminating the second memory pass and team
+  barrier on biased Int8 layers. Also pooled `Paired.scales` in `PAIRED` on `aarch64` `NeonMmla`.
+- **128-byte cache-line padding in `team::Shared` (`src/cpu/team.rs`)**:
+  separated `claim`, `done`, `parked`, and read-mostly dispatch atomics (`generation`, `job`,
+  `collect_gen`, `rest`, `active`) onto distinct 128-byte lines (covering both 64 B x86 and
+  128 B Apple Silicon lines).
+- **Single-token `attention_steps` and `F16` matvec routing (`src/models/parts/causal_lm.rs`,
+  `src/models/families/moonshine.rs`, `src/cpu/half.rs`, `src/cpu/gemm.rs`)**:
+  single-token `CausalLm` / `Moonshine::step` decode uses `attention_steps` (one team step and
+  thread-local scratch instead of two `Buf::scratch` pool buffers + two barriers), and
+  `Dense::forward` routes `Weights::F16` with `rows == 1 && !relu && k % 16 == 0` through
+  `half::matvec_slice` (8-row tiles and `<= 2 * threads` tasks instead of 66-col `fgemm` blocks).
+- **Apple Silicon & macOS (`src/cpu/fgemm.rs`, `src/cpu/half.rs`, `src/cpu/kernels.rs`,
+  `src/cpu/store.rs`, `src/cpu/team.rs`, `src/locate.rs`, `src/cli/doctor.rs`)**:
+  in-tile f16 widening and `5x4` NEON tiles in `fgemm::neon`, `f16x8` (`vld1q_u16` + `fcvtl`/`fcvtl2`)
+  and 8-row tiles in `half::neon_rows`, hardware `fcvt` Q8_0 scale rounding on `aarch64`, real
+  `sysconf(_SC_PAGESIZE)` (16 KB on Apple Silicon) and `libc::mincore` residency probing in
+  `store.rs`, `libc::statfs` `MNT_LOCAL` guard on macOS, 128-byte cache-write alignment (keeping
+  64-byte read compatibility), macOS QoS relative-priority preservation, `~/Library/Application Support/TDT/models`
+  lookup, and architecture-accurate `trit doctor` scalar warning.
+- **Rejected experiments (reverted)**:
+  - `Quantized` 4 KB row-stride padding for `k % 2048 == 0`: null (`B/A 0.999`, `p = 0.22` on
+    Parakeet Unified Q8_0; `B/A 1.000`, `p = 0.59` on Parakeet Redux).
+  - Software `_mm_prefetch` inside `half::avx512_tile`: null (`B/A 1.001`, `p = 0.055` on Redux;
+    `B/A 1.002`, `p = 0.08` on S1-mini; Zen 4 hardware stream prefetcher already saturates it).
+
+Cumulative interleaved A/B vs `ac71cef` (`oploop/ab.py`, 3 rounds each, Ryzen 9 7950X3D):
+
+| Journey | A -> B median ms | Per-clip B/A (paired p) | CPU B/A | Errors (A / B) | Texts differing |
+|---|---:|---:|---:|---:|---:|
+| Parakeet Redux `clean,other` (AVX-512, 400) | 30.2 -> 30.3 | 1.001 (0.027) | 0.971 | 81, 172 / 81, 172 | 0 / 400 |
+| Whisper tiny `clean` (AVX-512, 200; 2 sweeps, bimodal) | 36.3 -> 31.8 / 34.3 -> 36.2 | 0.890 / 1.049 | 0.877 / 1.064 | 231 / 231 | 0 / 200 |
+| Whisper tiny `clean` (`TRIT_ISA=avxvnni`, 200) | 40.6 -> 35.4 | 0.876 (1.5e-34) | 0.870 | 231 / 231 | 0 / 200 |
+| Whisper tiny `clean` (`TRIT_ISA=avx2`, 200) | 54.8 -> 50.8 | 0.935 (5.1e-34) | 0.939 | 228 / 232 | 12 / 200* |
+| Moonshine tiny `clean` (`TRIT_ISA=avx2`, 200) | 24.6 -> 22.9 | 0.919 (2.0e-31) | 0.860 | 133 / 133 | 0 / 200 |
+| S1-mini `--cleanup` (AVX-512, 62 cases) | 186.4 -> 180.6 | 0.986 (1.6e-11) | n/a | 25 / 25 | 0 / 62 |
+
+`*` AVX2 Whisper tail columns (`1488..1500` of `1500`) now use FMA (`_mm256_fmadd_ps`) instead of
+non-FMA scalar, matching AVX-512's `kernel_bench attention` hash (`ca9dcc43d8660296`) bit-for-bit.
+ARM64/macOS paths were cross-verified with `cargo clippy --target aarch64-apple-darwin` and
+`x86_64-apple-darwin` (`-D warnings`, 0 warnings); native Apple Silicon runtime was not timed on
+this Windows host.
+
+### Portable WGSL GPU kernel autoresearch pass (`ac71cef`+)
+
+Applied roofline/timestamp-driven iteration (`TRIT_GPU_PROFILE=1` on RTX 4090 Vulkan, 128 SMs,
+49,152 B shared memory, `SHADER_F16`) keeping all WGSL shaders strictly portable across Vulkan,
+DX12, and Apple Silicon Metal (`<= 18.4 KB` workgroup storage, well under Metal's 32,768 B limit,
+32-thread warp/simdgroup width where applicable, and `unpack` fallback when `SHADER_F16` is absent):
+
+- **Baseline GPU profile (48.4 s clip, RTX 4090 Vulkan):**
+  - `parakeet-tdt-0.6b-v3` (F16): `383.2 ms` GPU (`gemm 362.3`, `rel 8.7`, `attn 8.5`), `508.1 ms` wall.
+  - `parakeet-redux` (Ternary): `96.5 ms` GPU (`gemm 75.2`, `rel 8.9`, `attn 8.6`), `187.3 ms` wall;
+    10.6 s clip `30.6 ms` GPU (`gemm 26.4`, `rel 0.9`, `attn 0.6`).
+- **H1 (`tiled_f16.wgsl`, `tiled_f16_unpack.wgsl`, `tiled_f32.wgsl`):** `64x64` (`16x16` threads,
+  `4x4` outputs/thread, `BK = 32`, `18,432 B` smem) replacing `16x16` F16/F32 GEMM (`0.6b-v3`
+  `gemm` `362.3 -> 40.5 ms`, 8.95x).
+- **H2 (`quantize_group128.wgsl` + `tiled_ternary.wgsl`):** decoupled group-128 activation
+  quantization into a dedicated 32-thread (1 warp / 1 Apple simdgroup) `vec4<f32>` pass so each
+  activation is quantized once instead of once per N-tile, paired with a `32x64` (`16x8` = 128 threads,
+  `4x4`/thread, `13,824 B` smem) ternary kernel where each thread decodes 1 `u32` code word (zero
+  redundant code/scale loads, 2x more M-tiles on short clips).
+- **H3 (`attn_weighted_sum.wgsl`):** tiled `32x64` (`16x16` threads, `BK = 32`, `13,312 B` smem)
+  reusing softmax weights across 64 dims and values across 32 queries (`8.6 -> 1.1-1.3 ms`, ~6.6x).
+- **H4 (`rel_pos_scores.wgsl`):** tiled `32x64` (`16x16` threads, `BK = 16`, `17,840 B` smem) with
+  tail handling for any `hd` and separate `c`/`p` accumulators matching baseline `(c + p) * scale`
+  summation order (`8.9 -> 2.1-2.6 ms`, ~3.4x).
+- **H5 + H7 (`tiled_f16_vec4.wgsl`, `tiled_f16_unpack_vec4.wgsl`, `tiled_f32_vec4.wgsl`):**
+  fast `k % 4 == 0` `32x64` (`16x8` = 128 threads, `4x4`/thread) kernels using 128-bit `vec4<f32>`
+  `x` loads, `vec4<f16>` in workgroup storage (`9,216 B` total -> 5 WGs/SM on RTX 4090, 3 WGs/core
+  on Metal), and `fma()` (`mad4`) accumulation (`0.6b-v3` 60 s window `gemm` `40.5 -> 25.6-26.8 ms`,
+  total GPU `32.0-34.1 ms`, 3 long clips 210.8 s in `0.34 s` = `625x` realtime; `tiled_ternary.wgsl`
+  retains `dot()` to stay bit-exact with baseline's group-128 quantized rounding).
+- **Rejected experiments (reverted):**
+  - **H6 (64-thread `(8, 8, 1)` K-major XOR-swizzled `4x8` GEMM):** regressed `gemm` by +22 to +73 %
+    (`29.5 -> 40.1 ms` long, `17.0 -> 29.6 ms` short on `0.6b-v3`) because 2 warps/WG left half of
+    each 4-scheduler SM idle on short/medium clips and added global-load transpose overhead.
+  - **Dropping group-128 quantization on GPU ternary:** degraded `parakeet-redux` accuracy
+    (`clean 81 -> 82`, `other 172 -> 177`, 19/400 diffs) because Redux is QAT-trained with group-128
+    activation quantization.
+- **Adversarial audit & safety fixes (`src/gpu/mod.rs`):** replaced WGSL `select(..., buf[idx], cond)`
+  with `if (cond)` across all tiled shaders (preventing unconditional OOB reads on the 16-byte dummy
+  bias buffer and edge rows), added `gpu_pipelines_and_edge_shapes` testing `f32`, `f16`, and
+  `ternary` across `k % 4 == 0` and `k % 4 != 0` odd shapes, all 4 `(bias, relu)` flags, `-0.0`,
+  all-zero rows, and pooled buffer reuse.
+
+Interleaved end-to-end GPU A/B vs baseline (`oploop/ab.py`, `TRIT_DEVICE=gpu`, 3 rounds each, RTX 4090 Vulkan):
+
+| Journey | A -> B median ms | Per-clip B/A (paired p) | Round wall s (A -> B, B/A) | Errors (A / B) | Texts differing |
+|---|---:|---:|---:|---:|---:|
+| Parakeet TDT 0.6B v3 `long-clean` (40) | 696.6 -> 146.3 | 0.206 (1.8e-12) | 28.67 -> 6.02 (0.210) | 164 / 164 | 0 / 40 |
+| Parakeet TDT 0.6B v3 `clean` (200) | 61.0 -> 23.9 | 0.386 (3.0e-34) | 13.95 -> 5.21 (0.374) | 61 / 61 | 0 / 200 |
+| Parakeet Redux `long-clean` (40) | 213.8 -> 135.5 | 0.621 (2.7e-09) | 8.76 -> 5.64 (0.644) | 184 / 184 | 0 / 40 |
+| Parakeet Redux `clean,other` (400) | 24.5 -> 22.0 | 0.891 (2.7e-51) | 10.60 -> 9.20 (0.868) | 81, 172 / 81, 172 | 0 / 400 |
+| Whisper tiny `clean` (200) | 72.7 -> 58.0 | 0.791 (1.4e-34) | 15.08 -> 12.18 (0.808) | 227 / 227 | 0 / 200 |
+| Moonshine tiny `clean` (200) | 21.6 -> 18.9 | 0.869 (4.5e-33) | 5.69 -> 4.90 (0.862) | 133 / 133 | 0 / 200 |
+
+### Cross-platform CPU kernel autoresearch pass (`ac71cef`+)
+
+Roofline-driven CPU optimization pass (`--features profile` on Ryzen 9 7950X3D across AVX-512,
+`TRIT_ISA=avxvnni`, and `TRIT_ISA=avx2`, plus macOS `aarch64-apple-darwin` and
+`x86_64-apple-darwin` cross-compiled with `clippy -D warnings`):
+
+- **C1 (`src/cpu/kernels.rs`, `src/cpu/isa.rs`):**
+  - AVX2 ternary (`avx2_tile`): replaced per-`k4` `vpmaddwd + vpaddd` with overflow-free `i16`
+    group accumulation (`|sum| <= 32 * 508 = 16,256 <= 32,767`, 1 `vpmaddwd` per 128-value group)
+    and 2-block x 4-frame tiles (`14 <= 16` YMMs), plus SIMD horizontal reductions in `quantize_avx2`.
+  - AVX-VNNI 256-bit ternary (`Isa::AvxVnniVex`, `Isa::AvxVnniEvex`): added 2-block x 4-frame
+    256-bit `vpdpbusd` ternary paths (`36.0 ms` vs `58.1 ms` pre-change AVX2 on `parakeet-redux`
+    for Intel 12th/13th/14th/Core Ultra CPUs without AVX-512).
+  - AVX-512 ternary (`vnni_tile`): kept spill-free `F = 6` (`30 <= 32` ZMMs), pre-loaded `-q.sums`,
+    held all 8 ZMM vectors in registers for 128-value `quantize_avx512`, and replaced fixed
+    8-row `Quantized::grouped` chunking with balanced thread partitioning.
+  - Apple Silicon / ARM64 ternary (`Isa::NeonMmla`, `neon_tile`, `quantize_neon`): added Armv8.6
+    `smmla` ternary path (`[n/8][k/32][4][16]` 2-bit layout, `P = 4` = 8 frames, reusing
+    `int8::paired`), widened `sdot`/NEON ternary tiles from `F = 4` to `F = 8`, and 4-way unrolled
+    `quantize_neon`.
+- **C2 (`src/cpu/fgemm.rs`, `src/cpu/half.rs`):**
+  - Bit-exact vectorized horizontal reductions: `hsum4` using base `avx512f` `_mm512_extractf64x4_pd`
+    (fixing an initial `_mm512_extractf32x8_ps` `avx512dq` mismatch caught via `--emit=asm` that
+    had emitted 152 out-of-line `call` + `vzeroupper` pairs), AVX2 `hsum4` (also removing stack
+    store-load stalls in `half::avx2_tile`), and ARM64 NEON `vpaddq_f32` + `vst1q_f32` in
+    `fgemm::neon::tile` and `half::neon_tile`.
+  - Widened `fgemm::avx512` to `4x4` and `5x4` tiles when `!k.is_multiple_of(512)` (no 4 KB L1d
+    set aliasing on `k = 128, 256, 288, 384`).
+  - Added `12x32` (`pair_full::<12>`, 27 ZMMs) and `6x64` (`quad::<6>`, 29 ZMMs) broadcast tiles
+    in `fgemm::nn_avx512` and explicit `vld1q_dup_f32` in `fgemm::nn_neon`.
+- **C3 + C5 (`src/cpu/int8.rs`):**
+  - Replaced runtime-bounded `vnni256_task!` with `const F` 2-block x 4-frame `define_vnni256!`
+    tiles (`11 <= 16` YMMs) + 2-chain single-frame fast path + L1d K-blocking (`K_BYTES = 1024`,
+    16 KB weights) for `k >= 2048`.
+  - Widened `int8::avx2_tile` to 2-block x 4-frame (`15 <= 16` YMMs).
+  - Added L1d-resident K-blocking (`K_BYTES = 512`, 16 KB weights, `STRIP = 48`) to `Int8::vnni_task`
+    for `k >= 1024` (`const FIRST/LAST` zero-branch tiles, bit-exact group order).
+  - Widened ARM64 `int8::mmla_task` (`P = 4` = 8 frames) and `int8::neon_task` (`F = 8`) for
+    `group >= 128`.
+  - Added path-aware inline thresholds (`1M` MACs on VNNI-512, `500K` on VNNI-256/`i8mm`, `250K`
+    otherwise) so Whisper's `384x384 x 5` products run inline instead of waking 16 threads.
+- **C4a + C5 (`src/cpu/activation.rs`, `src/layers.rs`, `src/models/parts/fastconformer.rs`):**
+  - Interleaved `exp4` inside `avx512::exp_sums`, replaced closure in `avx512::columns` with a
+    macro, added 2-wide `avx2::compute2`/`exp2`, 4-way `avx2::max` and `neon::max`, and 4-way
+    `Op::Gelu` in `neon::compute4`.
+  - Balanced task chunking (`balanced_rows`/`balanced_chunk`, capping to `2 * threads` or
+    `4 * threads` on heterogeneous CPUs), removed single-threaded `Buf::zeroed` in
+    `Block::convolution`, added `multiversion!` on attention bias/position-scale, softmax scaling,
+    and elementwise ops, plus 8-frame blocked `v_t` transpose and sequential-store `fused_convs`
+    transpose.
+- **Rejected experiments (reverted):**
+  - `F = 10` in AVX-512 ternary `vnni_tile` (`+2.0%` wall regression from spilling 20 `acc` ZMMs
+    per group).
+  - K-blocking in AVX-512 ternary `vnni_task` (`+0.8%` on `long-clean` because 2-bit weights
+    already fit in L2).
+  - Raising `fgemm::MIN_COL_WORK` from `32_768` to `131_072` (`+3.6%` on `moonshine-tiny` AVX2
+    by under-utilizing threads on `288x288 x 5`).
+
+Cumulative interleaved end-to-end CPU A/B vs pre-change baseline (`oploop/ab.py`, `TRIT_DEVICE=cpu`,
+3 rounds each, Ryzen 9 7950X3D):
+
+| Journey | ISA | A -> B median ms | Per-clip B/A (paired p) | Round wall s (A -> B, B/A) | CPU s (A -> B, B/A) | Errors (A / B) | Texts differing |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Parakeet TDT 0.6B v3 `clean` (200) | `avxvnni` | 46.9 -> 35.0 | 0.743 (1.4e-34) | 12.16 -> 9.00 (0.740) | 97.8 -> 71.5 (0.732) | 58 / 58 | 0 / 200 |
+| Parakeet Redux `clean` (200) | `avx2` | 58.1 -> 45.8 | 0.798 (1.4e-34) | 14.80 -> 11.60 (0.784) | 118.9 -> 93.5 (0.787) | 81 / 81 | 0 / 200 |
+| Parakeet TDT 0.6B v3 `clean` (200) | AVX-512 | 34.4 -> 33.5 | 0.932 (1.2e-14) | 8.78 -> 8.56 (0.974) | 70.0 -> 68.2 (0.975) | 58 / 58 | 0 / 200 |
+| Parakeet Redux `long-clean,long-other` (80) | AVX-512 | 456.6 -> 443.2 | 0.968 (5.1e-13) | 39.54 -> 37.99 (0.961) | 314.9 -> 302.5 (0.961) | 187, 479 / 187, 479 | 0 / 80 |
+| Moonshine tiny `clean` (200) | `avx2` | 22.9 -> 22.0 | 0.965 (8.5e-28) | 5.94 -> 5.75 (0.967) | 46.8 -> 45.8 (0.979) | 133 / 133 | 0 / 200 |
+| Parakeet TDT 0.6B v3 `clean` (200) | `avx2` | 76.4 -> 73.6 | 0.968 (2.8e-24) | 19.41 -> 18.92 (0.975) | 154.1 -> 151.6 (0.984) | 59 / 59 | 0 / 200 |
+| Moonshine tiny `clean` (200) | AVX-512 | 18.0 -> 17.0 | 0.979 (1.9e-20) | 4.59 -> 4.50 (0.980) | 36.8 -> 36.4 (0.987) | 133 / 133 | 0 / 200 |
+| Parakeet Redux `clean,other` (400) | AVX-512 | 30.2 -> 29.8 | 0.983 (3.0e-24) | 15.40 -> 15.25 (0.990) | 124.2 -> 122.4 (0.985) | 81, 172 / 81, 172 | 0 / 400 |
+| Parakeet 110M Q8_0 `clean` (200) | AVX-512 | 11.1 -> 11.3 | 0.987 (0.04) | 2.87 -> 2.91 (1.014) | 22.9 -> 22.6 (0.989) | 91 / 91 | 0 / 200 |
+| Whisper tiny `clean` (200)* | AVX-512 | 36.5 -> 32.3 | 0.902 (6.4e-34) | 7.90 -> 6.93 (0.878) | 124.4 -> 109.5 (0.880) | 231 / 231 | 0 / 200 |
+
+(*`whisper-tiny` runs `Spread::AllCores` across both CCDs of the 7950X3D and exhibits bimodal
+~32 ms vs ~36 ms rounds depending on calling-thread CCD placement; best-round medians were
+32.6 ms A vs 31.9 ms B. Apple Silicon ARM64 `i8mm`/`sdot`/NEON changes were verified via
+cross-target `aarch64-apple-darwin` Clippy `-D warnings` and were not timed on Mac hardware.)
+
+#### Follow-up CPU pass (`C6b` + `C8-half`)
+
+- **C6b (`src/cpu/fgemm.rs`):**
+  - Widened AVX-512 `fgemm::avx512` to `6 x 4` tiles (`29 <= 32` ZMMs, cutting weight loads and
+    f16 conversions by 33 %) when `!k.is_multiple_of(512)` with runt-free tail stepping
+    (`m = 16 -> 6,6,4`, `m = 32 -> 6,6,6,6,4,4`), folded `avx512::hsum4` in 512-bit with base
+    `avx512f` `vshuff32x4` (verified 0 out-of-line SIMD calls across all 46 `fgemm` functions in
+    `--emit=asm`), widened `nn_avx512::columns12` `single`/`half` tails to `by_rows12!`, widened
+    ARM64 `fgemm::neon` to `6 x 4` (`29 <= 32` NEON regs), and used `vld1q_dup_f32` in
+    `nn_neon::tile8`/`tile4`.
+  - Interleaved A/B vs pre-C6 baseline (`oploop/ab.py`, `TRIT_DEVICE=cpu`, 3 rounds, 0 diffs):
+    - `moonshine-tiny` `clean` (200, AVX-512): `18.0 -> 17.3 ms`, per-clip B/A `0.947` (`p = 3.7e-16`),
+      wall B/A `0.965`, CPU B/A `0.954`, errors `133 / 133`, `0 / 200` diffs.
+    - `parakeet-110m-q8` `clean` (200, AVX-512): `11.0 -> 10.9 ms`, CPU B/A `0.929` (`22.6 -> 21.0 s`),
+      errors `91 / 91`, `0 / 200` diffs.
+    - `parakeet-redux` `long-clean` (40, AVX-512): wall B/A `0.977` (`19.58 -> 19.14 s`), CPU B/A
+      `0.976` (`155.9 -> 152.1 s`), errors `187 / 187`, `0 / 40` diffs.
+- **C8-half (`src/cpu/half.rs`):**
+  - Widened `half::avx2_rows` to 8 rows (`10 <= 16` YMMs, dropping to 4 on 4 KB f16 row strides)
+    with two `avx2_hsum4` vector stores.
+  - Interleaved A/B vs C6b (`TRIT_ISA=avx2`, `TRIT_DEVICE=cpu`, 3 rounds, 0 diffs):
+    - `parakeet-redux` `clean` (200, `avx2`): `44.8 -> 44.2 ms`, per-clip B/A `0.990` (`p = 8.8e-14`),
+      wall B/A `0.971` (`11.71 -> 11.37 s`), CPU B/A `0.962` (`92.8 -> 89.3 s`), errors `81 / 81`,
+      `0 / 200` diffs.
+    - `s1-mini` `--cleanup` (62, `avx2`): per-clip B/A `0.996` (`p = 0.0024`), errors `25 / 25`,
+      `0 / 62` diffs.
+- **Rejected experiments (reverted):**
+  - Capping `fgemm::block_counts` to `threads` / `2 * threads` when `no_panel`: `+11.5%` regression
+    on `moonshine-tiny` (`p = 9.1e-31`) from straggler tail latency under coarse waves.
+  - C7 (`src/layers.rs` inlining `attention_steps` `<= 65,536` MACs, strided `V` read, and
+    splitting `HeadMajor::new`): regressed `moonshine-tiny` (`+3.4%` AVX-512, `+5.0%` AVX2) and
+    `whisper-tiny` (`+2.8%` AVX-512) because spinning workers beat single-threaded softmax+matmul
+    and strided `V` touched 8x more cache lines.
+  - C8 `Int8::vnni_task` `F = 4` / `K_BYTES = 1024` for `k % 4096 == 0` and disabling K-blocking
+    for `k < 2048` and `Q8_0`: regressed `parakeet-tdt-0.6b-v3` (`+3.6%`, `p = 1.8e-13`) and
+    `parakeet-110m-q8` (`+1.3%`, `p = 9.2e-09`, CPU `+7.8%`), confirming `K_BYTES = 512` + `F = 6`
+    is faster across all `k >= 1024` shapes.
+
+#### Frontend and voice pass (`C9` + `C10`)
+
+- **C9 (`src/audio/mel.rs`):**
+  - Replaced the 512-point radix-2 complex FFT with a 256-point radix-4 real-to-complex FFT
+    (`Rfft512`, full `f64` precision, contiguous stage twiddles, base-4 digit-reversal packing) and
+    blocked per-bin `normalize` in 16-mel contiguous cache-line blocks in exact frame order with
+    `balanced_rows` and `multiversion!` loops.
+  - Interleaved A/B vs C8-half (`oploop/ab.py`, `TRIT_DEVICE=cpu`, 3 rounds, 0 diffs):
+    - `parakeet-110m-q8` `clean` (200, AVX-512): `11.7 -> 11.3 ms`, per-clip B/A `0.978`
+      (`p = 1.4e-04`), wall B/A `0.967` (`2.91 -> 2.82 s`), errors `91 / 91`, `0 / 200` diffs.
+    - `parakeet-redux` `clean` (200, AVX-512): `32.9 -> 31.4 ms`, per-clip B/A `0.971`
+      (`p = 2.8e-05`), errors `81 / 81`, `0 / 200` diffs.
+    - `parakeet-tdt-0.6b-v3` `clean` (200, AVX-512): `33.4 -> 32.7 ms`, per-clip B/A `0.955`
+      (`p = 1.3e-20`), wall B/A `0.991`, errors `58 / 58`, `0 / 200` diffs.
+    - `parakeet-redux` `long-clean` (40, AVX-512): best round `477.3 -> 453.7 ms`, CPU
+      `157.0 -> 152.2 s`, per-clip B/A `0.779` (`p = 1.8e-11`), errors `187 / 187`, `0 / 40` diffs.
+- **C10 (`src/tts/conv.rs`, `src/audio/stft.rs`):**
+  - Transposed `Depthwise` and `DepthwiseUpsample` weights to tap-major `[tap][channel]` with
+    `multiversion!` leaky/bias/weighted-add/gather helpers, parallelized `Stft::forward` with
+    `balanced_rows`, and reordered `istft_frame_add` to read contiguous `[bin][n]` table rows.
+  - Interleaved synthesis-only A/B via `trit.Voice` (5 sentences, `seed = 7`, 3 rounds):
+    - `kokoro-82m` (`af_heart`): `2886.4 -> 2794.2 ms` (B/A `0.968`, `-3.2%`), bit-exact
+      (`max_diff = 0.0`, `SNR = inf dB`).
+    - `mms-tts-eng` (VITS): `1728.6 -> 1682.2 ms` (B/A `0.973`, `-2.7%`), bit-exact
+      (`max_diff = 0.0`, `SNR = inf dB`).
+- **Rejected experiment (reverted):**
+  - C11 (`src/cpu/half.rs` `HalfTransposed` column-major sparse `joint.head` skipping ReLU zeros):
+    not significant on `parakeet-redux` AVX-512 (`B/A 0.999`, `p = 0.25`), regressed
+    `parakeet-redux` AVX2 (`+2.4%`, `p = 1.1e-05`, wall `+3.1%`, CPU `+3.9%`), and on
+    `parakeet-tdt-0.6b-v3` lost two of three rounds (`32.9 -> 33.7 ms`, `33.6 -> 34.3 ms`) with
+    overall B/A skewed by a single A round spike (`39.1 ms`). Reverted cleanly.
+
+#### S1-mini cleanup thread spread
+
+Keep `Spread::AllCores` for S1-mini. The 151,936 by 1,024 token table streams
+148.4 MiB per generated token. The earlier profile measured 499.9 ms for 164
+table products, or about 51 GB/s for the weight reads alone. More cores can
+service those reads on the two-CCD Ryzen 9 7950X3D. The fused Q8 matrix-vector
+trial did not improve S1-mini on this host and was reverted.
+
+The release FFI comparison used `oploop/ab.py s1-mini ... --cleanup --rounds 5`
+on Windows, with one cache domain for A and all physical cores for B. Each
+round used 62 cases. The keep criteria were consistent round medians, paired
+`p < 0.01`, and exact text parity.
+
+| ISA | A median and range (ms) | B median and range (ms) | Per-case B/A | Paired p |
+|---|---:|---:|---:|---:|
+| AVX-512 | 189.3 (186.8 to 200.9) | 173.0 (170.4 to 176.5) | 0.909 | 7.6e-12 |
+| AVX2 | 202.2 (195.4 to 204.2) | 175.9 (170.0 to 179.5) | 0.875 | 7.6e-12 |
+
+Each of the 620 outputs per ISA matched its baseline case byte for byte.
+Each round had 25 differences from the reference text on both sides.
+Raw samples are in `target/io3-s1-avx512.json` and `target/io3-s1-avx2.json`.
+The cleanup benchmark records wall time. The CPU-time cost and performance
+on other processor topologies are unmeasured.
+
+The review fixed the ARM64 f16 register constraint, GPU ternary fallback
+quantization, first touch of mapped weights, and STFT worker allocations.
+Revyl's virtual Apple M5 Pro passed the release build, Clippy, and 18 unit
+tests. Moonshine tiny produced the same text on the default, scalar, NEON,
+dot-product, and one-thread CPU paths. Parakeet Redux produced the same
+text on CPU and Metal on all three clips. The Metal fallback regression
+test passed. These are functional checks. They do not measure Mac speed.
+Intel macOS passed release Clippy for `x86_64-apple-darwin` on the same VM.
+
+Windows passed release Clippy, 18 unit tests, the Moonshine CPU path check,
+and 150 Moonshine file mutations. Kokoro and VITS each wrote a byte-identical
+WAV for the same passage and seed before and after the review fixes.
+
+The Windows FFI Redux rerun used `runtimes.read_clip` and
+`whisper-normalizer` 0.1.12. CPU and Vulkan both met the error totals of
+81, 172, and 34 on clean, other, and tech. The before and after builds
+matched on all 440 clips on each device in the repeat run. CPU and Vulkan
+differed on 17 clips in both builds. The first pass had one additional
+Vulkan capitalization difference on `4077-13751-0003.wav`. It did not
+recur in 24 calls per binary on that clip or in the repeat run.
+
+#### Batch query heads in decoder attention
+
+S1-mini has 16 query heads and eight key/value heads. Batch both queries
+that use one cache head in `attention_steps`. This lets the existing matrix
+kernels reuse the packed keys and values without changing the cache format
+or the number of worker jobs. In the previous profile, step attention took
+123.7 ms of 2,341 ms, about 5%. The experiment uses the all-core build as
+the control, with the 62 cleanup cases and five rounds per build per pass.
+Keep the change only if the repeat comparison confirms a latency gain and
+all outputs match byte for byte.
+
+| Pass | Control median and range (ms) | Batch median and range (ms) | Median paired latency change | Paired p |
+|---|---:|---:|---:|---:|
+| AVX-512, control first | 172.9 (163.8 to 177.8) | 167.5 (166.5 to 181.5) | -0.85% | 0.0012 |
+| AVX-512, batch first | 165.3 (163.6 to 172.3) | 168.3 (166.3 to 172.7) | +0.35% | 0.058 |
+| AVX2, control first | 170.8 (169.4 to 173.8) | 170.6 (169.8 to 170.8) | +0.25% | 0.0098 |
+
+Reverted the change. The AVX-512 gain did not repeat in reverse order.
+AVX2 regressed on the paired measure. All 1,860 outputs matched their
+control case byte for byte. Raw samples are in `target/io2-s1-avx512.json`,
+`target/io2-s1-avx512-reverse.json`, and `target/io2-s1-avx2.json`.

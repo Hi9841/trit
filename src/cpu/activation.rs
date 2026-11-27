@@ -80,6 +80,12 @@ pub fn max(values: &[f32]) -> f32 {
         #[cfg(target_arch = "x86_64")]
         // SAFETY: the level was detected from the CPU.
         Level::Avx512 => unsafe { avx512::max(values) },
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: the level was detected from the CPU.
+        Level::Avx2 => unsafe { avx2::max(values) },
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: NEON is part of every arm64 CPU.
+        Level::Neon => unsafe { neon::max(values) },
         _ => {
             let (chunks, tail) = values.as_chunks::<16>();
             let mut best = [f32::NEG_INFINITY; 16];
@@ -420,31 +426,116 @@ mod avx512 {
         // A row that is not there is zeros, and its sum is not kept.
         let mut e = [_mm512_setzero_ps(); SIDE];
         let (steps, tail) = (width / 16, width % 16);
-        for step in 0..steps {
-            for r in 0..rows {
-                // SAFETY: row `r` has `width` values, and `step * 16 + 16 <= width`.
-                let at = group.as_mut_ptr().add(r * width + step * 16);
-                e[r] = exp(_mm512_sub_ps(
-                    _mm512_loadu_ps(at),
-                    _mm512_set1_ps(shifts[r]),
-                ));
-                _mm512_storeu_ps(at, e[r]);
+        if rows == SIDE {
+            let sv = [
+                _mm512_set1_ps(shifts[0]),
+                _mm512_set1_ps(shifts[1]),
+                _mm512_set1_ps(shifts[2]),
+                _mm512_set1_ps(shifts[3]),
+                _mm512_set1_ps(shifts[4]),
+                _mm512_set1_ps(shifts[5]),
+                _mm512_set1_ps(shifts[6]),
+                _mm512_set1_ps(shifts[7]),
+            ];
+            let base = group.as_mut_ptr();
+            for step in 0..steps {
+                let off = step * 16;
+                let x0 = [
+                    _mm512_sub_ps(_mm512_loadu_ps(base.add(off)), sv[0]),
+                    _mm512_sub_ps(_mm512_loadu_ps(base.add(width + off)), sv[1]),
+                    _mm512_sub_ps(_mm512_loadu_ps(base.add(2 * width + off)), sv[2]),
+                    _mm512_sub_ps(_mm512_loadu_ps(base.add(3 * width + off)), sv[3]),
+                ];
+                let e0 = exp4(x0);
+                let x1 = [
+                    _mm512_sub_ps(_mm512_loadu_ps(base.add(4 * width + off)), sv[4]),
+                    _mm512_sub_ps(_mm512_loadu_ps(base.add(5 * width + off)), sv[5]),
+                    _mm512_sub_ps(_mm512_loadu_ps(base.add(6 * width + off)), sv[6]),
+                    _mm512_sub_ps(_mm512_loadu_ps(base.add(7 * width + off)), sv[7]),
+                ];
+                let e1 = exp4(x1);
+                for r in 0..4 {
+                    e[r] = e0[r];
+                    e[r + 4] = e1[r];
+                    _mm512_storeu_ps(base.add(r * width + off), e0[r]);
+                    _mm512_storeu_ps(base.add((r + 4) * width + off), e1[r]);
+                }
+                for column in columns(&e) {
+                    sum = _mm256_add_ps(sum, column);
+                }
             }
-            for column in columns(&e) {
-                sum = _mm256_add_ps(sum, column);
+            if tail > 0 {
+                let mask: __mmask16 = ((1u32 << tail) - 1) as u16;
+                let off = steps * 16;
+                let x0 = [
+                    _mm512_sub_ps(_mm512_maskz_loadu_ps(mask, base.add(off)), sv[0]),
+                    _mm512_sub_ps(_mm512_maskz_loadu_ps(mask, base.add(width + off)), sv[1]),
+                    _mm512_sub_ps(
+                        _mm512_maskz_loadu_ps(mask, base.add(2 * width + off)),
+                        sv[2],
+                    ),
+                    _mm512_sub_ps(
+                        _mm512_maskz_loadu_ps(mask, base.add(3 * width + off)),
+                        sv[3],
+                    ),
+                ];
+                let e0 = exp4(x0);
+                let x1 = [
+                    _mm512_sub_ps(
+                        _mm512_maskz_loadu_ps(mask, base.add(4 * width + off)),
+                        sv[4],
+                    ),
+                    _mm512_sub_ps(
+                        _mm512_maskz_loadu_ps(mask, base.add(5 * width + off)),
+                        sv[5],
+                    ),
+                    _mm512_sub_ps(
+                        _mm512_maskz_loadu_ps(mask, base.add(6 * width + off)),
+                        sv[6],
+                    ),
+                    _mm512_sub_ps(
+                        _mm512_maskz_loadu_ps(mask, base.add(7 * width + off)),
+                        sv[7],
+                    ),
+                ];
+                let e1 = exp4(x1);
+                for r in 0..4 {
+                    e[r] = e0[r];
+                    e[r + 4] = e1[r];
+                    _mm512_mask_storeu_ps(base.add(r * width + off), mask, e0[r]);
+                    _mm512_mask_storeu_ps(base.add((r + 4) * width + off), mask, e1[r]);
+                }
+                for column in &columns(&e)[..tail] {
+                    sum = _mm256_add_ps(sum, *column);
+                }
             }
-        }
-        if tail > 0 {
-            let mask: __mmask16 = ((1u32 << tail) - 1) as u16;
-            for r in 0..rows {
-                // SAFETY: the mask keeps the load and the store inside row `r`.
-                let at = group.as_mut_ptr().add(r * width + steps * 16);
-                let v = _mm512_maskz_loadu_ps(mask, at);
-                e[r] = exp(_mm512_sub_ps(v, _mm512_set1_ps(shifts[r])));
-                _mm512_mask_storeu_ps(at, mask, e[r]);
+        } else {
+            for step in 0..steps {
+                for r in 0..rows {
+                    // SAFETY: row `r` has `width` values, and `step * 16 + 16 <= width`.
+                    let at = group.as_mut_ptr().add(r * width + step * 16);
+                    e[r] = exp(_mm512_sub_ps(
+                        _mm512_loadu_ps(at),
+                        _mm512_set1_ps(shifts[r]),
+                    ));
+                    _mm512_storeu_ps(at, e[r]);
+                }
+                for column in columns(&e) {
+                    sum = _mm256_add_ps(sum, column);
+                }
             }
-            for column in &columns(&e)[..tail] {
-                sum = _mm256_add_ps(sum, *column);
+            if tail > 0 {
+                let mask: __mmask16 = ((1u32 << tail) - 1) as u16;
+                for r in 0..rows {
+                    // SAFETY: the mask keeps the load and the store inside row `r`.
+                    let at = group.as_mut_ptr().add(r * width + steps * 16);
+                    let v = _mm512_maskz_loadu_ps(mask, at);
+                    e[r] = exp(_mm512_sub_ps(v, _mm512_set1_ps(shifts[r])));
+                    _mm512_mask_storeu_ps(at, mask, e[r]);
+                }
+                for column in &columns(&e)[..tail] {
+                    sum = _mm256_add_ps(sum, *column);
+                }
             }
         }
         _mm256_storeu_ps(held.as_mut_ptr(), sum);
@@ -476,15 +567,19 @@ mod avx512 {
         let first = _mm512_setr_epi32(0, 1, 2, 3, 16, 17, 18, 19, 4, 5, 6, 7, 20, 21, 22, 23);
         let second =
             _mm512_setr_epi32(8, 9, 10, 11, 24, 25, 26, 27, 12, 13, 14, 15, 28, 29, 30, 31);
-        let high = |v: __m512| _mm256_castpd_ps(_mm512_extractf64x4_pd::<1>(_mm512_castps_pd(v)));
+        macro_rules! high {
+            ($v:expr) => {
+                _mm256_castpd_ps(_mm512_extractf64x4_pd::<1>(_mm512_castps_pd($v)))
+            };
+        }
         let mut columns = [_mm256_setzero_ps(); 16];
         for b in 0..4 {
             let low = _mm512_permutex2var_ps(four[b], first, four[4 + b]);
             let rest = _mm512_permutex2var_ps(four[b], second, four[4 + b]);
             columns[b] = _mm512_castps512_ps256(low);
-            columns[4 + b] = high(low);
+            columns[4 + b] = high!(low);
             columns[8 + b] = _mm512_castps512_ps256(rest);
-            columns[12 + b] = high(rest);
+            columns[12 + b] = high!(rest);
         }
         columns
     }
@@ -625,9 +720,46 @@ mod avx2 {
     use std::arch::x86_64::*;
 
     #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn max(values: &[f32]) -> f32 {
+        let (chunks, tail) = values.as_chunks::<8>();
+        let (fours, rest) = chunks.as_chunks::<4>();
+        let mut best = [_mm256_set1_ps(f32::NEG_INFINITY); 4];
+        for four in fours {
+            for (best, chunk) in best.iter_mut().zip(four) {
+                *best = _mm256_max_ps(_mm256_loadu_ps(chunk.as_ptr()), *best);
+            }
+        }
+        for chunk in rest {
+            best[0] = _mm256_max_ps(_mm256_loadu_ps(chunk.as_ptr()), best[0]);
+        }
+        let m = _mm256_max_ps(
+            _mm256_max_ps(best[0], best[1]),
+            _mm256_max_ps(best[2], best[3]),
+        );
+        let m4 = _mm_max_ps(_mm256_extractf128_ps::<1>(m), _mm256_castps256_ps128(m));
+        let m2 = _mm_max_ps(_mm_movehl_ps(m4, m4), m4);
+        let m1 = _mm_max_ss(_mm_shuffle_ps::<1>(m2, m2), m2);
+        let mut out = _mm_cvtss_f32(m1);
+        for &v in tail {
+            out = out.max(v);
+        }
+        out
+    }
+
+    #[target_feature(enable = "avx2,fma")]
     pub unsafe fn apply(values: &mut [f32], op: Op) {
         let (chunks, tail) = values.as_chunks_mut::<8>();
-        for chunk in chunks {
+        let (pairs, rest) = chunks.as_chunks_mut::<2>();
+        for pair in pairs {
+            let v = [
+                _mm256_loadu_ps(pair[0].as_ptr()),
+                _mm256_loadu_ps(pair[1].as_ptr()),
+            ];
+            let out = compute2(v, op);
+            _mm256_storeu_ps(pair[0].as_mut_ptr(), out[0]);
+            _mm256_storeu_ps(pair[1].as_mut_ptr(), out[1]);
+        }
+        for chunk in rest {
             let v = _mm256_loadu_ps(chunk.as_ptr());
             _mm256_storeu_ps(chunk.as_mut_ptr(), compute(v, op));
         }
@@ -650,8 +782,9 @@ mod avx2 {
         for chunk in chunks {
             let a = _mm256_sub_ps(_mm256_loadu_ps(chunk.as_ptr()), shift_v);
             let b = _mm256_sub_ps(_mm256_loadu_ps(chunk.as_ptr().add(8)), shift_v);
-            lo = _mm256_add_ps(lo, exp(a));
-            hi = _mm256_add_ps(hi, exp(b));
+            let [ea, eb] = exp2([a, b]);
+            lo = _mm256_add_ps(lo, ea);
+            hi = _mm256_add_ps(hi, eb);
         }
         let mut lanes = [0.0f32; 16];
         _mm256_storeu_ps(lanes.as_mut_ptr(), lo);
@@ -659,11 +792,10 @@ mod avx2 {
         if !tail.is_empty() {
             let mut padded = [0.0f32; 16];
             padded[..tail.len()].copy_from_slice(tail);
-            let a = exp(_mm256_sub_ps(_mm256_loadu_ps(padded.as_ptr()), shift_v));
-            let b = exp(_mm256_sub_ps(
-                _mm256_loadu_ps(padded.as_ptr().add(8)),
-                shift_v,
-            ));
+            let [a, b] = exp2([
+                _mm256_sub_ps(_mm256_loadu_ps(padded.as_ptr()), shift_v),
+                _mm256_sub_ps(_mm256_loadu_ps(padded.as_ptr().add(8)), shift_v),
+            ]);
             let mut e = [0.0f32; 16];
             _mm256_storeu_ps(e.as_mut_ptr(), a);
             _mm256_storeu_ps(e.as_mut_ptr().add(8), b);
@@ -674,17 +806,120 @@ mod avx2 {
         super::reduce16(lanes)
     }
 
+    /// `compute` on two AVX2 vectors, interleaved step by step to overlap the
+    /// Horner polynomial and `vdivps` latencies while fitting cleanly in 16 YMMs.
     #[target_feature(enable = "avx2,fma")]
-    unsafe fn compute(v: __m256, op: Op) -> __m256 {
+    #[allow(clippy::needless_range_loop)]
+    unsafe fn compute2(v: [__m256; 2], op: Op) -> [__m256; 2] {
+        let zero = _mm256_setzero_ps();
         let one = _mm256_set1_ps(1.0);
-        let neg = |v| _mm256_sub_ps(_mm256_setzero_ps(), v);
         match op {
-            Op::Exp => exp(v),
-            Op::Silu => _mm256_div_ps(v, _mm256_add_ps(one, exp(neg(v)))),
-            Op::Sigmoid => _mm256_div_ps(one, _mm256_add_ps(one, exp(neg(v)))),
+            Op::Exp => exp2(v),
+            Op::Silu => {
+                let e = exp2([_mm256_sub_ps(zero, v[0]), _mm256_sub_ps(zero, v[1])]);
+                [
+                    _mm256_div_ps(v[0], _mm256_add_ps(one, e[0])),
+                    _mm256_div_ps(v[1], _mm256_add_ps(one, e[1])),
+                ]
+            }
+            Op::Sigmoid => {
+                let e = exp2([_mm256_sub_ps(zero, v[0]), _mm256_sub_ps(zero, v[1])]);
+                [
+                    _mm256_div_ps(one, _mm256_add_ps(one, e[0])),
+                    _mm256_div_ps(one, _mm256_add_ps(one, e[1])),
+                ]
+            }
             Op::Tanh => {
                 let two = _mm256_set1_ps(2.0);
-                let e = exp(neg(_mm256_mul_ps(two, v)));
+                let e = exp2([
+                    _mm256_sub_ps(zero, _mm256_mul_ps(two, v[0])),
+                    _mm256_sub_ps(zero, _mm256_mul_ps(two, v[1])),
+                ]);
+                [
+                    _mm256_sub_ps(_mm256_div_ps(two, _mm256_add_ps(one, e[0])), one),
+                    _mm256_sub_ps(_mm256_div_ps(two, _mm256_add_ps(one, e[1])), one),
+                ]
+            }
+            Op::Gelu => {
+                let sign = _mm256_set1_ps(-0.0);
+                let half = _mm256_set1_ps(0.5);
+                let two = _mm256_set1_ps(2.0);
+                let inv_sqrt2 = _mm256_set1_ps(FRAC_1_SQRT_2);
+                let z = [
+                    _mm256_mul_ps(_mm256_andnot_ps(sign, v[0]), inv_sqrt2),
+                    _mm256_mul_ps(_mm256_andnot_ps(sign, v[1]), inv_sqrt2),
+                ];
+                let t = [
+                    _mm256_div_ps(one, _mm256_fmadd_ps(z[0], half, one)),
+                    _mm256_div_ps(one, _mm256_fmadd_ps(z[1], half, one)),
+                ];
+                let mut p = [zero; 2];
+                for c in ERFC {
+                    let c = _mm256_set1_ps(c);
+                    p[0] = _mm256_fmadd_ps(p[0], t[0], c);
+                    p[1] = _mm256_fmadd_ps(p[1], t[1], c);
+                }
+                let e = exp2([
+                    _mm256_fnmadd_ps(z[0], z[0], p[0]),
+                    _mm256_fnmadd_ps(z[1], z[1], p[1]),
+                ]);
+                let mut out = [zero; 2];
+                for i in 0..2 {
+                    let tail = _mm256_mul_ps(t[i], e[i]);
+                    let positive = _mm256_cmp_ps::<_CMP_GE_OQ>(v[i], zero);
+                    let erfc = _mm256_blendv_ps(tail, _mm256_sub_ps(two, tail), positive);
+                    out[i] = _mm256_mul_ps(_mm256_mul_ps(half, v[i]), erfc);
+                }
+                out
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn exp2(mut x: [__m256; 2]) -> [__m256; 2] {
+        let low = _mm256_set1_ps(LOW);
+        let high = _mm256_set1_ps(HIGH);
+        let log2e = _mm256_set1_ps(LOG2E);
+        let ln2_hi = _mm256_set1_ps(LN2_HI);
+        let ln2_lo = _mm256_set1_ps(LN2_LO);
+        x[0] = _mm256_min_ps(_mm256_max_ps(x[0], low), high);
+        x[1] = _mm256_min_ps(_mm256_max_ps(x[1], low), high);
+        let n_int0 = _mm256_cvtps_epi32(_mm256_mul_ps(x[0], log2e));
+        let n_int1 = _mm256_cvtps_epi32(_mm256_mul_ps(x[1], log2e));
+        let n0 = _mm256_cvtepi32_ps(n_int0);
+        let n1 = _mm256_cvtepi32_ps(n_int1);
+        let r0 = _mm256_fnmadd_ps(n0, ln2_lo, _mm256_fnmadd_ps(n0, ln2_hi, x[0]));
+        let r1 = _mm256_fnmadd_ps(n1, ln2_lo, _mm256_fnmadd_ps(n1, ln2_hi, x[1]));
+        let mut p0 = _mm256_setzero_ps();
+        let mut p1 = _mm256_setzero_ps();
+        for c in POLY {
+            let c = _mm256_set1_ps(c);
+            p0 = _mm256_fmadd_ps(p0, r0, c);
+            p1 = _mm256_fmadd_ps(p1, r1, c);
+        }
+        let one = _mm256_set1_ps(1.0);
+        let y0 = _mm256_fmadd_ps(p0, _mm256_mul_ps(r0, r0), _mm256_add_ps(r0, one));
+        let y1 = _mm256_fmadd_ps(p1, _mm256_mul_ps(r1, r1), _mm256_add_ps(r1, one));
+        let bias = _mm256_set1_epi32(127);
+        let two_n0 = _mm256_slli_epi32::<23>(_mm256_add_epi32(n_int0, bias));
+        let two_n1 = _mm256_slli_epi32::<23>(_mm256_add_epi32(n_int1, bias));
+        [
+            _mm256_mul_ps(y0, _mm256_castsi256_ps(two_n0)),
+            _mm256_mul_ps(y1, _mm256_castsi256_ps(two_n1)),
+        ]
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn compute(v: __m256, op: Op) -> __m256 {
+        let zero = _mm256_setzero_ps();
+        let one = _mm256_set1_ps(1.0);
+        match op {
+            Op::Exp => exp(v),
+            Op::Silu => _mm256_div_ps(v, _mm256_add_ps(one, exp(_mm256_sub_ps(zero, v)))),
+            Op::Sigmoid => _mm256_div_ps(one, _mm256_add_ps(one, exp(_mm256_sub_ps(zero, v)))),
+            Op::Tanh => {
+                let two = _mm256_set1_ps(2.0);
+                let e = exp(_mm256_sub_ps(zero, _mm256_mul_ps(two, v)));
                 _mm256_sub_ps(_mm256_div_ps(two, _mm256_add_ps(one, e)), one)
             }
             Op::Gelu => {
@@ -696,7 +931,7 @@ mod avx2 {
                     p = _mm256_fmadd_ps(p, t, _mm256_set1_ps(c));
                 }
                 let tail = _mm256_mul_ps(t, exp(_mm256_fnmadd_ps(z, z, p)));
-                let positive = _mm256_cmp_ps::<_CMP_GE_OQ>(v, _mm256_setzero_ps());
+                let positive = _mm256_cmp_ps::<_CMP_GE_OQ>(v, zero);
                 let erfc =
                     _mm256_blendv_ps(tail, _mm256_sub_ps(_mm256_set1_ps(2.0), tail), positive);
                 _mm256_mul_ps(_mm256_mul_ps(_mm256_set1_ps(0.5), v), erfc)
@@ -729,6 +964,30 @@ mod avx2 {
 mod neon {
     use super::{Op, ERFC, FRAC_1_SQRT_2, HIGH, LN2_HI, LN2_LO, LOG2E, LOW, POLY};
     use std::arch::aarch64::*;
+
+    pub unsafe fn max(values: &[f32]) -> f32 {
+        let (chunks, tail) = values.as_chunks::<4>();
+        let (fours, rest) = chunks.as_chunks::<4>();
+        let mut best = [vdupq_n_f32(f32::NEG_INFINITY); 4];
+        for four in fours {
+            for (best, chunk) in best.iter_mut().zip(four) {
+                let v = vld1q_f32(chunk.as_ptr());
+                *best = vbslq_f32(vcgtq_f32(v, *best), v, *best);
+            }
+        }
+        for chunk in rest {
+            let v = vld1q_f32(chunk.as_ptr());
+            best[0] = vbslq_f32(vcgtq_f32(v, best[0]), v, best[0]);
+        }
+        let b01 = vbslq_f32(vcgtq_f32(best[0], best[1]), best[0], best[1]);
+        let b23 = vbslq_f32(vcgtq_f32(best[2], best[3]), best[2], best[3]);
+        let all = vbslq_f32(vcgtq_f32(b01, b23), b01, b23);
+        let mut out = vmaxvq_f32(all);
+        for &v in tail {
+            out = out.max(v);
+        }
+        out
+    }
 
     pub unsafe fn apply(values: &mut [f32], op: Op) {
         // Four vectors at a time, step by step: one vector's steps form a
@@ -872,8 +1131,33 @@ mod neon {
                 }
             }
             Op::Gelu => {
+                let zero = vdupq_n_f32(0.0);
+                let two = vdupq_n_f32(2.0);
+                let mut z = [zero; 4];
+                let mut t = [zero; 4];
                 for i in 0..4 {
-                    out[i] = compute(v[i], op);
+                    z[i] = vmulq_n_f32(vabsq_f32(v[i]), FRAC_1_SQRT_2);
+                }
+                for i in 0..4 {
+                    t[i] = vdivq_f32(one, vfmaq_n_f32(one, z[i], 0.5));
+                }
+                let mut p = [zero; 4];
+                for c in ERFC {
+                    let cv = vdupq_n_f32(c);
+                    for i in 0..4 {
+                        p[i] = vfmaq_f32(cv, p[i], t[i]);
+                    }
+                }
+                let mut arg = [zero; 4];
+                for i in 0..4 {
+                    arg[i] = vfmsq_f32(p[i], z[i], z[i]);
+                }
+                let e = exp4(arg);
+                for i in 0..4 {
+                    let tail = vmulq_f32(t[i], e[i]);
+                    let positive = vcgeq_f32(v[i], zero);
+                    let erfc = vbslq_f32(positive, vsubq_f32(two, tail), tail);
+                    out[i] = vmulq_f32(vmulq_n_f32(v[i], 0.5), erfc);
                 }
             }
         }
@@ -946,5 +1230,127 @@ mod neon {
         let y = vfmaq_f32(vaddq_f32(r, vdupq_n_f32(1.0)), p, vmulq_f32(r, r));
         let two_n = vshlq_n_s32::<23>(vaddq_s32(n_int, vdupq_n_s32(127)));
         vmulq_f32(y, vreinterpretq_f32_s32(two_n))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lcg(state: &mut u64) -> f32 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let bits = ((*state >> 40) as u32) as f32 / ((1u32 << 24) as f32);
+        bits * 2.0 - 1.0
+    }
+
+    #[test]
+    fn elementwise_ops_match_scalar_and_handle_extremes() {
+        let mut seed = 0x3141_5926_5358_9793u64;
+        let ops = [Op::Exp, Op::Silu, Op::Sigmoid, Op::Tanh, Op::Gelu];
+        for &len in &[0usize, 1, 3, 7, 8, 9, 15, 16, 17, 31, 63, 64, 65, 131] {
+            let src: Vec<f32> = (0..len).map(|_| lcg(&mut seed) * 10.0).collect();
+            for op in ops {
+                let mut got = src.clone();
+                apply(&mut got, op);
+                for (i, (&x, &g)) in src.iter().zip(&got).enumerate() {
+                    let w = scalar(x, op);
+                    let tol = 1e-6 + 1e-5 * w.abs();
+                    assert!(
+                        g.is_finite() && (g - w).abs() <= tol,
+                        "len={len} at {i} x={x}: got={g} want={w}"
+                    );
+                }
+            }
+        }
+        // Special floats in exp clamp to [LOW, HIGH] (NaN -> LOW) identically across paths.
+        let specials = [
+            -100.0,
+            LOW,
+            -1.0,
+            -0.0,
+            0.0,
+            1.0,
+            HIGH,
+            100.0,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::NAN,
+            -50.0,
+            50.0,
+            -0.5,
+            0.5,
+            2.0,
+            f32::NAN,
+        ];
+        let mut got = specials.to_vec();
+        exp(&mut got);
+        for (i, (&x, &g)) in specials.iter().zip(&got).enumerate() {
+            let w = exp_scalar(x);
+            let tol = 1e-6 + 1e-5 * w.abs();
+            assert!(
+                g.is_finite() && (g - w).abs() <= tol,
+                "special exp at {i} x={x}: got={g} want={w}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_exp_sum_and_exp_sums_match_scalar() {
+        assert_eq!(max(&[]), f32::NEG_INFINITY);
+        assert_eq!(max(&[f32::NAN; 19]), f32::NEG_INFINITY);
+
+        let mut seed = 0x2718_2818_2845_9045u64;
+        for &len in &[1usize, 7, 15, 16, 17, 33, 64, 65, 70, 131] {
+            let mut v: Vec<f32> = (0..len).map(|_| lcg(&mut seed) * 12.0).collect();
+            if len > 4 {
+                v[len / 3] = f32::NAN;
+                v[len - 1] = f32::NAN;
+            }
+            let want_max = v.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            assert_eq!(max(&v), want_max, "max mismatch len={len}");
+
+            let finite: Vec<f32> = (0..len).map(|_| lcg(&mut seed) * 6.0).collect();
+            let shift = max(&finite);
+            let got_sum = exp_sum(&finite, shift);
+            let want_sum = scalar_exp_sum(&finite, shift);
+            assert!(
+                (got_sum - want_sum).abs() <= 1e-5 * want_sum.abs() + 1e-6,
+                "exp_sum len={len}: got={got_sum} want={want_sum}"
+            );
+        }
+
+        for &rows in &[1usize, 3, 7, 8, 9, 17] {
+            for &width in &[0usize, 1, 7, 15, 16, 17, 33, 65] {
+                let mut got_rows: Vec<f32> =
+                    (0..rows * width).map(|_| lcg(&mut seed) * 5.0).collect();
+                let mut want_rows = got_rows.clone();
+                let shifts: Vec<f32> = (0..rows).map(|_| lcg(&mut seed) * 2.0).collect();
+                let mut got_sums: Vec<f32> = (0..rows).map(|_| lcg(&mut seed).abs()).collect();
+                let mut want_sums = got_sums.clone();
+
+                exp_sums(&mut got_rows, width, &shifts, &mut got_sums);
+                for r in 0..rows {
+                    let row = &mut want_rows[r * width..(r + 1) * width];
+                    for v in row.iter_mut() {
+                        *v = exp_scalar(*v - shifts[r]);
+                        want_sums[r] += *v;
+                    }
+                }
+                for (i, (&g, &w)) in got_rows.iter().zip(&want_rows).enumerate() {
+                    assert!(
+                        (g - w).abs() <= 1e-5 * w.abs() + 1e-6,
+                        "exp_sums rows={rows} width={width} val at {i}: got={g} want={w}"
+                    );
+                }
+                for (r, (&g, &w)) in got_sums.iter().zip(&want_sums).enumerate() {
+                    assert!(
+                        (g - w).abs() <= 1e-4 * w.abs() + 1e-5,
+                        "exp_sums rows={rows} width={width} sum[{r}]: got={g} want={w}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -1,0 +1,7 @@
+{
+  "fixed_team_threads": 16,
+  "whisper_stem_peak_buf_bytes": 11520000,
+  "whisper_stem_conv_columns_tasks": 64,
+  "whisper_stem_output_len": 576000,
+  "whisper_stem_output_hash": "7c7f04de5b8ebc45"
+}

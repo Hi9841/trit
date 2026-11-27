@@ -60,6 +60,16 @@ pub fn kernel_bench(args: &[String]) -> Vec<String> {
     cpu::v2::bench::run(args)
 }
 
+/// Deterministic Whisper-tiny stem counters for `examples/perf_budget.rs`:
+/// `(peak_live_buf_bytes, conv_columns_tasks, output_len, output_hash)`.
+/// Resets process-wide profiling counters and requires an idle process with no
+/// concurrent inference or probes.
+#[cfg(feature = "profile")]
+#[doc(hidden)]
+pub fn perf_budget_probe() -> Result<(u64, u64, usize, u64), String> {
+    models::parts::audio_encoder::Encoder::whisper_stem_budget_probe()
+}
+
 /// Where the engine writes what a call cannot return: a GPU failure and the
 /// change to the CPU, and the GPU profile.
 type Log = std::sync::Arc<dyn Fn(&str) + Send + Sync>;

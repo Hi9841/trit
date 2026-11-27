@@ -64,6 +64,11 @@ jobs:
         # The skill and the site's catalog are generated; the model table of
         # the reference is written by hand and checked against the catalog.
         run: target/release/trit.exe skill --check skill/SKILL.md --check-docs docs/reference.md --check-catalog site/catalog.json
+      - name: Perf budget
+        shell: bash
+        # Deterministic Whisper stem work counters (peak live pool scratch bytes
+        # and conv_columns task count) with fixed 16-thread homogeneous team.
+        run: TRIT_PROFILE_FIXED_TEAM=1 TRIT_DEVICE=cpu TRIT_ISA=scalar cargo run --locked --release -p trit --features profile --example perf_budget -- bench/perf-budget.json
       - name: Python binding
         shell: bash
         run: |
@@ -146,6 +151,8 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Kernel paths
         run: target/release/trit
+      - name: Perf budget
+        run: TRIT_PROFILE_FIXED_TEAM=1 TRIT_DEVICE=cpu TRIT_ISA=scalar cargo run --locked --release -p trit --features profile --example perf_budget -- bench/perf-budget.json
       - name: Clips
         # espeak-ng writes 22.05 kHz; Trit takes 16 kHz.
         run: |

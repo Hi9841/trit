@@ -151,6 +151,19 @@ struct Topology {
 /// affinity mask on Windows, Linux, and Android, and enumerates non-Efficiency
 /// performance tiers on macOS (including Apple M5 Pro/Max Super + Performance).
 fn team_config(spread: Spread) -> team::Config {
+    #[cfg(feature = "profile")]
+    if std::env::var("TRIT_PROFILE_FIXED_TEAM").as_deref() == Ok("1") {
+        let _ = spread;
+        return team::Config {
+            threads: 16,
+            domain: 0,
+            domains: Vec::new(),
+            heterogeneous: false,
+            core_cpus: Vec::new(),
+            pin_cpus: Vec::new(),
+            pin_group: None,
+        };
+    }
     let layout = topology();
     #[cfg(target_os = "android")]
     let android_fast = fast_cores(std::path::Path::new("/sys/devices/system/cpu"));
