@@ -9,7 +9,7 @@ Whisper for Whisper; Transformers and sherpa-onnx for Moonshine;
 Transformers and llama.cpp for S1-mini.
 
 The same page with charts: [engine-comparison.html](engine-comparison.html).
-Measured on 2026-10-21 on an AMD Ryzen 9 7950X3D (16 cores), 32 GB RAM, and
+Measured on 2026-11-27 (Trit) and 2026-10-21 (other runtimes) on an AMD Ryzen 9 7950X3D (16 cores), 32 GB RAM, and
 Windows 11, CPU only. Raw results:
 [bench/runtimes-results.jsonl](../bench/runtimes-results.jsonl)
 and [bench/cleanup-results.jsonl](../bench/cleanup-results.jsonl).
@@ -23,13 +23,13 @@ runtime's best setting. Lower is better; the lowest is bold.
 <!-- summary:start -->
 | Model | Trit (default) | Other runtimes (best setting each) | Trit time per clip | Fastest other |
 |---|---:|---|---:|---:|
-| Parakeet Redux 0.6B, 1.58-bit (TDT's model) | **293** | Transformers, weights expanded 299, Photon (Kestrel, PyTorch) 300 | 36 ms | 162 ms (Photon (Kestrel, PyTorch)) |
-| Parakeet TDT 0.6B v3 | **207** | ONNX Runtime 208, Transformers 211, sherpa-onnx 293 | 39 ms | 130 ms (ONNX Runtime) |
-| Whisper base.en | **468** | Transformers 479, whisper.cpp 505, faster-whisper (CTranslate2) 531, OpenAI Whisper 555 | 117 ms | 199 ms (whisper.cpp) |
-| Whisper tiny | **760** | Transformers 772, faster-whisper (CTranslate2) 791, OpenAI Whisper 800, whisper.cpp 822 | 67 ms | 109 ms (whisper.cpp) |
-| Moonshine tiny | **557** | Transformers **557**, sherpa-onnx 635 | 37 ms | 97 ms (sherpa-onnx) |
-| Moonshine base | **415** | Transformers 416, sherpa-onnx 479 | 62 ms | 134 ms (sherpa-onnx) |
-| S1-mini (formatted words, 62 cases) | **42** | Transformers fp32 43, llama.cpp f16 GGUF 43, llama.cpp q4_k_m GGUF 44 | 203 ms | 148 ms (llama.cpp q4_k_m GGUF) |
+| Parakeet Redux 0.6B, 1.58-bit (TDT's model) | **293** | Transformers, weights expanded 299, Photon (Kestrel, PyTorch) 300 | 34 ms | 162 ms (Photon (Kestrel, PyTorch)) |
+| Parakeet TDT 0.6B v3 | **207** | ONNX Runtime 208, Transformers 211, sherpa-onnx 293 | 38 ms | 130 ms (ONNX Runtime) |
+| Whisper base.en | **468** | Transformers 479, whisper.cpp 505, faster-whisper (CTranslate2) 531, OpenAI Whisper 555 | 71 ms | 199 ms (whisper.cpp) |
+| Whisper tiny | **760** | Transformers 772, faster-whisper (CTranslate2) 791, OpenAI Whisper 800, whisper.cpp 822 | 44 ms | 109 ms (whisper.cpp) |
+| Moonshine tiny | **557** | Transformers **557**, sherpa-onnx 635 | 21 ms | 97 ms (sherpa-onnx) |
+| Moonshine base | **415** | Transformers 416, sherpa-onnx 479 | 44 ms | 134 ms (sherpa-onnx) |
+| S1-mini (formatted words, 62 cases) | **42** | Transformers fp32 43, llama.cpp f16 GGUF 43, llama.cpp q4_k_m GGUF 44 | 124 ms | 148 ms (llama.cpp q4_k_m GGUF) |
 <!-- summary:end -->
 
 1. Trit's default has the fewest errors over all clips, or ties, for every
@@ -53,12 +53,12 @@ after another in one session.
 <!-- cleanup:start -->
 | Runtime | Precision | Formatted WER | Exact sentences | Median per case |
 |---|---|---:|---:|---:|
+| **Trit** | auto (int8) | 4.70 % (42 / 894) | 37 / 62 | 124 ms (122–125) |
+| **Trit** | int8 | 4.70 % (42 / 894) | 37 / 62 | 129 ms (129–131) |
 | llama.cpp | q4_k_m GGUF | 4.92 % (44 / 894) | 38 / 62 | 148 ms |
-| **Trit** | int8 | 4.70 % (42 / 894) | 37 / 62 | 198 ms |
-| **Trit** | auto (int8) | 4.70 % (42 / 894) | 37 / 62 | 203 ms |
+| **Trit** | f16 | 4.81 % (43 / 894) | 36 / 62 | 243 ms (232–254) |
 | llama.cpp | f16 GGUF | 4.81 % (43 / 894) | 36 / 62 | 362 ms |
-| **Trit** | f16 | 4.81 % (43 / 894) | 36 / 62 | 402 ms |
-| **Trit** | f32 | 4.81 % (43 / 894) | 36 / 62 | 735 ms |
+| **Trit** | f32 | 4.81 % (43 / 894) | 36 / 62 | 401 ms (400–440) |
 | Transformers (PyTorch) | fp32 | 4.81 % (43 / 894) | 36 / 62 | 1591 ms |
 <!-- cleanup:end -->
 
@@ -75,10 +75,10 @@ Trit is called through its Python binding with `language="en"`.
 
 | Runtime | Precision | Median per clip | Speed | Clean WER | Other WER | Dev terms WER | Memory after load | Memory after all clips |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| **Trit** | f32, CPU | 35 ms | 160x | 2.02 % | 4.51 % | 7.19 % | 357 MB | 737 MB |
-| **Trit** | f16, CPU | 35 ms | 160x | 2.02 % | 4.51 % | 7.19 % | 358 MB | 726 MB |
-| **Trit** | int8, CPU | 35 ms | 158x | 2.02 % | 4.51 % | 7.19 % | 358 MB | 735 MB |
-| **Trit** | auto (ternary + f16), CPU | 36 ms | 158x | 2.02 % | 4.51 % | 7.19 % | 357 MB | 627 MB |
+| **Trit** | f16, CPU | 32 ms (30–49) | 173x | 2.02 % | 4.51 % | 7.19 % | 346 MB | 521 MB |
+| **Trit** | auto (ternary + f16), CPU | 34 ms (33–52) | 169x | 2.02 % | 4.51 % | 7.19 % | 360 MB | 534 MB |
+| **Trit** | int8, CPU | 35 ms (30–46) | 160x | 2.05 % | 4.59 % | 6.98 % | 349 MB | 608 MB |
+| **Trit** | f32, CPU | 36 ms (36–53) | 154x | 2.02 % | 4.51 % | 7.19 % | 394 MB | 566 MB |
 | Photon (Kestrel, PyTorch) | dense fallback, CPU | 162 ms | 37x | 2.07 % | 4.64 % | 7.19 % | 2,357 MB | 2,960 MB |
 | Transformers (PyTorch), weights expanded | fp32, CPU | 331 ms | 19x | 2.05 % | 4.64 % | 7.19 % | 5,390 MB | 5,796 MB |
 
@@ -86,11 +86,11 @@ Trit is called through its Python binding with `language="en"`.
 
 | Runtime | Precision | Median per clip | Speed | Clean WER | Other WER | Dev terms WER | Memory after load | Memory after all clips |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| **Trit** | auto (int8), CPU | 39 ms | 146x | 1.45 % | 3.25 % | 4.23 % | 822 MB | 1,187 MB |
-| **Trit** | int8, CPU | 39 ms | 146x | 1.45 % | 3.25 % | 4.23 % | 825 MB | 1,222 MB |
+| **Trit** | auto (int8), CPU | 38 ms (36–40) | 144x | 1.45 % | 3.25 % | 4.23 % | 831 MB | 1,010 MB |
+| **Trit** | int8, CPU | 38 ms (33–46) | 148x | 1.50 % | 3.36 % | 4.23 % | 811 MB | 1,070 MB |
+| **Trit** | f16, CPU | 121 ms (106–143) | 48x | 1.50 % | 3.33 % | 4.23 % | 1,346 MB | 1,525 MB |
 | ONNX Runtime | int8, CPU | 130 ms | 47x | 1.75 % | 4.59 % | 5.71 % | 774 MB | 1,151 MB |
-| **Trit** | f16, CPU | 131 ms | 44x | 1.50 % | 3.33 % | 4.23 % | 1,372 MB | 1,711 MB |
-| **Trit** | f32, CPU | 144 ms | 40x | 1.50 % | 3.33 % | 4.23 % | 2,502 MB | 2,822 MB |
+| **Trit** | f32, CPU | 151 ms (140–250) | 40x | 1.50 % | 3.33 % | 4.23 % | 2,531 MB | 2,711 MB |
 | ONNX Runtime | fp32, CPU | 163 ms | 36x | 1.50 % | 3.22 % | 4.23 % | 2,265 MB | 2,820 MB |
 | sherpa-onnx | int8, CPU | 194 ms | 31x | 1.67 % | 4.80 % | 6.98 % | 741 MB | 1,110 MB |
 | Transformers (PyTorch) | fp32, CPU | 300 ms | 20x | 1.50 % | 3.30 % | 4.23 % | 3,150 MB | 3,750 MB |
@@ -99,11 +99,11 @@ Trit is called through its Python binding with `language="en"`.
 
 | Runtime | Precision | Median per clip | Speed | Clean WER | Other WER | Dev terms WER | Memory after load | Memory after all clips |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| **Trit** | auto (f16), greedy, CPU | 88 ms | 78x | 3.47 % | 8.99 % | 6.55 % | 175 MB | 268 MB |
-| **Trit** | int8, beam 5, CPU | 108 ms | 60x | 3.17 % | 8.07 % | 7.19 % | 153 MB | 271 MB |
-| **Trit** | auto (f16), beam 5, CPU | 117 ms | 56x | 3.09 % | 7.89 % | 7.19 % | 169 MB | 293 MB |
-| **Trit** | f16, beam 5, CPU | 162 ms | 40x | 3.17 % | 8.18 % | 6.55 % | 201 MB | 321 MB |
-| **Trit** | f32, beam 5, CPU | 193 ms | 34x | 3.17 % | 8.18 % | 6.55 % | 338 MB | 449 MB |
+| **Trit** | int8, beam 5, CPU | 67 ms (66–78) | 100x | 3.17 % | 8.07 % | 7.19 % | 158 MB | 260 MB |
+| **Trit** | auto (f16), beam 5, CPU | 71 ms (68–92) | 94x | 3.09 % | 7.89 % | 7.19 % | 181 MB | 279 MB |
+| **Trit** | auto (f16), greedy, CPU | 75 ms (73–77) | 90x | 3.47 % | 8.99 % | 6.55 % | 176 MB | 266 MB |
+| **Trit** | f16, beam 5, CPU | 105 ms (100–143) | 64x | 3.17 % | 8.18 % | 6.55 % | 205 MB | 295 MB |
+| **Trit** | f32, beam 5, CPU | 173 ms (140–182) | 38x | 3.17 % | 8.18 % | 6.55 % | 340 MB | 431 MB |
 | whisper.cpp | f16, greedy, CPU | 199 ms | 35x | 3.34 % | 9.12 % | 6.55 % | 265 MB | 364 MB |
 | whisper.cpp | f16, beam 5, CPU | 265 ms | 25x | 3.32 % | 8.75 % | 6.13 % | 266 MB | 395 MB |
 | faster-whisper (CTranslate2) | int8, greedy, CPU | 306 ms | 23x | 3.69 % | 9.86 % | 6.34 % | 172 MB | 194 MB |
@@ -117,11 +117,11 @@ Trit is called through its Python binding with `language="en"`.
 
 | Runtime | Precision | Median per clip | Speed | Clean WER | Other WER | Dev terms WER | Memory after load | Memory after all clips |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| **Trit** | auto (f16), greedy, CPU | 48 ms | 144x | 6.76 % | 14.89 % | 10.15 % | 123 MB | 213 MB |
-| **Trit** | int8, beam 5, CPU | 66 ms | 98x | 5.84 % | 12.69 % | 7.61 % | 103 MB | 208 MB |
-| **Trit** | auto (f16), beam 5, CPU | 67 ms | 96x | 5.76 % | 12.77 % | 7.61 % | 122 MB | 229 MB |
-| **Trit** | f16, beam 5, CPU | 82 ms | 78x | 5.94 % | 12.79 % | 7.61 % | 132 MB | 228 MB |
-| **Trit** | f32, beam 5, CPU | 99 ms | 65x | 5.94 % | 12.79 % | 7.61 % | 204 MB | 298 MB |
+| **Trit** | auto (f16), greedy, CPU | 32 ms (29–50) | 215x | 6.76 % | 14.89 % | 10.15 % | 126 MB | 185 MB |
+| **Trit** | int8, beam 5, CPU | 38 ms (32–53) | 176x | 5.84 % | 12.69 % | 7.61 % | 108 MB | 181 MB |
+| **Trit** | auto (f16), beam 5, CPU | 44 ms (40–45) | 149x | 5.76 % | 12.77 % | 7.61 % | 124 MB | 219 MB |
+| **Trit** | f16, beam 5, CPU | 57 ms (44–69) | 118x | 5.94 % | 12.79 % | 7.61 % | 137 MB | 208 MB |
+| **Trit** | f32, beam 5, CPU | 67 ms (63–98) | 99x | 5.94 % | 12.79 % | 7.61 % | 207 MB | 270 MB |
 | whisper.cpp | f16, greedy, CPU | 109 ms | 64x | 7.03 % | 15.07 % | 9.51 % | 185 MB | 256 MB |
 | faster-whisper (CTranslate2) | int8, greedy, CPU | 162 ms | 43x | 6.98 % | 15.44 % | 8.46 % | 137 MB | 156 MB |
 | whisper.cpp | f16, beam 5, CPU | 169 ms | 39x | 6.29 % | 13.63 % | 8.67 % | 186 MB | 282 MB |
@@ -135,11 +135,11 @@ Trit is called through its Python binding with `language="en"`.
 
 | Runtime | Precision | Median per clip | Speed | Clean WER | Other WER | Dev terms WER | Memory after load | Memory after all clips |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| **Trit** | auto (f16), greedy, CPU | 17 ms | 322x | 4.04 % | 11.17 % | 11.84 % | 113 MB | 219 MB |
-| **Trit** | int8, beam 5, CPU | 34 ms | 164x | 3.37 % | 10.09 % | 8.03 % | 99 MB | 210 MB |
-| **Trit** | f16, beam 5, CPU | 36 ms | 154x | 3.32 % | 9.80 % | 8.46 % | 113 MB | 239 MB |
-| **Trit** | auto (f16), beam 5, CPU | 37 ms | 152x | 3.32 % | 9.80 % | 8.46 % | 113 MB | 239 MB |
-| **Trit** | f32, beam 5, CPU | 37 ms | 145x | 3.32 % | 9.80 % | 8.46 % | 167 MB | 289 MB |
+| **Trit** | auto (f16), greedy, CPU | 14 ms (14–17) | 385x | 4.04 % | 11.17 % | 11.84 % | 112 MB | 178 MB |
+| **Trit** | auto (f16), beam 5, CPU | 21 ms (21–31) | 265x | 3.32 % | 9.80 % | 8.46 % | 112 MB | 209 MB |
+| **Trit** | int8, beam 5, CPU | 22 ms (20–35) | 254x | 3.37 % | 10.09 % | 8.03 % | 103 MB | 204 MB |
+| **Trit** | f16, beam 5, CPU | 25 ms (18–33) | 223x | 3.32 % | 9.80 % | 8.46 % | 112 MB | 219 MB |
+| **Trit** | f32, beam 5, CPU | 31 ms (24–55) | 174x | 3.32 % | 9.80 % | 8.46 % | 167 MB | 272 MB |
 | sherpa-onnx | int8, greedy (no beam search), CPU | 97 ms | 63x | 3.67 % | 11.30 % | 9.94 % | 197 MB | 564 MB |
 | Transformers (PyTorch) | fp32, greedy, CPU | 174 ms | 34x | 4.04 % | 11.17 % | 11.84 % | 714 MB | 994 MB |
 | Transformers (PyTorch) | fp32, beam 5, CPU | 216 ms | 25x | 3.32 % | 9.80 % | 8.46 % | 714 MB | 1,085 MB |
@@ -148,11 +148,11 @@ Trit is called through its Python binding with `language="en"`.
 
 | Runtime | Precision | Median per clip | Speed | Clean WER | Other WER | Dev terms WER | Memory after load | Memory after all clips |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| **Trit** | auto (f16), greedy, CPU | 32 ms | 171x | 2.82 % | 8.39 % | 6.98 % | 173 MB | 286 MB |
-| **Trit** | int8, beam 5, CPU | 58 ms | 94x | 2.57 % | 7.13 % | 6.77 % | 137 MB | 278 MB |
-| **Trit** | auto (f16), beam 5, CPU | 62 ms | 88x | 2.62 % | 7.18 % | 6.77 % | 173 MB | 271 MB |
-| **Trit** | f16, beam 5, CPU | 75 ms | 71x | 2.62 % | 7.18 % | 6.77 % | 181 MB | 280 MB |
-| **Trit** | f32, beam 5, CPU | 89 ms | 60x | 2.62 % | 7.18 % | 6.77 % | 296 MB | 379 MB |
+| **Trit** | auto (f16), greedy, CPU | 38 ms (35–39) | 138x | 2.82 % | 8.39 % | 6.98 % | 172 MB | 226 MB |
+| **Trit** | int8, beam 5, CPU | 42 ms (40–43) | 127x | 2.57 % | 7.13 % | 6.77 % | 136 MB | 223 MB |
+| **Trit** | f16, beam 5, CPU | 44 ms (43–49) | 128x | 2.62 % | 7.18 % | 6.77 % | 182 MB | 324 MB |
+| **Trit** | auto (f16), beam 5, CPU | 44 ms (39–60) | 127x | 2.62 % | 7.18 % | 6.77 % | 172 MB | 327 MB |
+| **Trit** | f32, beam 5, CPU | 80 ms (70–91) | 72x | 2.62 % | 7.18 % | 6.77 % | 296 MB | 367 MB |
 | sherpa-onnx | int8, greedy (no beam search), CPU | 134 ms | 44x | 3.14 % | 8.20 % | 6.77 % | 316 MB | 755 MB |
 | Transformers (PyTorch) | fp32, greedy, CPU | 287 ms | 20x | 2.84 % | 8.47 % | 7.40 % | 849 MB | 1,144 MB |
 | Transformers (PyTorch) | fp32, beam 5, CPU | 426 ms | 11x | 2.64 % | 7.18 % | 6.77 % | 847 MB | 1,363 MB |
@@ -222,8 +222,6 @@ Trit is called through its Python binding with `language="en"`.
    recordings at pauses itself.
 4. **Whisper encodes a full 30 s window**, so a short clip costs as much as
    a long one.
-5. **S1-mini cleanup:** llama.cpp with q4_k_m weights is faster (148 ms
-   against 203 ms per case) at one more error on the 62 cases.
 
 ## 6. Reproduce
 

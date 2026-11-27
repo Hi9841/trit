@@ -68,11 +68,11 @@ The other models, the GPU, text to speech, and the full results are in the
 
 | Model | Size | Word error rate | Time per clip | Use it for |
 |---|---:|---:|---:|---|
-| `parakeet-redux` | 178 MB | 3.37 % | 36 ms | The default: small, fast, accurate. TDT uses it. |
+| `parakeet-redux` | 178 MB | 3.37 % | 34 ms | The default: small, fast, accurate. TDT uses it. |
 | `parakeet-unified-en-0.6b-q8_0` | 731 MB | **2.05 %** | 50 ms | The fewest errors, in English. A Q8_0 GGUF file. |
-| `parakeet-tdt-0.6b-v3` | 2.5 GB | 2.38 % | 39 ms | The fewest errors in 25 European languages. |
-| `moonshine-tiny` | 108 MB | 6.41 % | 37 ms | The smallest English model. |
-| `whisper-tiny` | 151 MB | 8.75 % | 67 ms | 99 languages in a small model. |
+| `parakeet-tdt-0.6b-v3` | 2.5 GB | 2.38 % | 38 ms | The fewest errors in 25 European languages. |
+| `moonshine-tiny` | 108 MB | 6.41 % | 21 ms | The smallest English model. |
+| `whisper-tiny` | 151 MB | 8.75 % | 44 ms | 99 languages in a small model. |
 
 ## License
 

@@ -75,12 +75,12 @@ settings. Full results: [docs/engine-comparison.md](engine-comparison.md).
 
 | Model | Size | Word error rate | Time per clip | Memory | Use it for |
 |---|---:|---:|---:|---:|---|
-| `parakeet-redux` | 178 MB | 3.37 % | 36 ms | 627 MB | The default: small, fast, accurate. TDT uses it. |
-| `parakeet-tdt-0.6b-v3` | 2.5 GB | **2.38 %** | 39 ms | 1187 MB | The fewest errors. 25 European languages. |
-| `moonshine-tiny` | 108 MB | 6.41 % | 37 ms | 239 MB | The smallest English model. |
-| `moonshine-base` | 246 MB | 4.78 % | 62 ms | 271 MB | Small English model, fewer errors than tiny. |
-| `whisper-tiny` | 151 MB | 8.75 % | 67 ms | 229 MB | 99 languages in a small model. |
-| `whisper-base.en` | 290 MB | 5.39 % | 117 ms | 293 MB | Whisper for English. |
+| `parakeet-redux` | 178 MB | 3.37 % | 34 ms | 534 MB | The default: small, fast, accurate. TDT uses it. |
+| `parakeet-tdt-0.6b-v3` | 2.5 GB | **2.38 %** | 38 ms | 1010 MB | The fewest errors. 25 European languages. |
+| `moonshine-tiny` | 108 MB | 6.41 % | 21 ms | 209 MB | The smallest English model. |
+| `moonshine-base` | 246 MB | 4.78 % | 44 ms | 327 MB | Small English model, fewer errors than tiny. |
+| `whisper-tiny` | 151 MB | 8.75 % | 44 ms | 219 MB | 99 languages in a small model. |
+| `whisper-base.en` | 290 MB | 5.39 % | 71 ms | 279 MB | Whisper for English. |
 
 Time per clip is the median on LibriSpeech test-clean (clips of 2 to 35 s).
 Memory is the working set after all clips.
@@ -749,10 +749,10 @@ Threads:
   others wait, and a parked thread gets its cores back when it wakes. The
   team reads the set from the calling thread: a caller that pins itself to
   fewer cores gets fewer threads.
-- macOS: one thread per performance core (`hw.perflevel0.physicalcpu`).
-  macOS has no affinity masks, so each team thread runs at the
-  user-interactive QoS class, and macOS keeps it on a performance core. A
-  team with a thread on an efficiency core runs at the speed of that core.
+- macOS: one thread per core in the fastest tier and in each additional
+  tier that macOS identifies by a name other than `Efficiency`. Trit
+  requests user-interactive QoS for team threads. On Intel Macs without
+  performance tiers, Trit uses the physical core count.
 
 macOS: build on the Mac with `cargo build --release --workspace` (Apple
 Silicon or Intel); Trit needs no other tool. The GPU path uses Metal (see
@@ -839,10 +839,10 @@ Parakeet Redux. Other models run on the GPU and gain little; a decoder step
   Redux when its speech head finds no 0.1 s of speech. Whisper and Moonshine
   skip a window under -60 dBFS, and Whisper drops a window that the model
   rates as no speech.
-- **Threads:** Parakeet and S1-mini use one pinned worker per physical core
-  of the largest L3 domain; Whisper and the voice use every physical core. Workers spin
-  for 3 ms after a step, then sleep, so an idle engine uses no CPU. `TRIT_THREADS` sets the
-  count.
+- **Threads:** Parakeet uses one pinned worker per physical core of the
+  largest L3 domain where the OS provides L3 affinity. Whisper, S1-mini,
+  and the voice use the full team for the OS. Workers spin for 3 ms after
+  a step, then sleep. `TRIT_THREADS` sets the count.
 - **CPU:** x86-64 with AVX-512 or AVX2 (with F16C) is fast; int8 also uses
   AVX-VNNI. arm64 runs NEON, and uses `sdot` and `smmla` when the CPU has
   them. The scalar path gives the same text and is much slower. x86-64

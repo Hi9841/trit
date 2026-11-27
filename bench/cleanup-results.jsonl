@@ -28,3 +28,15 @@
 {"engine": "hf", "runtime": "Transformers (PyTorch)", "precision": "fp32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 1590.9, "date": "2026-10-22"}
 {"engine": "llamacpp-f16", "runtime": "llama.cpp", "precision": "f16 GGUF", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 361.9, "date": "2026-10-22"}
 {"engine": "llamacpp-q4", "runtime": "llama.cpp", "precision": "q4_k_m GGUF", "cases": 62, "wer": 4.92, "errors": 44, "words": 894, "exact": 38, "median_ms": 147.8, "date": "2026-10-22"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 125.0, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit-int8", "runtime": "Trit", "precision": "int8", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 131.0, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit-f16", "runtime": "Trit", "precision": "f16", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 253.5, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit-f32", "runtime": "Trit", "precision": "f32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 440.1, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit-int8", "runtime": "Trit", "precision": "int8", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 128.8, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit-f16", "runtime": "Trit", "precision": "f16", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 231.6, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit-f32", "runtime": "Trit", "precision": "f32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 400.7, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 122.0, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit-f16", "runtime": "Trit", "precision": "f16", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 243.1, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit-f32", "runtime": "Trit", "precision": "f32", "cases": 62, "wer": 4.81, "errors": 43, "words": 894, "exact": 36, "median_ms": 400.4, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit", "runtime": "Trit", "precision": "auto (int8)", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 123.9, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
+{"engine": "trit-int8", "runtime": "Trit", "precision": "int8", "cases": 62, "wer": 4.7, "errors": 42, "words": 894, "exact": 37, "median_ms": 129.3, "date": "2026-11-27", "campaign": "2026-11-27T19:20"}
